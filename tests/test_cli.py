@@ -38,6 +38,12 @@ def test_config_show_paths_reports_absent_user_config() -> None:
     assert "absent" in result.stdout
 
 
+def test_config_show_paths_points_at_the_real_defaults_file() -> None:
+    """Every row must name a path you can actually open -- the point of --paths."""
+    result = runner.invoke(app, ["config", "show", "--paths"])
+    assert "defaults.toml" in result.stdout.replace("\n", "")
+
+
 def test_harness_list_shows_registered_adapters() -> None:
     result = runner.invoke(app, ["harness", "list"])
     assert result.exit_code == 0

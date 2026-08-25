@@ -14,7 +14,7 @@ from rich.table import Table
 
 from cosmo import __version__
 from cosmo.checks import CheckResult, CheckStatus
-from cosmo.config import CosmoConfig, load_config, user_config_path
+from cosmo.config import DEFAULTS_PATH, CosmoConfig, load_config, user_config_path
 from cosmo.doctor import core_checks
 from cosmo.harness import (
     UnknownHarnessError,
@@ -102,9 +102,8 @@ def config_show(
         table = Table(title="paths", title_justify="left")
         table.add_column("what", style="bold")
         table.add_column("where")
-        shipped = "shipped defaults"
         user = user_config_path()
-        table.add_row("defaults", shipped)
+        table.add_row("defaults", str(DEFAULTS_PATH))
         table.add_row("user config", f"{user} {'(present)' if user.is_file() else '(absent)'}")
         table.add_row("data dir", str(cfg.paths.data_dir))
         table.add_row("work dir", str(cfg.paths.work_dir))
