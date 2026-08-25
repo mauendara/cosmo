@@ -69,6 +69,30 @@ def test_argv_carries_max_turns_and_permission_mode_from_config(tmp_path: Path) 
     assert argv[argv.index("--output-format") + 1] == "stream-json"
 
 
+def test_argv_restricts_setting_sources_to_project_only(tmp_path: Path) -> None:
+    """Regression pin for the Phase 3 finding: a headless run must not
+    inherit the operator's global ~/.claude hooks/plugins. Verified against
+    the real CLI by hand (Phase 4 state doc) -- this only pins the flag's
+    presence in the constructed argv."""
+    adapter = _adapter(tmp_path)
+    argv = adapter._build_argv("hello")  # noqa: SLF001
+
+    assert "--setting-sources" in argv
+    assert argv[argv.index("--setting-sources") + 1] == "project"
+
+
+def test_env_carries_task_id_and_db_path_for_the_guardrail_hooks(tmp_path: Path) -> None:
+    """The test-path guard hook (templates/harness/claude/hooks/
+    test_path_guard.py) is a separate OS process with no other way to ask
+    Cosmo's state -- it reads these two env vars to look up
+    task_queue.allow_test_edits read-only."""
+    adapter = _adapter(tmp_path)
+    env = adapter._build_env("task-42")  # noqa: SLF001
+
+    assert env["COSMO_TASK_ID"] == "task-42"
+    assert env["COSMO_DB_PATH"] == str(adapter.config.paths.db_path)
+
+
 def test_env_scrubs_anthropic_api_key_even_when_set_in_the_parent_process(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -15,6 +15,13 @@ from rich.console import Console
 from rich.table import Table
 
 from cosmo import __version__
+from cosmo.bootstrap import (
+    NotAGitRepoError,
+    OpenSpecInitError,
+    TemplatesRootNotFoundError,
+    list_templates,
+    run_init,
+)
 from cosmo.checks import CheckResult, CheckStatus
 from cosmo.config import DEFAULTS_PATH, CosmoConfig, load_config, user_config_path
 from cosmo.doctor import core_checks
@@ -48,11 +55,15 @@ harness_app = typer.Typer(name="harness", help="Inspect harness adapters.", no_a
 queue_app = typer.Typer(name="queue", help="Manage the task queue.", no_args_is_help=True)
 events_app = typer.Typer(name="events", help="Inspect the event log.", no_args_is_help=True)
 project_app = typer.Typer(name="project", help="Manage registered projects.", no_args_is_help=True)
+templates_app = typer.Typer(
+    name="templates", help="Inspect available templates.", no_args_is_help=True
+)
 app.add_typer(config_app)
 app.add_typer(harness_app)
 app.add_typer(queue_app)
 app.add_typer(events_app)
 app.add_typer(project_app)
+app.add_typer(templates_app)
 
 console = Console()
 err_console = Console(stderr=True)
@@ -288,6 +299,114 @@ def doctor(
         console.print(f"\n[yellow]ready, with {len(warnings)} warning(s)[/yellow]")
         return
     console.print("\n[green]ready[/green]")
+
+
+# ---------------------------------------------------------------------------
+# cosmo init / cosmo templates -- spec 10.4, 10.3.
+# ---------------------------------------------------------------------------
+
+_SYMLINK_STYLE = {
+    "created": "green",
+    "refreshed": "green",
+    "skipped_conflict": "red",
+    "skipped_missing_target": "yellow",
+}
+
+
+@app.command()
+def init(
+    target_path: Annotated[
+        Path, typer.Argument(help="Path to the target repo (must be git-managed).")
+    ],
+    harness: HarnessOption = None,
+    project_template: Annotated[
+        str | None,
+        typer.Option("--project-template", help="Project docs template. Defaults to '_blank'."),
+    ] = None,
+    force: Annotated[
+        bool,
+        typer.Option(help="Overwrite docs/ files already present in the target repo (spec 10.4)."),
+    ] = False,
+    config: ConfigOption = None,
+) -> None:
+    """Bootstrap a target repo: openspec/, docs/, .agent/<harness>/, root symlinks (spec 10.4)."""
+    cfg = _load(config)
+    resolved_harness, source = resolve_harness_name(harness, None, cfg.harness.name)
+    resolved_template = project_template or "_blank"
+    console.print(f"harness: [bold]{resolved_harness}[/bold] (from {source})")
+    console.print(f"project template: [bold]{resolved_template}[/bold]")
+
+    if force:
+        proceed = typer.confirm(
+            f"--force will overwrite any existing docs/ file that the "
+            f"{resolved_template!r} template also provides. Continue?"
+        )
+        if not proceed:
+            console.print("[yellow]aborted[/yellow]")
+            raise typer.Exit(code=1)
+
+    writer = StoreWriter(cfg.paths.db_path)
+    try:
+        result = run_init(
+            target_path,
+            harness=resolved_harness,
+            project_template=resolved_template,
+            force_docs=force,
+            writer=writer,
+            db_path=cfg.paths.db_path,
+        )
+    except NotAGitRepoError as exc:
+        err_console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=2) from None
+    except (TemplatesRootNotFoundError, OpenSpecInitError) as exc:
+        err_console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from None
+    finally:
+        writer.close()
+
+    console.print(
+        "[green]openspec/[/green] created" if result.openspec.ran else "openspec/ already present"
+    )
+    console.print(
+        f"docs/: created {len(result.docs.created)}, "
+        f"skipped (already exists) {len(result.docs.skipped)}"
+    )
+    for rel in result.docs.skipped:
+        console.print(f"  [dim]skipped[/dim] docs/{rel}")
+    console.print(
+        f".agent/{resolved_harness}/: synced "
+        f"(template_version={result.assets.template_version[:12]})"
+    )
+    for link in result.symlinks:
+        style = _SYMLINK_STYLE[link.status]
+        console.print(f"  [{style}]{link.status}[/{style}] {link.link_name} -> {link.detail}")
+    console.print(
+        f"project already registered ({result.project_id})"
+        if result.already_registered
+        else f"[green]registered[/green] project {result.project_id}"
+    )
+
+
+@templates_app.command("list")
+def templates_list() -> None:
+    """Names available under templates/harness/ and templates/projects/ (spec 10.3)."""
+    try:
+        listing = list_templates()
+    except TemplatesRootNotFoundError as exc:
+        err_console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from None
+
+    harness_table = Table(title="harness templates", title_justify="left")
+    harness_table.add_column("name", style="bold")
+    for name in listing.harnesses:
+        harness_table.add_row(name)
+    console.print(harness_table)
+
+    project_table = Table(title="project templates", title_justify="left")
+    project_table.add_column("name", style="bold")
+    for name in listing.project_templates:
+        project_table.add_row(name)
+    console.print(project_table)
 
 
 # ---------------------------------------------------------------------------

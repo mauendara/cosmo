@@ -1,18 +1,18 @@
-# Handoff — continue at Phase 4
+# Handoff — continue at Phase 5
 
-You are picking up Cosmo mid-build. Phases 0-3 are complete. Your job is
-Phase 4: the harness-facing template system, `sync_harness_assets`, root
-symlinks, and `cosmo init` — plus the `PreToolUse` guardrail hooks, which are
-a hard security boundary that must exist before any unattended run touches a
-real repo.
+You are picking up Cosmo mid-build. Phases 0-4 are complete. Your job is
+Phase 5: worktree lifecycle and git operations — `git worktree add`, the
+per-worktree `gitleaks` pre-commit hook, retention/teardown policy, and the
+merge-conflict recovery ladder. This is also where `sync_harness_assets`
+(Phase 4) gets its second real call site.
 
 ## Read these first, in this order
 
 | Document | What it is | How to treat it |
 |---|---|---|
 | [v3-cosmo-autonomous-agent-spec.md](v3-cosmo-autonomous-agent-spec.md) | The authoritative specification | **Source of truth.** v1 and v2 are superseded — read them only for history |
-| [v3-implementation-plan.md](v3-implementation-plan.md) | 11-phase build plan | The map. Phase 4 is your scope (§10 in full, §2.5's hooks, Open Item 4) |
-| [v3-implementation-state.md](v3-implementation-state.md) | What actually exists, plus decisions and gotchas | Read the "Things that will matter later" section under Phase 3 before writing code — the SessionStart-hook-inheritance finding is directly relevant to what you're about to build |
+| [v3-implementation-plan.md](v3-implementation-plan.md) | 11-phase build plan | The map. Phase 5 is your scope (§3.2, §3.4, §6.1's secret-handling half) |
+| [v3-implementation-state.md](v3-implementation-state.md) | What actually exists, plus decisions and gotchas | Read the "Phase 4 — Complete" section in full before writing code — several of its decisions are load-bearing for Phase 5 |
 
 `v1-*` and `v2-*` in this folder are earlier spec drafts. v3 is a superset of
 both. Do not implement from them.
@@ -25,54 +25,59 @@ build, and any decision you make along the way, in `v3-implementation-state.md`.
 ```
 /home/dev/delta/cosmo/          # working branch: develop
 ├── docs/                       # the four documents above
+├── templates/                  # Phase 4: harness + project templates (source of truth)
+│   ├── harness/claude/           # CLAUDE.md, settings.json, hooks/, agents/, skills/
+│   └── projects/{_blank,java-spring-react}/docs/
 ├── src/cosmo/
 │   ├── checks.py                 # CheckResult / CheckStatus
 │   ├── config/                   # typed model, defaults.toml, three-layer loader
 │   ├── doctor.py                  # core preflight checks
-│   ├── harness/                  # base ABC (+cwd, +probe), registry, claude/, fake/  (Phase 3)
-│   │   ├── claude/                 # adapter.py + stream.py (spec 2.3, spec 4)
+│   ├── harness/                  # base ABC (+cwd, +probe), registry, claude/, fake/
+│   │   ├── claude/                 # adapter.py (+--setting-sources project) + stream.py
 │   │   └── fake/                   # FakeHarnessAdapter -- target this in every new test
+│   ├── bootstrap/                 # Phase 4: template discovery, sync, symlinks, cosmo init
 │   ├── store/                    # SQLite schema, StoreWriter, reader queries (Phase 1)
 │   ├── events/                   # envelope + EventEmitter, transactional sequence (Phase 1)
 │   ├── proc/                     # ManagedProcess (+on_stdout_chunk), timers, orphan sweep, reap (Phase 2/3)
-│   ├── cli/main.py               # `cosmo` command: config, harness (+probe), doctor, queue, events, project
+│   ├── cli/main.py               # `cosmo` command: config, harness, doctor, queue, events, project, init, templates
 │   └── {git,gate,task,run,knowledge}/   # EMPTY — later phases
-├── tests/                       # 119 passing
+├── tests/                       # 181 passing
 └── check.sh                     # ruff + format + mypy --strict + pytest
 ```
 
-`templates/` (top-level, alongside `src/`) does not exist yet — you are
-creating it.
+`src/cosmo/git/` is empty and is exactly where Phase 5's worktree manager
+goes.
 
 ## Get oriented (2 minutes)
 
 ```bash
 cd /home/dev/delta/cosmo
-git log --oneline           # Phase 3 should be committed at HEAD
+git log --oneline           # Phase 4 should be committed at HEAD
 git branch --show-current   # should say develop
 ./check.sh                  # must be green before you change anything
 cosmo doctor                # core checks + harness checks in two tables
-cosmo harness probe --prompt "print hello"   # Phase 3's real end-to-end path; try it once
+cosmo templates list        # Phase 4's template registry
 ```
 
-If `cosmo` is not on PATH, run `uv tool install --editable .` from the repo root.
-Editable means your source edits are live — no rebuild between changes.
+Try `cosmo init` against a real scratch git repo once, by hand, to see the
+whole Phase 4 flow before building on top of it:
 
-**Known, pre-existing environment noise on this host** (not something Phase 4
-broke, don't chase it): `cosmo doctor` may show `disk space: FAIL` — this
-WSL2 box runs close to the 10 GB floor.
+```bash
+D=$(mktemp -d); cd "$D" && git init -q
+COSMO_CONFIG=/nonexistent/config.toml XDG_DATA_HOME="$D/.cosmo-data" \
+  cosmo init . --project-template java-spring-react
+find . -not -path './.git*' | sort
+```
 
-**Read this before you write a single hook.** Phase 3's real `claude -p`
-probe run showed that a headless invocation inherits the *operator's* full
-user-level Claude Code config — this box's `~/.claude` plugins and
-`SessionStart` hooks fired even though the probe ran against `/tmp`, nothing
-to do with the cosmo project or any target repo. Decide explicitly whether
-`cosmo init`/worktree sync need to isolate the child's `HOME` or
-`XDG_CONFIG_HOME`, or pass `--settings` to point at an isolated settings
-file, so a task running against a real target repo doesn't silently pull in
-whatever the operator happens to have configured globally. This wasn't fixed
-in Phase 3 because template/settings ownership is exactly your scope now —
-see the Phase 3 state doc entry for the full observation.
+**Known, pre-existing environment noise on this host** (not something Phase
+5 broke, don't chase it): `cosmo doctor` may show `disk space: FAIL` — this
+WSL2 box runs close to the 10 GB floor. Also: this box has no git identity
+configured globally (`git commit` fails with "Author identity unknown"
+unless a repo/global `user.email`/`user.name` is set) — harmless for
+Cosmo's own tests (they don't shell out to `git commit` for real yet), but
+you will hit it the moment Phase 5's commit step does. Either set a global
+identity for this box or make Cosmo's own worktree commits pass `-c
+user.name=... -c user.email=...` explicitly — decide and document which.
 
 ## Conventions this codebase follows
 
@@ -83,172 +88,162 @@ see the Phase 3 state doc entry for the full observation.
 - **Config over constants.** Every tunable goes in `config/model.py` and
   `config/defaults.toml`, annotated with its spec section. No magic numbers.
 - **Validators catch what would fail silently.** See the existing timeout,
-  playwright-tag, and (new in Phase 4, if you add one) template-related
-  validators for the pattern: reject at startup what would otherwise
-  misbehave at 3am.
+  playwright-tag, and template-hash-exclusion validators/decisions for the
+  pattern: reject or exclude at the source what would otherwise misbehave
+  or drift silently.
 - **Tests isolate from the developer's environment.** Anything touching config
   must set `COSMO_CONFIG` and `XDG_DATA_HOME` to temp paths — see the autouse
   fixture in `tests/test_cli.py`. Anything touching a real git repo should
   build one in `tmp_path`, never touch this repo or a real target repo.
-- **Fake the external process, test the mechanics.** Phase 3's
-  `FakeHarnessAdapter` (`cosmo.harness.fake`) is what every later phase's
-  tests should target — a real `claude -p` invocation should appear at most
-  once, in an integration exit criterion you run manually, exactly like
-  Phase 3's `cosmo harness probe`. The one place Phase 4 might still need a
-  real subprocess is `openspec` itself (step 2 of `cosmo init`) — check
-  whether `openspec` has a way to run against a scratch directory without
-  side effects before deciding whether it needs a fake too.
+- **Fake the external process, test the mechanics.** `FakeHarnessAdapter`
+  (`cosmo.harness.fake`) is the harness test double; `fake_docker.sh`,
+  `fake_claude.sh`, `fake_openspec.sh` are the subprocess test doubles
+  (`tests/fixtures/`). Phase 5's `git`/`gitleaks` calls are a new case:
+  decide whether they need a fake too, or whether real `git` (already a
+  dependency, already fast, already offline) is fine to call for real in
+  unit tests the way `openspec init` turned out to be (see Phase 4 state doc
+  decision — it was probed by hand first, found safe, and used for real
+  rather than faked). `gitleaks` itself is a new external binary Cosmo
+  hasn't touched yet — check whether it's even on this box before assuming
+  it is (`cosmo doctor` doesn't check for it yet; decide if it should).
 - **Boundary tests are load-bearing, not optional.** `test_harness_boundary.py`
-  keeps harness-specific tokens out of core (`harness/claude/*.py` and
-  `harness/registry.py` are the only modules allowed to name them, plus
-  `config/defaults.toml`). `test_store_boundary.py` keeps `connect_writer`
-  from leaking outside `store/writer.py` and `store/migrations.py`. Phase 4
-  probably doesn't touch either boundary directly, but check before adding
-  any module that imports both a harness adapter and core template code.
+  keeps harness-specific tokens out of core (`harness/claude/*.py`,
+  `harness/registry.py`, and now `bootstrap/symlinks.py` — added in Phase 4
+  because per-harness root-link naming is genuinely harness-aware knowledge
+  — are the allowed exceptions, plus `config/defaults.toml`).
+  `test_store_boundary.py` keeps `connect_writer` from leaking outside
+  `store/writer.py` and `store/migrations.py`. Check both before adding any
+  module that imports across these boundaries.
 - **Run `./check.sh` before committing.** All four must pass.
 - **When something fails, check with a real invocation before trusting a
-  unit test's green.** Phase 2's two worst bugs, and Phase 3's spec
-  deviation #5 (`rate_limit_event` vs. the spec's `system/api_retry`), were
-  both found this way, not by inspection. For Phase 4: run `cosmo init`
-  against a real scratch git repo (not just a `tmp_path` fixture) at least
-  once, and manually attempt the adversarial checks the plan's exit criteria
-  call for (see below) — don't only trust the hook unit tests.
+  unit test's green.** This has found a real bug or made a real design
+  decision correctly in every phase so far — Phase 2's two worst bugs,
+  Phase 3's `rate_limit_event` deviation, and Phase 4's `openspec --tools
+  claude` conflict, `--setting-sources project` fix, and `__pycache__`
+  hashing bug were all found this way. For Phase 5: actually run `git
+  worktree add` against a real repo with real branches, actually force a
+  real merge conflict between two worktrees, and actually run whatever
+  `gitleaks` invocation you build against a file that should trip it — don't
+  only trust the unit tests' green.
 
-## Phase 4 scope
+## Phase 5 scope
 
-Spec §10 in full (project bootstrap & template system), §2.5 (the
-`PreToolUse` guardrail hooks themselves — Phase 3 only consumed the
-`supports_gating` capability flag; nothing installs a hook yet), Open Item 4.
+Spec §3.2 (isolation, retention), §3.4 (merge-conflict policy), §6.1's
+secret-handling half (the `gitleaks` pre-commit hook and gate-side backstop
+— the backstop scan itself is Phase 6's gate, not yours; you own the
+per-worktree hook installation).
+
 Summary from the plan:
 
-1. **`templates/harness/claude/`** in Cosmo's own repo:
-   - `settings.json` — `permissions.deny` for secret paths (`./.env*`,
-     `./secrets/**`, `**/*.pem`, `**/id_rsa*`). Deny is used deliberately
-     because it is **absolute across all permission modes** (§2.3) — this is
-     the one guardrail that survives even if a future task ever justified
-     `auto` permission mode.
-   - `hooks/` — `PreToolUse` implementations, each **synchronous, local, no
-     network, no LLM**, budgeted under 2s with `timeout: 5000` (§2.5):
-     - test-path guard (`src/test/**`, `**/*.spec.ts`, `**/*.test.ts`,
-       `e2e/**`), bypassed only when the task's queue row has
-       `allow_test_edits: true` (that column already exists — `store/writer.py`
-       from Phase 1)
-     - annotation guard (`@Disabled`, `@Ignore`, `test.skip`, `it.skip`,
-       `xit`, `describe.skip`)
-     - commit-integrity guard (`git commit *--no-verify*`, `git push *`,
-       `git reset --hard*`, force-push forms)
-   - Async hooks are **not** used for gating (§2.5 — they don't block);
-     telemetry only, and out of scope unless you find a concrete use.
-   - `CLAUDE.md`, `agents/*.md`, `skills/*/SKILL.md` — Cosmo's harness-facing
-     operating policy. This is also where the exact `propose`/`implement`
-     prompt engineering that Phase 3 deliberately left thin (state doc
-     decision #9 under Phase 3) actually belongs — Claude reads this file,
-     Cosmo's prompt just has to point at it.
-2. **`templates/projects/_blank/`** (schema-only headings) and
-   **`templates/projects/java-spring-react/`** (real starter content per the
-   §10.3 file list).
-3. **`sync_harness_assets(target, harness)`** — one function, two call
-   sites (§10.5): `cosmo init`, and worktree creation in Phase 5 (that call
-   site doesn't exist yet — leave a clear seam, don't build worktree
-   lifecycle early). Replaces `.agent/<harness>/` wholesale; computes a
-   `template_version` hash of the source tree; emits `agent_assets.synced`
-   (§9.2 — the event type already exists in `events/envelope.py`).
-4. **Root symlinks (§10.2), relative only** — an absolute or cross-repo
-   symlink breaks when the repo moves between the droplet and WSL2. A test
-   asserts relativity (e.g. resolve the symlink target and assert it's not
-   absolute, or assert the link's `readlink()` string doesn't start with `/`).
-5. **`cosmo init <path> --harness claude --project-template <name>`**
-   executing §10.4 steps 1-7 in order:
-   1. Verify `<path>` is a git repo (do not `git init` it yourself).
-   2. `openspec/` via OpenSpec's own CLI, if absent.
-   3. Copy `templates/projects/<name>/docs/` into `<path>/docs/` —
-      **never-overwrite** semantics, `created: N / skipped: M` reported
-      explicitly, `--force` behind a confirmation prompt.
-   4. `sync_harness_assets` into `.agent/<harness>/`.
-   5. Root symlinks.
-   6. `writer.register_project(...)` — this already exists from Phase 1
-      (`cosmo project register`'s underlying call); Phase 4's `init` should
-      call the same `StoreWriter` method rather than duplicating it, and
-      `cosmo project register` itself might become redundant once `init`
-      exists (decide whether to keep both, deprecate the standalone command,
-      or leave it as a lower-level primitive — Phase 1's state doc entry
-      says "treat this as the persistence primitive it already has, not
-      reimplement it").
-   7. Emit `agent_assets.synced`.
-6. **`cosmo templates list`** — names under both `templates/harness/` and
-   `templates/projects/`.
+1. **`git worktree add <work>/<run_id>/<task_id> -b task/<spec-id> develop`.**
+   `config.paths.work_dir` (already exists, Phase 0) is the `<work>` root;
+   `config.git.base_branch` (already exists) is `develop`. Call
+   `sync_harness_assets(worktree_path, harness, emitter=..., run_id=...)`
+   **immediately after** worktree creation, before `PROPOSING` starts (spec
+   10.5) — this is Phase 4's second call site, and the reason `run_id` is
+   already a parameter on `sync_harness_assets`.
+2. **Install a `gitleaks` pre-commit hook in each worktree** (spec 6.1).
+   Check whether `gitleaks` is installed on this box before assuming a
+   binary check belongs in `doctor.py`'s core checks (it's a Cosmo
+   dependency like `openspec`/`docker`, not harness-specific — see
+   `doctor.py`'s own comment on why those two are core). Decide the hook's
+   exact form (a `.git/hooks/pre-commit` script invoking `gitleaks protect
+   --staged` or equivalent) and document the choice — spec 6.1 names the
+   tool but not the exact invocation, another Open-Item-4-shaped gap.
+3. **Teardown policy.** `git worktree remove --force` on `DONE`; **retain**
+   on `BLOCKED` for inspection. `worktree_path` already exists as a
+   `task_queue` column (Phase 1) — this phase is what actually writes and
+   reads it for real.
+4. **Startup sweep** pruning worktrees belonging to completed runs. Related
+   to but distinct from Phase 2's `find_worktree_holders` (which finds
+   *processes* holding a worktree path, not stale worktree directories
+   themselves) — don't conflate the two, but do reuse Phase 2's `/proc`-scan
+   pattern if it's the right shape for this too.
+5. **Commit step**, then merge into `develop` with the §3.4 ladder:
+   - Attempt a standard merge.
+   - On conflict, attempt **exactly one** automated recovery: rebase the
+     task branch onto current `develop`, then re-run the **full validation
+     gate** (Phase 6 doesn't exist yet — this call site is a seam for now,
+     the same way Phase 3 left worktree lifecycle a seam for you).
+   - If the gate passes post-rebase, merge. If the rebase itself conflicts,
+     skip straight to `BLOCKED` with `blocked_reason = merge_conflict`,
+     worktree and branch **retained**, `task.blocked` at `severity =
+     warning`.
+   - **The conflict is never handed back to the agent to resolve blind**
+     (spec 3.4 step 2) — enforce this structurally (e.g. the merge/rebase
+     code path never has a harness adapter in scope at all), not by
+     convention or a comment.
+   - `merge_conflict` is excluded from the circuit-breaker tally (spec 3.4,
+     6.5) — there's no breaker yet (Phase 8), but don't build merge-conflict
+     handling in a shape that would need rework once it exists; a
+     `blocked_reason` enum value already exists for this (Phase 1).
+6. **`master` is never a merge target anywhere in the codebase** — spec 3.2:
+   merging `develop` → `master` is manual, developer-performed, explicitly
+   out of scope. Add a test that asserts this the same way
+   `test_harness_boundary.py` asserts its own invariants — grep for the
+   literal string across `src/cosmo/git/` (and anywhere else a merge target
+   could be named) and fail if `master` appears anywhere but a comment
+   explaining why it's excluded.
 
-### Exit criteria
+### Exit criteria (from the plan)
 
-- `cosmo init` against a scratch git repo produces `openspec/`, `docs/`,
-  `.agent/claude/`, correct relative symlinks, a `projects` row, and an
-  `agent_assets.synced` event.
-- Re-running `init` reports skipped `docs/` files and refreshes `.agent/`
-  wholesale.
-- Each hook is unit-tested for both deny and allow paths, and timed to
-  confirm it stays under budget (the 5000ms `timeout` is a hard ceiling, not
-  a target — budget under 2s per the plan).
-- **A manual adversarial check**: a `claude -p` run inside a repo `cosmo
-  init` just set up is genuinely blocked from editing a test file and from
-  `git commit --no-verify`. This consumes a small amount of quota, same
-  posture as Phase 3's probe exit criterion — run it, don't skip it. Use
-  `cosmo harness probe` (Phase 3) or a small ad hoc `claude -p` invocation
-  pointed at the initialized repo, with a prompt that tries the forbidden
-  action and asks Claude to report whether it succeeded.
+- A scripted two-task conflict scenario in a fixture repo: rebase recovery
+  succeeds in one case, and in the other produces `BLOCKED` with
+  `merge_conflict`, retained worktree, and a `warning`-severity
+  `task.blocked`.
+- `master` is never a merge target anywhere in the codebase — asserted by
+  test.
 
 ## Things to know before you start
 
-**Phase 3 built `FakeHarnessAdapter` (`cosmo.harness.fake`) specifically so
-Phase 4+ never need a bespoke test double.** If you need to unit-test
-anything that calls into a harness adapter (unlikely for template/hook work
-itself, but possible if you wire `cosmo init` to invoke the harness for
-anything), use it. It's registered as `"fake"` in the harness registry, so
-it's also reachable from the CLI (`--harness fake`) for manual dry runs.
+**`config.paths.work_dir` and `config.git.base_branch` already exist**
+(Phase 0) — this phase is the first real consumer of either. Check
+`cosmo doctor`'s `check_work_dir_filesystem` (Phase 0) still makes sense
+once worktrees are actually being created there for real, not just
+theorized about.
 
-**`ManagedProcess` now supports `on_stdout_chunk`** (a tee of the stdout
-drain thread, added in Phase 3 for the stream-json reader). Unlikely to be
-relevant to Phase 4 directly, but if hook testing ends up needing to watch a
-subprocess's output live, this is already there — don't build a second
-mechanism.
+**`task_queue.worktree_path` and `blocked_reason = 'merge_conflict'` already
+exist in the schema** (Phase 1) — this phase writes to a column and uses an
+enum value that have been sitting ready since Phase 1. No migration should
+be needed for the worktree lifecycle itself; if you find you need one
+anyway, that's worth double-checking against the Phase 1 schema before
+assuming it's missing.
 
-**The `allow_test_edits` queue column already exists** (`task_queue` table,
-Phase 1). The test-path guard hook needs to read it, which means the hook
-script needs *some* way to ask Cosmo's state — probably by reading the
-task_id out of an environment variable Cosmo sets when invoking `claude -p`
-(you'll need to decide what that variable is, since none exists yet) and
-querying the database read-only (`store/reader.py`'s `connect_reader`,
-already genuine SQLite `mode=ro`). A hook is a separate OS process from
-Cosmo's own — it cannot just call into `StoreWriter` in-process. Budget
-this carefully against the hook's 2s target: a SQLite read against a WAL-mode
-database should be fast, but confirm it, don't assume it.
+**`sync_harness_assets`'s `run_id` parameter has no real caller yet outside
+tests.** This phase is what actually exercises it with a real run in
+progress. If the shape turns out to be wrong once you have a real caller,
+that's useful information — record it as a Phase 4 spec deviation retroactively
+rather than silently reshaping the function without a note.
 
-**`agent_assets.synced`'s payload (§9.2) wants a `template_version` — "a hash
-of the source template tree".** No existing helper computes a directory
-hash; you'll need to pick an approach (e.g. hash the sorted list of
-relative-path + content hashes) and document the choice, since "hash of a
-tree" is underspecified and different reasonable implementations produce
-different but equally valid answers.
+**Phase 2's `cancel_and_reap` already does the process/container half of
+cleanup on a killed task** (`os.killpg` + `docker rm -f` + worktree-holder
+detection). Phase 5's worktree *removal* is a different, later step — a
+task can be fully reaped (no live processes, no live containers) and still
+have a worktree directory sitting on disk waiting for `DONE`/`BLOCKED` to
+decide its fate. Don't duplicate Phase 2's process cleanup; do build on top
+of it.
 
 **Nothing before Phase 8 should implement circuit-breaker trip logic or run
-scheduling** — unchanged from Phase 3's handoff, still applies. Phase 4 is
-about assets existing and being enforced by the harness itself (hooks), not
-about deciding what Cosmo's own loop does with a blocked task.
+scheduling** — unchanged since Phase 3's handoff, still applies. Phase 5 is
+about worktrees and merges existing correctly, not about what the run loop
+does with the outcome.
 
 ## When you finish
 
 1. `./check.sh` green.
-2. Update `v3-implementation-state.md`: mark Phase 4 complete, list what
+2. Update `v3-implementation-state.md`: mark Phase 5 complete, list what
    exists, record every decision made and anything a future session would
    otherwise rediscover. Append any new spec deviation to the cumulative
    table at the bottom.
 3. Commit to `develop` with a message explaining *why*, in the style of the
-   Phase 0-3 commits.
-4. Rewrite this handoff for Phase 5 (worktree lifecycle and git operations,
-   §3.2/§3.4/§6.1) — or delete it if the next session continues immediately.
+   Phase 0-4 commits.
+4. Rewrite this handoff for Phase 6 (the validation gate) — or delete it if
+   the next session continues immediately.
 
-Phase 5 is next: `git worktree add`, the `gitleaks` pre-commit hook per
-worktree, retention/teardown policy (`DONE` removes, `BLOCKED` retains for
-inspection), and — this is the real dependency Phase 4 creates — calling
-`sync_harness_assets` immediately after worktree creation, before
-`PROPOSING` starts, so every task runs against Cosmo's current guardrails
-rather than whatever existed when `cosmo init` last ran.
+Phase 6 is next: the Docker validation gate (build → unit → e2e, serial),
+the diff gate (spec 6.1 layer 2 — test-integrity detection), flaky-test
+confirm-by-rerun and quarantine handling (spec 6.4), and the
+`error_detail`/structured-result construction (spec 9.3) the retry prompt
+and `task.validation_result` event both depend on. It's called out in the
+plan as the largest phase — build its fixture repo first, before the gate
+runner itself.

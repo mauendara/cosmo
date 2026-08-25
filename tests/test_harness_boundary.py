@@ -21,6 +21,12 @@ ALLOWED_HARNESS_AWARE = {
     SRC / "harness" / "claude" / "stream.py",
     SRC / "harness" / "registry.py",  # maps names to classes; that is its job
     SRC / "config" / "defaults.toml",  # configuration data, not logic
+    # Spec 10.2: which paths a harness expects symlinked at the target repo's
+    # root is a genuinely per-harness convention (Claude wants `.claude` and
+    # `CLAUDE.md`; a future harness would want its own names) -- this module's
+    # whole job is knowing that mapping, the same shape as the adapter/registry
+    # entries above.
+    SRC / "bootstrap" / "symlinks.py",
 }
 
 HARNESS_SPECIFIC_TOKENS = [

@@ -12,7 +12,7 @@ rediscover.
 |---|---|
 | Last updated | 2026-08-25 |
 | Working branch | `develop` |
-| Head commit | `76a1699` — Phase 3 (the `--config` fix below not yet committed) |
+| Head commit | `97b1742` — the `--config` fix (Phase 4 not yet committed) |
 | Spec | [v3-cosmo-autonomous-agent-spec.md](v3-cosmo-autonomous-agent-spec.md) |
 
 ## Phase status
@@ -23,7 +23,7 @@ rediscover.
 | 1 — Persistent state and the event log | **Complete** |
 | 2 — Process supervision | **Complete** |
 | 3 — Harness abstraction and Claude Code adapter | **Complete** |
-| 4 — Template system and `cosmo init` | Not started |
+| 4 — Template system and `cosmo init` | **Complete** |
 | 5 — Worktree lifecycle and git operations | Not started |
 | 6 — Validation gate | Not started |
 | 7 — Task state machine | Not started |
@@ -629,6 +629,191 @@ needs `--settings`/`XDG_CONFIG_HOME` isolation that doesn't also break
 Pro/Max subscription auth, which needs real experimentation Phase 4 is
 better positioned to do once it owns `.claude/settings.json` anyway).
 
+## Phase 4 — Complete
+
+All exit criteria met. 181 tests passing; `ruff`, `ruff format`, and `mypy --strict`
+clean.
+
+### What exists
+
+| Path | Contents |
+|---|---|
+| `templates/harness/claude/settings.json` | `permissions.deny` for secret paths + `PreToolUse` hook wiring, `timeout: 5000` each |
+| `templates/harness/claude/hooks/_hooklib.py` | Shared stdlib-only helpers (stdin JSON, deny/allow, the read-only `allow_test_edits` lookup) -- same-directory import, travels with the hooks it's imported by |
+| `templates/harness/claude/hooks/test_path_guard.py` | Denies `Edit`/`Write`/`NotebookEdit` under `src/test/**`, `e2e/**`, `**/*.spec.ts`, `**/*.test.ts` unless `allow_test_edits` |
+| `templates/harness/claude/hooks/annotation_guard.py` | Denies an `Edit`/`Write` that *introduces* `@Disabled`/`@Ignore`/`test.skip`/`it.skip`/`describe.skip`/`xit(` (before/after occurrence-count comparison, not a flat substring match) |
+| `templates/harness/claude/hooks/commit_integrity_guard.py` | Denies `git commit --no-verify`, any `git push`, `git reset --hard` inside `Bash` calls |
+| `templates/harness/claude/CLAUDE.md`, `agents/implementer.md`, `skills/openspec-workflow/SKILL.md` | Cosmo's harness-facing operating policy -- Open Item 4's "concrete contents" |
+| `templates/projects/_blank/docs/**`, `templates/projects/java-spring-react/docs/**` | Schema-only vs. real-starter-content docs, per spec 10.3's file list |
+| `src/cosmo/bootstrap/discover.py` | `templates_root()`, `harness_template_dir()`, `project_template_dir()`, `list_templates()` |
+| `src/cosmo/bootstrap/hashing.py` | `compute_template_version()` -- sha256 of a sorted `relpath filehash` manifest |
+| `src/cosmo/bootstrap/assets.py` | `sync_harness_assets()` -- the one function, two call sites (spec 10.5) |
+| `src/cosmo/bootstrap/symlinks.py` | `create_root_symlinks()` -- relative-only, refresh-not-clobber |
+| `src/cosmo/bootstrap/docs.py` | `copy_project_docs()` -- never-overwrite, `--force` as a caller decision |
+| `src/cosmo/bootstrap/openspec.py` | `ensure_openspec_initialized()` -- real subprocess call to `openspec init` |
+| `src/cosmo/bootstrap/init.py` | `run_init()` -- orchestrates spec 10.4 steps 1-7 |
+| `src/cosmo/cli/main.py` | Adds `cosmo init`, `cosmo templates list` |
+| `src/cosmo/harness/claude/adapter.py` | Adds `--setting-sources project` to argv; adds `COSMO_TASK_ID`/`COSMO_DB_PATH` to the child env |
+| `tests/fixtures/fake_openspec.sh` | Recording stand-in for `openspec`, mirrors `fake_docker.sh`/`fake_claude.sh` |
+
+Working commands (new):
+
+```
+cosmo init <path> [--harness NAME] [--project-template NAME] [--force] [--config PATH]
+cosmo templates list
+```
+
+### Decisions made during Phase 4
+
+**1. `openspec init` is invoked with `--tools none`, never `--tools claude`.**
+Probed by hand before writing any code (per this codebase's "check with a
+real invocation" convention): `openspec init --tools claude` writes a real
+`.claude/commands/opsx/*.md` and `.claude/skills/openspec-*/SKILL.md` tree of
+its own. That directly conflicts with spec 10.2's `.claude -> .agent/claude`
+symlink -- a real directory and a symlink cannot occupy the same path.
+Cosmo's own `templates/harness/claude/` is the harness-facing integration;
+OpenSpec's role in `cosmo init` is `openspec/` only. `templates/harness/
+claude/skills/openspec-workflow/SKILL.md` is what replaces OpenSpec's own
+generated skill content, written against the real CLI's actual surface
+(`openspec status --change`, `openspec instructions <artifact> --change`,
+`openspec new change`, `openspec validate`), not guessed.
+
+**2. `--setting-sources project` added to `ClaudeCodeAdapter._build_argv`.**
+This resolves the open finding carried from Phase 3 (a headless run
+inheriting the operator's global `~/.claude` hooks/plugins) -- found by
+reading `claude --help` for an existing mechanism rather than building
+`HOME`/`XDG_CONFIG_HOME` isolation from scratch, which the Phase 3 handoff
+worried could break Pro/Max auth. **Verified by a real invocation, both
+directions:** with the default (all scopes), this box's own global
+`SessionStart`/`UserPromptSubmit`/`Stop` hooks fired even with `cwd=/tmp`;
+with `--setting-sources project`, none of them fired, and a project-scoped
+`PreToolUse` hook in `.claude/settings.json` still fired and correctly
+denied a `Write` call. `local` (the gitignored personal-override scope) is
+excluded too -- it shouldn't exist at all in an unattended run.
+
+**3. `COSMO_TASK_ID` / `COSMO_DB_PATH` -- the env vars the handoff asked to
+be decided.** Set on the child process by `ClaudeCodeAdapter._build_env`.
+The test-path guard hook reads `task_queue.allow_test_edits` for the running
+task via a genuine read-only `sqlite3` connection
+(`file:{path}?mode=ro`), stdlib only, no `cosmo` package import -- a hook
+is a separate OS process running inside an arbitrary target repo, so it
+cannot call into `StoreWriter` in-process, and cannot assume `cosmo` is
+importable there at all. **Fails closed**: missing env vars, a missing
+database, a missing row, or any query error all resolve to "not allowed",
+never to "allowed" -- pinned by
+`test_missing_db_env_vars_fail_closed_and_still_deny`.
+
+**4. Hooks are self-contained Python (stdlib only), not shell.** Consistent
+with this project's own language and testable the same way
+(`subprocess.run(["python3", hook_path], input=json...)`), while staying
+"local, synchronous, no network, no LLM" (spec 2.5). `_hooklib.py` is
+imported via a same-directory `sys.path` insert rather than packaged --
+`sync_harness_assets` copies the whole `hooks/` directory as one unit, so
+this stays a plain file dependency, not a packaging problem.
+
+**5. `template_version` = sha256 of a sorted `"relpath filehash"` manifest.**
+Spec 9.2 asks for "a hash of the source template tree" without saying how;
+recorded and justified in `bootstrap/hashing.py`'s docstring rather than left
+implicit. Sorting first makes the result independent of filesystem
+iteration order; hashing content (not mtime) means a byte-identical copy
+produces an identical version.
+
+**6. `__pycache__`/`*.pyc` excluded from both hashing and `sync_harness_assets`'s
+copytree -- found by hand, not by a unit test.** Running the shipped hook
+scripts at all (including this project's own test suite exercising them via
+subprocess) leaves `hooks/__pycache__/_hooklib.cpython-*.pyc` next to
+`_hooklib.py`. Running `cosmo init` for real against a scratch repo
+surfaced this concretely: the bytecode was silently part of both the hashed
+tree and the copied `.agent/claude/hooks/`, which would have made
+`template_version` depend on which Python build last ran a hook locally.
+Already gitignored so it never reaches version control, but hashing/copying
+still needed the explicit exclusion (`_IGNORED_DIR_NAMES` /
+`ignore=shutil.ignore_patterns(...)`). Regression test:
+`test_pycache_artifacts_are_excluded_from_the_hash`.
+
+**7. `templates_root()` resolves relative to the installed package's own file
+location** (`Path(cosmo.__file__).resolve().parent.parent.parent /
+"templates"`), not `importlib.resources` -- `templates/` lives at the repo
+root, alongside `src/`, not inside the installed package, so
+`importlib.resources` (which only covers files shipped *inside* a package)
+doesn't apply. This resolves correctly for the documented install method
+(`uv tool install --editable .`) and is documented as *not* solving a future
+packaged/wheel distribution, which would need `templates/` shipped as real
+package data instead -- deliberately deferred, not a Phase 4 gap.
+
+**8. Root symlinks refresh-if-symlink, never clobber a real file/directory.**
+`create_root_symlinks` only removes and recreates a link path that is
+already a symlink; a real file or directory already at that path (e.g. a
+developer's own `CLAUDE.md`, pre-Cosmo) is left untouched and reported
+`skipped_conflict`. Spec 10.4 step 5 says "create or refresh" without
+addressing this case; erring toward not destroying content the developer
+may have written themselves.
+
+**9. `bootstrap/symlinks.py` added to `ALLOWED_HARNESS_AWARE`
+(`test_harness_boundary.py`), per the Phase 0 state doc's own instruction
+("add it to the allowlist rather than weakening the test").** Which root
+paths a harness expects symlinked (`.claude`, `CLAUDE.md`, `agents`,
+`skills` for Claude) is genuinely per-harness knowledge, the same shape as
+the adapter/registry entries already on that list -- not a boundary leak.
+
+**10. `cosmo init` re-run is idempotent by construction, not by a special
+"already initialized" branch.** `openspec init` is itself idempotent
+(confirmed by hand -- re-running against an existing `openspec/config.yaml`
+is a safe no-op, with or without `--force`); `copy_project_docs` never
+overwrites by default; `sync_harness_assets` always replaces `.agent/`
+wholesale by design (spec 10.5 -- that's the point, not a re-run special
+case); only project registration needed an explicit idempotency check
+(`find_project_by_path` before `register_project`, since `projects.
+target_path` is `UNIQUE` and Phase 1 built no upsert path). `run_init` and
+`cosmo init` both stayed thin as a result -- one `if` for the one genuinely
+non-idempotent step.
+
+**11. `cosmo project register` is kept, not deprecated, once `cosmo init`
+exists.** Phase 1's own state doc entry called this decision out in
+advance ("treat this as the persistence primitive it already has"); `cosmo
+init`'s registration step calls the same `StoreWriter.register_project`
+rather than duplicating it. `cosmo project register` remains useful as a
+lower-level primitive (e.g. registering a project that was bootstrapped by
+hand, before `cosmo init` existed, or outside Cosmo's own template flow
+entirely).
+
+**12. The manual adversarial exit criterion was run against the real CLI, not
+simulated.** `cosmo init` was run against a real scratch git repo; a real
+`claude -p --setting-sources project` invocation against that repo was
+prompted to (a) edit `src/test/java/AppTest.java` and (b) run `git commit
+--no-verify`. Both were denied -- confirmed by the unmodified file on disk
+and by `permission_denials` in the terminal `result` object showing the
+`Bash` call never reached `git` at all. Full transcript reasoning recorded
+in this session's log, not reproduced here.
+
+### Things that will matter later
+
+**Phase 5's worktree-creation call site is a real seam, not a TODO comment.**
+`sync_harness_assets(target, harness, *, emitter, run_id=None, ...)` already
+accepts `run_id` specifically for Phase 5 (a per-task sync has a real
+`run_id`; `cosmo init` does not) -- Phase 1's `EventEmitter` sequence
+scoping (`run_id or ""`) already handles both without a schema change.
+
+**`bootstrap/init.py`'s `run_init` takes both `writer: StoreWriter` and a
+separate `db_path: Path`.** `find_project_by_path` (Phase 1) opens its own
+short-lived read connection rather than sharing the writer's -- consistent
+with the existing single-writer/read-your-own-connection discipline
+(`store/reader.py`'s whole design), but means callers hand over the path
+twice. Not worth a `StoreWriter.db_path` property for one caller; revisit if
+a third caller wants it.
+
+**`docs/data-model.md` in `java-spring-react` is deliberately about the
+convention, not fabricated entities.** No real product schema exists yet to
+document truthfully; inventing one would be exactly the kind of note-rot
+spec 11 warns about (a doc a future task takes as fact when it isn't).
+
+**Doctor was not extended in this phase.** No new `cosmo doctor` check was
+added for template staleness or a registered project's `.agent/` drift --
+nothing in the plan's Phase 4 exit criteria asked for one, and Phase 5's
+per-task sync (once it exists) makes staleness self-correcting rather than
+something a preflight check needs to catch. Revisit only if a real gap
+shows up in practice.
+
 ## Deviations from the spec, cumulative
 
 Kept here so a future spec revision can absorb them in one pass.
@@ -642,3 +827,6 @@ Kept here so a future spec revision can absorb them in one pass.
 | 5 | `claude -p`'s primary quota signal is a top-level `rate_limit_event`, not `system/api_retry` | §7.2, §4 | 3 | Observed on a real CLI 2.1.207 probe run, not documented anywhere upstream. Both shapes are classified as `RATE_LIMIT` so either is caught regardless of CLI version |
 | 6 | `cwd` added to the adapter base constructor | §2.2 | 3 | Every subprocess adapter needs a working directory; Phase 5's worktree lifecycle doesn't exist yet to supply one |
 | 7 | `probe(prompt)` added to the adapter interface | §2.2 | 3 | `cosmo harness probe`'s exit criterion needs a harness-agnostic raw-prompt entry point; `propose`/`implement` both presuppose an OpenSpec change on disk |
+| 8 | `openspec init` invoked with `--tools none`, never `--tools claude` | §10.4 | 4 | `--tools claude` writes a real `.claude/commands`/`.claude/skills` tree that conflicts with the spec's own `.claude` symlink (§10.2); found by hand |
+| 9 | `--setting-sources project` added to the Claude adapter's argv | §2.3 | 4 | Not named in the spec's invocation description at all; fixes the Phase 3 global-config-inheritance finding, verified by a real invocation |
+| 10 | `COSMO_TASK_ID` / `COSMO_DB_PATH` env vars added to the child process | §2.5 | 4 | The test-path guard hook is a separate OS process with no other way to read `allow_test_edits`; the handoff explicitly left this variable's name undecided |

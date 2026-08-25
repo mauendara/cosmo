@@ -1,0 +1,39 @@
+{
+  "permissions": {
+    "deny": [
+      "Read(./.env*)",
+      "Read(./secrets/**)",
+      "Read(**/*.pem)",
+      "Read(**/id_rsa*)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.agent/claude/hooks/test_path_guard.py\"",
+            "timeout": 5000
+          },
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.agent/claude/hooks/annotation_guard.py\"",
+            "timeout": 5000
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.agent/claude/hooks/commit_integrity_guard.py\"",
+            "timeout": 5000
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -42,6 +42,15 @@ TELEMETRY_ENV = {
     "OTEL_LOG_USER_PROMPTS": "0",
 }
 
+# Consumed by the test-path guard hook (templates/harness/claude/hooks/
+# test_path_guard.py) to read `task_queue.allow_test_edits` for the running
+# task -- a hook is a separate OS process from Cosmo's own, so it has no
+# other way to ask Cosmo's state (spec 2.5 / plan Phase 4 handoff). Not
+# Claude-CLI flags themselves, but this adapter is where the child's
+# environment is assembled, so this is where they're set.
+TASK_ID_ENV_VAR = "COSMO_TASK_ID"
+DB_PATH_ENV_VAR = "COSMO_DB_PATH"
+
 
 class ClaudeCodeAdapter(HarnessAdapter):
     name: ClassVar[str] = "claude"
@@ -178,6 +187,20 @@ class ClaudeCodeAdapter(HarnessAdapter):
             str(self.config.harness.max_turns),
             "--permission-mode",
             self.config.harness.permission_mode,
+            # A headless run must run under Cosmo's own project settings
+            # (spec 2.5 guardrail hooks, .claude/settings.json) and nothing
+            # else -- `user` scope is the operator's global ~/.claude
+            # (arbitrary personal hooks/plugins/MCP servers with unknown
+            # token cost and side effects), `local` is a gitignored personal
+            # override file that shouldn't exist in an unattended run at all.
+            # Verified by a real invocation (Phase 4 state doc): with the
+            # default (all scopes), this box's own global SessionStart/
+            # UserPromptSubmit/Stop hooks fired even though cwd was /tmp,
+            # nothing to do with the target repo; with `--setting-sources
+            # project`, they do not fire, and the target repo's own
+            # PreToolUse guardrail hooks still do.
+            "--setting-sources",
+            "project",
         ]
         # Spec 2.3: bypassPermissions / --dangerously-skip-permissions is
         # never used -- the droplet has real credentials, blast radius isn't
@@ -188,16 +211,18 @@ class ClaudeCodeAdapter(HarnessAdapter):
         assert "bypassPermissions" not in argv
         return argv
 
-    def _build_env(self) -> dict[str, str]:
+    def _build_env(self, task_id: str) -> dict[str, str]:
         env = dict(os.environ)
         # Spec 2.3: explicitly scrub rather than assume absence.
         env.pop(BILLING_ENV_VAR, None)
         env.update(TELEMETRY_ENV)
+        env[TASK_ID_ENV_VAR] = task_id
+        env[DB_PATH_ENV_VAR] = str(self.config.paths.db_path)
         return env
 
     def _invoke(self, *, task_id: str, prompt: str) -> HarnessResult:
         argv = self._build_argv(prompt)
-        env = self._build_env()
+        env = self._build_env(task_id)
         raw_log_path = (
             self.config.paths.log_dir / "harness" / task_id / f"{uuid.uuid4().hex}.ndjson"
         )
