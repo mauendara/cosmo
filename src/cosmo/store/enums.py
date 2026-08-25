@@ -48,7 +48,12 @@ class FailureType(enum.Enum):
 
 
 class FailureStage(enum.Enum):
-    """Spec 9.3."""
+    """Spec 9.3, plus `SECRETS` (Phase 6 deviation #12, see
+    `docs/v3-implementation-state.md`'s cumulative deviations table): the
+    spec's own enumerated list has no stage for the gate-side `gitleaks`
+    backstop (spec 6.1) -- a secret in the diff is not a test-integrity
+    violation, and folding it into `TEST_INTEGRITY` would make that value
+    ambiguous for anyone querying `task_failures` later."""
 
     PROPOSE = "propose"
     IMPLEMENT = "implement"
@@ -56,6 +61,7 @@ class FailureStage(enum.Enum):
     UNIT_TESTS = "unit_tests"
     E2E_TESTS = "e2e_tests"
     TEST_INTEGRITY = "test_integrity"
+    SECRETS = "secrets"
     COMMIT = "commit"
     MERGE = "merge"
 

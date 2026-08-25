@@ -13,9 +13,12 @@ file is ever deleted or a worktree is created before this has run.
 
 from __future__ import annotations
 
+import json
+import shutil
 import stat
 import subprocess
-from dataclasses import dataclass
+import tempfile
+from dataclasses import dataclass, field
 from pathlib import Path
 
 HOOK_MARKER = "# cosmo:gitleaks-pre-commit -- managed by Cosmo, safe to overwrite"
@@ -95,3 +98,70 @@ def install_gitleaks_pre_commit_hook(repo_path: Path) -> HookInstallResult:
     hook_path.write_text(_HOOK_SCRIPT)
     hook_path.chmod(hook_path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     return HookInstallResult(path=hook_path, status=status)
+
+
+@dataclass(frozen=True, slots=True)
+class GitleaksFinding:
+    file: str
+    rule_id: str
+    line: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class GitleaksScanResult:
+    clean: bool
+    findings: list[GitleaksFinding] = field(default_factory=list)
+    ran: bool = True  # False when gitleaks itself was unavailable (environment_error)
+
+
+def run_gitleaks_scan(worktree_path: Path, *, gitleaks_bin: str = "gitleaks") -> GitleaksScanResult:
+    """Spec 6.1's gate-side backstop -- the second, non-bypassable secret
+    layer alongside the pre-commit hook, since local hooks are bypassable
+    (`--no-verify`). Runs against the worktree's current file contents
+    (`--no-git`), not the commit history: the pre-commit hook already
+    enforces the per-commit boundary, so this backstop's job is only "does
+    the final state of this task's work contain a secret," not re-scanning
+    every commit already on `develop`. Detection only -- "any secret that
+    reaches a commit is treated as compromised and requires rotation";
+    remediation is a human's job, never automated here."""
+    if shutil.which(gitleaks_bin) is None:
+        return GitleaksScanResult(clean=False, ran=False)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        report_path = Path(tmp) / "gitleaks-report.json"
+        result = subprocess.run(
+            [
+                gitleaks_bin,
+                "detect",
+                "--no-git",
+                "--no-banner",
+                "--redact",
+                "-f",
+                "json",
+                "-r",
+                str(report_path),
+                "-s",
+                str(worktree_path),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode == 0:
+            return GitleaksScanResult(clean=True)
+
+        findings: list[GitleaksFinding] = []
+        try:
+            raw = json.loads(report_path.read_text()) if report_path.exists() else []
+        except json.JSONDecodeError:
+            raw = []
+
+    for item in raw:
+        findings.append(
+            GitleaksFinding(
+                file=item.get("File", "unknown"),
+                rule_id=item.get("RuleID", "unknown"),
+                line=item.get("StartLine"),
+            )
+        )
+    return GitleaksScanResult(clean=False, findings=findings)

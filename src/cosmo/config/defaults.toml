@@ -53,6 +53,41 @@ playwright_npm_version = "1.50.0"
 shm_size = "2gb"
 ipc_host = true
 
+# Spec 1: the fixed target stack. backend_dir/frontend_dir are relative to
+# the task worktree root.
+backend_image = "maven:3.9.9-eclipse-temurin-21"
+backend_dir = "backend"
+frontend_image = "node:20.18-bookworm"
+frontend_dir = "frontend"
+
+stage_timeout_seconds = 1800
+
+# Spec 6.1 layer 2. Patterns are matched with Path.match against the diff's
+# changed paths; annotations are matched as a plain substring per changed line.
+diff_gate_test_path_patterns = [
+    "**/src/test/**",
+    "**/*.test.*",
+    "**/*.spec.*",
+    "**/e2e/**",
+]
+diff_gate_skip_annotations = [
+    "@Disabled",
+    "@Ignore",
+    ".skip(",
+    ".only(",
+    "xit(",
+    "xdescribe(",
+    "test.skip(",
+    "describe.skip(",
+]
+diff_gate_loc_drop_threshold = 20
+
+# Spec 6.4.
+flaky_rerun_limit = 3
+flaky_quarantine_candidate_threshold = 3
+
+error_detail_max_chars = 4000
+
 [knowledge]
 # Spec 11: exceeding the cap fails COMMITTING. Compaction is never automated.
 max_file_lines = 400

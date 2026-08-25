@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from cosmo.store import StoreWriter, TaskNotFoundError, get_task, list_tasks
-from cosmo.store.enums import BlockedReason
+from cosmo.store.enums import BlockedReason, FailureStage, FailureType, NextAction
 
 
 def test_queue_add_then_list_round_trips_a_dag(tmp_path: Path) -> None:
@@ -151,3 +151,70 @@ def test_submit_and_drain_hand_a_write_from_another_thread_to_the_owner(tmp_path
     row = writer.connection.execute("SELECT completed, total FROM task_progress").fetchone()
     assert (row["completed"], row["total"]) == (1, 4)
     writer.close()
+
+
+def test_record_task_failure_round_trips(tmp_path: Path) -> None:
+    """`task_failures` (spec 9.3's payload shape) -- Phase 6's first real
+    writer, unused since Phase 1 shipped the schema."""
+    db_path = tmp_path / "cosmo.db"
+    writer = StoreWriter(db_path)
+    writer.queue_add(task_id="add-foo", spec_path="p1", max_attempts=2)
+
+    writer.record_task_failure(
+        task_id="add-foo",
+        run_id=None,
+        attempt_number=1,
+        failure_type=FailureType.CODE_ERROR,
+        failure_stage=FailureStage.UNIT_TESTS,
+        error_summary="1 unit test failed",
+        error_detail="FooTest#bar: expected 1 but was 2",
+        files_touched=["src/test/FooTest.java"],
+        will_retry=True,
+        next_action=NextAction.RETRY,
+    )
+    writer.close()
+
+    row = (
+        sqlite3.connect(db_path)
+        .execute("SELECT * FROM task_failures WHERE task_id = 'add-foo'")
+        .fetchone()
+    )
+    assert row is not None
+    columns = [
+        d[0] for d in sqlite3.connect(db_path).execute("SELECT * FROM task_failures").description
+    ]
+    record = dict(zip(columns, row, strict=True))
+    assert record["failure_type"] == "code_error"
+    assert record["failure_stage"] == "unit_tests"
+    assert record["will_retry"] == 1
+    assert record["next_action"] == "retry"
+    assert "FooTest.java" in record["files_touched"]
+
+
+def test_record_task_failure_accepts_secrets_stage(tmp_path: Path) -> None:
+    """`FailureStage.SECRETS` (Phase 6 deviation #11) round-trips through
+    the migration-2 CHECK constraint."""
+    db_path = tmp_path / "cosmo.db"
+    writer = StoreWriter(db_path)
+    writer.queue_add(task_id="add-foo", spec_path="p1", max_attempts=2)
+
+    writer.record_task_failure(
+        task_id="add-foo",
+        run_id=None,
+        attempt_number=1,
+        failure_type=FailureType.CODE_ERROR,
+        failure_stage=FailureStage.SECRETS,
+        error_summary="gitleaks found a potential secret",
+        error_detail=None,
+        files_touched=[],
+        will_retry=False,
+        next_action=NextAction.BLOCK,
+    )
+    writer.close()
+
+    row = (
+        sqlite3.connect(db_path)
+        .execute("SELECT failure_stage FROM task_failures WHERE task_id = 'add-foo'")
+        .fetchone()
+    )
+    assert row[0] == "secrets"

@@ -12,7 +12,7 @@ rediscover.
 |---|---|
 | Last updated | 2026-08-25 |
 | Working branch | `develop` |
-| Head commit | `c7167aa` — Phase 4 (Phase 5 not yet committed) |
+| Head commit | `f805ad3` — Phase 5 (Phase 6 not yet committed) |
 | Spec | [v3-cosmo-autonomous-agent-spec.md](v3-cosmo-autonomous-agent-spec.md) |
 
 ## Phase status
@@ -25,7 +25,7 @@ rediscover.
 | 3 — Harness abstraction and Claude Code adapter | **Complete** |
 | 4 — Template system and `cosmo init` | **Complete** |
 | 5 — Worktree lifecycle and git operations | **Complete** |
-| 6 — Validation gate | Not started |
+| 6 — Validation gate | **Complete** |
 | 7 — Task state machine | Not started |
 | 8 — Run loop, DAG, circuit breaker, quota | Not started |
 | 9 — Observability, logs, deployment | Not started |
@@ -956,6 +956,219 @@ knowledge step"). The merge ladder's only precondition is "the task
 branch's HEAD already has the committed work," which every Phase 5 test
 satisfies explicitly before calling into it.
 
+## Phase 6 — Complete
+
+All exit criteria met against a **real Docker daemon**, not just unit tests:
+`cosmo validate <worktree>` against the fixture repo produces a full
+structured result for a green run, a compile failure, a unit failure, an
+e2e failure, an injected flaky test (correctly classified `flaky`, gate
+still passes), and a deliberately weakened test (caught by the diff gate
+before any container ran). `./check.sh` (238 tests, 6 skipped) stays at
+~15s; the 6 skipped are the real-Docker regression tests, opt-in only (see
+decision 9 below). 244 tests total (238 carried/new fast + 6 opt-in slow).
+
+### What exists
+
+| Path | Contents |
+|---|---|
+| `src/cosmo/gate/types.py` | `TestCounts`, `FailingTest`, `StageResult`, `DiffGateViolation`, `DiffGateResult`, `GateResult` -- the spec 9.2/9.3 payload shapes |
+| `src/cosmo/gate/docker_runner.py` | Raw `docker` subprocess mechanics: `container_flags` (spec 1.1's `--ipc=host`/`--shm-size`/labels), `run_container` (foreground `--rm`), `run_detached_service`/`stop_service`/`service_logs`/`published_port` (long-lived e2e services), `create_network`/`remove_network`, `wait_for_http` |
+| `src/cosmo/gate/parsers.py` | `parse_maven_surefire_reports` (reads `target/surefire-reports/*.txt`, not console output), `parse_vitest_json`, `parse_playwright_json` |
+| `src/cosmo/gate/diffgate.py` | `compute_diff` (real `git diff --unified=0 <base>...<branch>`), `run_diff_gate` (spec 6.1 layer 2: modified/deleted test files, net assertion count, skip annotations, LOC drop) |
+| `src/cosmo/gate/quarantine.py` | `load_quarantine`/`append_quarantine_candidate` (spec 6.4), bundled defaults at `src/cosmo/gate/data/{quarantine,quarantine-candidates}.yml` |
+| `src/cosmo/gate/flaky.py` | `confirm_by_rerun`, `maybe_escalate_to_quarantine_candidate` (spec 6.4) |
+| `src/cosmo/gate/error_detail.py` | `build_stage_error_detail`/`build_diff_gate_error_detail` (spec 9.3, size-capped) |
+| `src/cosmo/gate/runner.py` | `run_validation_gate` -- the whole spec 1.2 sequence: diff gate → gitleaks → build → unit → e2e, pure mechanics, no `StoreWriter`/`EventEmitter` |
+| `src/cosmo/gate/validate.py` | `validate_task` -- ties `run_validation_gate` to `StoreWriter`/`EventEmitter` (spec 9.2's `task.validation_result`, spec 9.3's `task_failures` row), the Phase 7/8 seam |
+| `src/cosmo/gate/fake.py` | `FakeGate`, `ScriptedGateResult`, `FakeGate.as_gate_rerun()` |
+| `src/cosmo/git/secrets.py` | Adds `run_gitleaks_scan` (spec 6.1's gate-side backstop) alongside Phase 5's pre-commit hook |
+| `src/cosmo/store/writer.py` | Adds `record_task_failure` -- `task_failures`' first real writer |
+| `src/cosmo/store/reader.py` | `list_events` gains an `event_type` filter (needed by flaky escalation's cross-run history query) |
+| `src/cosmo/store/migrations.py`, `enums.py` | Migration 2: `task_failures.failure_stage` gains `secrets` (deviation 12) |
+| `src/cosmo/config/model.py`, `defaults.toml` | `GateConfig` gains `backend_image`/`backend_dir`/`frontend_image`/`frontend_dir`/`stage_timeout_seconds`/`diff_gate_*`/`flaky_*`/`quarantine_*`/`error_detail_max_chars` |
+| `src/cosmo/cli/main.py` | `cosmo validate <worktree> --task-id ID [--task-branch] [--base-branch] [--allow-test-edits] [--run-id]` -- standalone diagnostic, same posture as `cosmo harness probe` |
+| `tests/fixtures/gate_repo/` | The fixture: a minimal real Spring Boot backend (Maven, JUnit+AssertJ) and Vite+React frontend (Vitest, Playwright), committed lockfile |
+| `tests/fixtures/fake_gate_docker.sh` | Env-var-driven `docker` stand-in for fast unit tests |
+| `tests/test_gate_*.py` | Diff gate, quarantine, flaky, docker_runner mechanics, parsers, boundary -- all fast, all real (real git, real regex/JSON fixtures) |
+| `tests/test_gate_fixture_e2e.py` | The 6 real-Docker regression tests, opt-in via `COSMO_GATE_DOCKER_E2E=1` |
+
+### Decisions made during Phase 6
+
+**1. `FailureStage.SECRETS` added, not in spec 9.3's enumerated list**
+(deviation 12). The gate-side `gitleaks` backstop (spec 6.1) needed its own
+attribution -- folding it into `TEST_INTEGRITY` would make that value
+ambiguous for anyone querying `task_failures` later, since a leaked secret
+is not a test-integrity violation. Required a real schema migration
+(Migration 2): SQLite has no `ALTER TABLE ... DROP CONSTRAINT`, so the CHECK
+constraint change is a create-copy-swap, written as a genuine `INSERT ...
+SELECT` (not a blind drop+recreate) so it stays correct once real rows
+exist, even though `task_failures` had none yet.
+
+**2. `cosmo validate <worktree>` never touches `StoreWriter`/`EventEmitter`.**
+Same posture Phase 3 gave `cosmo harness probe`: a bare worktree path need
+not correspond to a queued task at all, so the CLI command is a standalone
+diagnostic that calls `runner.run_validation_gate` directly. The real seam
+for Phase 7/8's `VALIDATING` state handler is `gate.validate_task`
+(`validate.py`) -- built and tested now (mirroring how Phase 5 built and
+tested `merge_task` well before Phase 7 existed to call it), but not wired
+to any CLI command.
+
+**3. `GateRerun` (`Callable[[], bool]`, spec 3.4's merge-ladder seam) is
+not satisfied directly by `run_validation_gate`.** Its natural signature
+takes `worktree_path`/`base_branch`/`task_branch`/etc. and returns a full
+`GateResult` -- far more than the ladder's merge-retry seam needs, and
+reshaping either signature to fit the other would lose information one side
+needs. `FakeGate.as_gate_rerun(task_id)` returns a closure of the right
+shape for tests; whichever of Phase 7/8 becomes the real caller wraps
+`run_validation_gate` the same way. Recorded per the Phase 5 handoff's own
+instruction to treat this as a spec-deviation-shaped note rather than a
+silent reshape.
+
+**4. Diff gate never flags a newly *added* test file, only modified or
+deleted ones -- found by hand against a real fixture run, not reasoned out
+in advance.** Spec 6.1 layer 2's own wording is "modified or deleted";
+an early version of this gate additionally flagged every *added* test file
+too, which rejected every task that added a new e2e/unit test at all --
+exactly backwards for an autonomous agent that is expected to write tests
+for its own features. `DiffFile.is_added` (git's `A` status) is now
+excluded from the `test_path_modified`/`test_path_deleted` violations, but
+an added-but-immediately-disabled test is still caught by the
+skip-annotation check, which applies regardless of file status. Locked in
+by `test_diff_gate_does_not_flag_a_newly_added_test_file` and
+`test_diff_gate_still_flags_a_disabled_newly_added_test`.
+
+**5. Assertion counting (Open Item 1) is a regex line-count heuristic, not
+a real per-language parser** -- `assertThat(`/`assert[A-Z]\w*(`/`expect(`
+call sites on added vs. removed lines, fails safe (worst case a real
+violation slips through, never a false failure on honest work). The spec
+explicitly defers a real parser to a follow-up spec; a from-scratch
+JUnit/AssertJ/Vitest/Playwright AST parser was out of scope for what this
+phase could verify by hand in the time available.
+
+**6. Maven's Surefire *text reports* (`target/surefire-reports/*.txt`) are
+parsed, never Maven's own console output** -- found by hand against a real
+failing run: the console's `[ERROR] Failures:` recap section names the
+failing method but omits the assertion message entirely, while each
+report file carries the full exception message and a real stack. Vitest and
+Playwright are parsed from their own JSON reporters (`--reporter=json` /
+the built-in `json` reporter), and **the Vitest report is written to a file
+via `--outputFile`, never read from stdout** -- also found by hand: `npm
+ci`'s own stdout ("added N packages...") precedes Vitest's JSON on the same
+combined stream when both run via `sh -c "npm ci && ..."`, which broke
+`json.loads` outright on a real container run before the fix.
+
+**7. Vite 5's `preview.allowedHosts` guard blocks the e2e stage entirely
+unless the target repo sets it** -- found by hand via a real Playwright run
+that failed every assertion as a confusing "element not found." The gate
+reaches `vite preview` by Docker network container hostname (Playwright and
+the frontend are separate containers on a shared network, spec 1.1's own
+`--ipc=host`/`--shm-size` container-isolation posture), and Vite 5 rejects
+any Host header but localhost/an IP by default. This is not fixable from
+Cosmo's side (it's the target repo's `vite.config.ts`), so
+`templates/projects/java-spring-react/docs/frontend/architecture.md` now
+carries a note; a repo that doesn't set `preview.allowedHosts: true` will
+see every e2e test fail with a misleading error until this is understood.
+
+**8. `npm ci`, not `npm install`, for every gate-side npm invocation --
+requires the target repo's `package-lock.json` to be committed.** Chosen
+for the same reproducibility reason CI conventionally uses `ci` over
+`install`: a build that silently re-resolves a slightly different dependency
+tree between build/unit/e2e's three separate containers (each a fresh
+`npm ci`, no shared `node_modules`) is exactly the kind of nondeterminism
+spec 1.1's atomic-version-pinning discipline is trying to eliminate
+elsewhere. Practical implication: **the fixture's `frontend/package-lock
+.json` is deliberately committed, not gitignored** -- found by hand when an
+early real run failed at `npm ci` with `EUSAGE` against an uncommitted
+lockfile. A real target repo must commit its lockfile the same way.
+
+**9. The real-Docker fixture tests (`test_gate_fixture_e2e.py`) are
+opt-in via `COSMO_GATE_DOCKER_E2E=1`, not run by default even when `docker`
+is on PATH.** Unlike `test_git_secrets.py`'s real-`gitleaks` tests
+(sub-second), a full gate run through real Maven/npm/Playwright containers
+takes minutes even warm (~9 min for all 6 scenarios combined) and far
+longer cold (first image pulls, Maven Central, npm registry -- observed
+close to an hour on this box across several false starts, see decision 10).
+Running this on every `./check.sh` would make the fast local loop
+unusable, so it's opt-in, matching the "fake the mechanics, verify for real
+by hand" split every prior phase drew between its default suite and a real
+invocation.
+
+**10. `npm install` hung repeatedly and non-deterministically on this box,
+independent of network reachability -- root-caused, not just worked
+around.** Confirmed by hand, ruled out in this order: (a) not a slow
+network -- `curl` against the npm registry and Maven Central both returned
+in under a second throughout; (b) not `npm audit`'s endpoint specifically --
+`--no-audit` alone didn't fix it; (c) not IPv6 -- forcing
+`NODE_OPTIONS=--dns-result-order=ipv4first` didn't fix it either; (d) the
+real cause was a **leftover, inconsistent `node_modules`** from an earlier
+killed install -- every hang happened while npm reconciled a partial tree
+left by a previous interrupted run (`ps`/`/proc/<pid>/stat` CPU-jiffy
+sampling showed genuine zero-progress stalls, not merely slow ones,
+specifically in this state). A verified-clean `rm -rf node_modules
+package-lock.json` before every `npm install` was reliable every time
+(6 seconds once the package cache was warm). Worth knowing for any future
+session that sees `npm install` hang on this host: check for a partial
+`node_modules` from a prior kill before assuming it's a network problem.
+
+**11. Docker containers write their build artifacts as root on the bind
+mount** (Maven/npm run as root inside the official images by default),
+which blocks a later unprivileged `rm -rf` of `backend/target`/
+`frontend/node_modules` on the host -- found by hand while resetting the
+verification scratch repo between scenarios. Not fixed in the gate runner
+itself (no `--user $(id -u):$(id -g)` added) -- Cosmo's own worktree
+`remove_worktree` (Phase 5) does not currently account for this, and a
+future session should check whether task worktree cleanup can hit the same
+permission wall after a real gate run. Worked around here with a throwaway
+`alpine` container to `rm -rf` the mounted paths as root.
+
+### Things that will matter later
+
+**`remove_worktree` (Phase 5) has not been verified against a worktree
+that has real gate-container-written, root-owned files in it.** Decision 11
+above found this against a hand-built scratch repo, not through Cosmo's own
+worktree lifecycle -- a real Phase 7/8 task run (worktree → gate → cleanup)
+should be checked for this specifically. If it bites, the fix is either
+running gate containers with `--user $(id -u):$(id -g)` (changes what UID
+Maven/npm run as inside the container, untested) or having
+`remove_worktree` shell out to a root container for cleanup the same way
+this session's manual verification did.
+
+**Per-stage container cache mounts (`~/.m2`, npm's cache) are not
+implemented.** Every stage is a fresh `--rm` container with no persisted
+dependency cache, so build → unit → e2e's three separate `mvn`/`npm`
+invocations each redownload the same dependencies from scratch. This kept
+the gate runner simple and made the real verification runs slower than
+they need to be (minutes instead of potentially seconds) but is correct,
+not broken. A future phase (likely 9, "observability, logs, disk,
+deployment") is the natural place to add a persistent build-cache volume
+mounted read-write into every gate container, once real gate-duration data
+(build item 9 below) shows it's worth the added state to manage.
+
+**Gate duration is recorded via `task.validation_result`'s
+`duration_seconds` payload field, not a dedicated table.** Spec 3.3's own
+note wants duration "recorded and queryable" so the 45-minute `VALIDATING`
+timeout can be retuned empirically (Open Item 2) -- `events` (spec 9)
+already supports this via `list_events(event_type=...)` plus JSON payload
+inspection, so a new table would have duplicated existing schema rather
+than filled a real gap. No query convenience beyond `list_events` was
+added; Phase 9 (observability) is the natural place for a real "p95 gate
+duration" report once there's enough real run history to make one useful.
+
+**Flaky-test reruns are scoped to e2e only, matching spec 6.4's own
+framing** ("When a non-quarantined e2e test fails..."). Unit-test flakiness
+is not addressed by the spec and this phase makes no attempt to handle it;
+a flaky unit test still fails the gate as an ordinary `code_error`.
+
+**`gate.backend_image`/`frontend_image`/`backend_dir`/`frontend_dir` assume
+the spec's fixed target stack (Java+Spring backend, Vite+React frontend,
+conventional `backend/`/`frontend/` monorepo layout) -- the spec names this
+stack but never specifies concrete build images, commands, or directory
+conventions.** This phase had to make a concrete choice to have anything to
+run; documented as config (overridable per host/repo) rather than hardcoded,
+but a repo that doesn't follow this exact `backend/`+`frontend/` layout, or
+uses a different build tool, is out of scope until a future spec revision
+generalizes it (most likely via a per-repo manifest, not attempted here).
+
 ## Deviations from the spec, cumulative
 
 Kept here so a future spec revision can absorb them in one pass.
@@ -973,3 +1186,7 @@ Kept here so a future spec revision can absorb them in one pass.
 | 9 | `--setting-sources project` added to the Claude adapter's argv | §2.3 | 4 | Not named in the spec's invocation description at all; fixes the Phase 3 global-config-inheritance finding, verified by a real invocation |
 | 10 | `COSMO_TASK_ID` / `COSMO_DB_PATH` env vars added to the child process | §2.5 | 4 | The test-path guard hook is a separate OS process with no other way to read `allow_test_edits`; the handoff explicitly left this variable's name undecided |
 | 11 | `GitConfig.commit_author_name` / `commit_author_email` added | §3.4 | 5 | Spec never names a git identity for Cosmo's own merge/rebase commits; this box (and a fresh dev box generally) has no global git identity configured, found by hand -- passed as `-c user.name=...` per invocation, never written globally |
+| 12 | `FailureStage.SECRETS` added, not in the spec's enumerated list | §9.3 | 6 | The gate-side `gitleaks` backstop (§6.1) needs distinct attribution from `test_integrity`; required a real schema migration (task_failures.failure_stage CHECK constraint) |
+| 13 | Diff gate never flags a newly *added* test file, only modified/deleted | §6.1 | 6 | §6.1's own wording is "modified or deleted"; flagging additions too rejected every task that wrote a new test at all -- found by hand against a real run |
+| 14 | `GateConfig` gains `backend_image`/`backend_dir`/`frontend_image`/`frontend_dir`/`stage_timeout_seconds`/`diff_gate_*`/`flaky_*`/`quarantine_*`/`error_detail_max_chars` | §1, §6.1, §6.4 | 6 | The spec names the target stack and the guardrail behaviors conceptually but never their concrete build images/commands/thresholds/file locations; this phase needed real values to run anything against |
+| 15 | `run_validation_gate`'s signature does not conform to `git.merge.GateRerun` (`Callable[[], bool]`) | §3.4 | 6 | Its natural signature needs `worktree_path`/`base_branch`/`task_branch`/etc. and returns a full `GateResult`; `FakeGate.as_gate_rerun()` is the adapter, per the Phase 5 handoff's own instruction to record this rather than reshape either signature |

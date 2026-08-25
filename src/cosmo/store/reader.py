@@ -139,6 +139,7 @@ def list_events(
     run_id: str | None = None,
     task_id: str | None = None,
     severity: str | None = None,
+    event_type: str | None = None,
     limit: int = 50,
 ) -> list[EventRow]:
     if not db_path.exists():
@@ -156,6 +157,9 @@ def list_events(
         if severity is not None:
             clauses.append("severity = ?")
             params.append(severity)
+        if event_type is not None:
+            clauses.append("event_type = ?")
+            params.append(event_type)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         sql = f"SELECT * FROM events {where} ORDER BY timestamp DESC, sequence DESC LIMIT ?"
         rows = conn.execute(sql, (*params, limit)).fetchall()

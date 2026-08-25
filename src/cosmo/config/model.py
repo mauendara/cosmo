@@ -97,6 +97,40 @@ class GateConfig(_Strict):
     shm_size: str = Field(min_length=1)
     ipc_host: bool
 
+    # Spec 1's fixed target stack (Java+Spring backend, Vite+React frontend,
+    # monorepo) -- build/unit-test images for the two sides of every repo
+    # Cosmo operates on. Only the playwright image gets spec 1.1's explicit
+    # "never latest" validator below; these two are pinned in defaults.toml
+    # by the same discipline but the spec doesn't name them, so a bad
+    # override here is a config mistake, not a guardrail violation.
+    backend_image: str = Field(min_length=1)
+    backend_dir: str = Field(min_length=1)
+    frontend_image: str = Field(min_length=1)
+    frontend_dir: str = Field(min_length=1)
+
+    # Spec 1.2: one docker-run budget per serial stage (build, unit, e2e).
+    # Not the same as timeouts.validating_wall (that's the whole-task clock
+    # Phase 7 owns) -- this is what keeps a single hung container from
+    # blocking `cosmo validate` forever when nothing else is watching it.
+    stage_timeout_seconds: int = Field(gt=0)
+
+    # Spec 6.1 layer 2 (diff gate / test-integrity detection).
+    diff_gate_test_path_patterns: list[str] = Field(min_length=1)
+    diff_gate_skip_annotations: list[str] = Field(min_length=1)
+    diff_gate_loc_drop_threshold: int = Field(gt=0)
+
+    # Spec 6.4 (flaky handling).
+    flaky_rerun_limit: int = Field(gt=0)
+    flaky_quarantine_candidate_threshold: int = Field(gt=0)
+    # None means "use the file shipped in Cosmo's own package" (gate/data/),
+    # the same "computed unless overridden" posture PathsConfig takes with
+    # XDG paths -- tests point these at a tmp_path copy instead.
+    quarantine_file: Path | None = None
+    quarantine_candidates_file: Path | None = None
+
+    # Spec 9.3: error_detail must be model-consumable, not archival.
+    error_detail_max_chars: int = Field(gt=0)
+
     @model_validator(mode="after")
     def _no_floating_tags(self) -> GateConfig:
         # Spec 1.1: a silent upstream update turns a green suite red overnight,

@@ -1,17 +1,18 @@
-# Handoff — continue at Phase 6
+# Handoff — continue at Phase 7
 
-You are picking up Cosmo mid-build. Phases 0-5 are complete. Your job is
-Phase 6: the Docker validation gate — the largest phase and the correctness
-core. It runs build → unit → e2e serially inside Docker and bypasses the LLM
-harness entirely (spec 2.2's `validate`).
+You are picking up Cosmo mid-build. Phases 0-6 are complete. Your job is
+Phase 7: the full task state machine — `QUEUED` through `DONE`,
+`FAILED_RETRY`/`BLOCKED`, per-state timeouts, the progress watcher, the
+heartbeat, the failure classifier, informed retries, and `COMMITTING`'s
+spec 11 knowledge-file step.
 
 ## Read these first, in this order
 
 | Document | What it is | How to treat it |
 |---|---|---|
 | [v3-cosmo-autonomous-agent-spec.md](v3-cosmo-autonomous-agent-spec.md) | The authoritative specification | **Source of truth.** v1 and v2 are superseded — read them only for history |
-| [v3-implementation-plan.md](v3-implementation-plan.md) | 11-phase build plan | The map. Phase 6 is your scope (§1.1, §1.2, §1.3, §6.1 layer 2, §6.4, §9.3) |
-| [v3-implementation-state.md](v3-implementation-state.md) | What actually exists, plus decisions and gotchas | Read the "Phase 5 — Complete" section in full before writing code — several of its decisions are load-bearing for Phase 6 |
+| [v3-implementation-plan.md](v3-implementation-plan.md) | 11-phase build plan | The map. Phase 7 is your scope (§3.2, §3.3, §4, §6.2, §6.3, §11) |
+| [v3-implementation-state.md](v3-implementation-state.md) | What actually exists, plus decisions and gotchas | Read the "Phase 6 — Complete" section in full before writing code — several of its decisions are load-bearing for Phase 7 |
 
 `v1-*` and `v2-*` in this folder are earlier spec drafts. v3 is a superset of
 both. Do not implement from them.
@@ -30,50 +31,79 @@ build, and any decision you make along the way, in `v3-implementation-state.md`.
 ├── src/cosmo/
 │   ├── checks.py                 # CheckResult / CheckStatus
 │   ├── config/                   # typed model, defaults.toml, three-layer loader
-│   ├── doctor.py                  # core preflight checks (now includes gitleaks)
+│   ├── doctor.py                  # core preflight checks
 │   ├── harness/                  # base ABC (+cwd, +probe), registry, claude/, fake/
-│   │   ├── claude/                 # adapter.py (+--setting-sources project) + stream.py
 │   │   └── fake/                   # FakeHarnessAdapter -- target this in every new test
 │   ├── bootstrap/                 # Phase 4: template discovery, sync, symlinks, cosmo init
-│   ├── git/                       # Phase 5: worktree lifecycle, gitleaks hook, merge ladder
+│   ├── git/                      # Phase 5: worktree lifecycle, gitleaks (hook + gate backstop), merge ladder
 │   │   ├── worktree.py             # create_worktree/remove_worktree/sweep_stale_worktrees
-│   │   ├── secrets.py              # install_gitleaks_pre_commit_hook
-│   │   └── merge.py                # attempt_merge_ladder/merge_task -- GateRerun is YOUR seam
-│   ├── store/                    # SQLite schema, StoreWriter, reader queries (Phase 1)
+│   │   ├── secrets.py              # install_gitleaks_pre_commit_hook, run_gitleaks_scan (Phase 6)
+│   │   └── merge.py                # attempt_merge_ladder/merge_task -- GateRerun is your real caller now
+│   ├── gate/                     # Phase 6: the Docker validation gate -- COMPLETE, this is your caller
+│   │   ├── runner.py               # run_validation_gate -- pure mechanics, the whole build->unit->e2e sequence
+│   │   ├── validate.py             # validate_task -- ties runner to StoreWriter/EventEmitter; NOT YET CALLED from anywhere real
+│   │   ├── fake.py                 # FakeGate, ScriptedGateResult, FakeGate.as_gate_rerun() -- target this in tests
+│   │   └── types.py                # GateResult, StageResult, TestCounts, etc.
+│   ├── store/                    # SQLite schema, StoreWriter, reader queries (Phase 1; task_failures/task_progress/task_heartbeat all unused until now)
 │   ├── events/                   # envelope + EventEmitter, transactional sequence (Phase 1)
-│   ├── proc/                     # ManagedProcess (+on_stdout_chunk), timers, orphan sweep, reap (Phase 2/3)
-│   ├── cli/main.py               # `cosmo` command: config, harness, doctor, queue, events, project, init, templates
-│   └── {gate,task,run,knowledge}/   # EMPTY — later phases (gate is yours)
-├── tests/                       # 201 passing
+│   ├── proc/                     # ManagedProcess (+on_stdout_chunk), WallClockTimer/StallTimer (Phase 2), orphan sweep, reap
+│   ├── cli/main.py               # `cosmo` command: config, harness, doctor, queue, events, project, init, templates, validate
+│   └── {task,run,knowledge}/     # EMPTY — later phases (task is yours)
+├── tests/                       # 238 passing + 6 opt-in real-Docker (COSMO_GATE_DOCKER_E2E=1)
+│   └── fixtures/gate_repo/        # real Spring Boot + Vite/React fixture -- Phase 6's, reusable for your end-to-end test too
 └── check.sh                     # ruff + format + mypy --strict + pytest
 ```
 
-`src/cosmo/gate/` is empty and is exactly where Phase 6's Docker gate runner
-goes.
+`src/cosmo/task/` is empty and is exactly where Phase 7's state machine
+goes. `src/cosmo/run/` (Phase 8, DAG scheduling) and `src/cosmo/knowledge/`
+(also partly Phase 7 — the §11 knowledge-file step) are still empty.
 
 ## Get oriented (2 minutes)
 
 ```bash
 cd /home/dev/delta/cosmo
-git log --oneline           # Phase 5 should be committed at HEAD
+git log --oneline           # Phase 6 should be committed at HEAD
 git branch --show-current   # should say develop
 ./check.sh                  # must be green before you change anything
 cosmo doctor                # core checks + harness checks in two tables
 ```
 
 **Known, pre-existing environment noise on this host** (not something Phase
-6 broke, don't chase it): `cosmo doctor` may show `disk space: FAIL` — this
-WSL2 box runs close to the 10 GB floor. Also: this box has no *global* git
-identity (`git config --global user.name/user.email` are unset — only this
-repo's own local config has one) — Phase 5 worked around this for Cosmo's
-own merge/rebase commits via `GitConfig.commit_author_name/commit_author_email`
-passed as `-c user.name=...` per invocation; any test fixture your own work
-adds that calls `git commit` needs the same treatment (see
-`tests/test_git_merge.py`'s `_git` helper for the pattern). `gitleaks` was
-not on PATH at the start of Phase 5 either — it's now installed at
-`~/.local/bin/gitleaks` (added to this shell's `PATH` via the profile), so
-`cosmo doctor`'s `gitleaks` check and `test_git_secrets.py`'s real-scan tests
-should both pass; don't be surprised it's there.
+7 broke, don't chase it): `cosmo doctor` may show `disk space: FAIL` — this
+WSL2 box runs close to the 10 GB floor at the *test* data path it checks
+(`/tmp` is a small tmpfs on this box); the real filesystem has hundreds of
+GB free, confirmed by hand in Phase 6. This box has no *global* git identity
+either — only this repo's own local config has one — so any test fixture
+your own work adds that calls `git commit` needs `-c user.name=...`/`-c
+user.email=...` passed explicitly (see `tests/test_git_merge.py`'s `_git`
+helper, or `tests/test_gate_diffgate.py`'s). `gitleaks` is installed at
+`~/.local/bin/gitleaks` (on this shell's PATH via the profile) and `docker`
+works — Phase 6 pulled and ran real Maven/npm/Playwright containers on this
+box repeatedly; see its state-doc section for two real environment gotchas
+worth knowing before you touch anything Docker- or npm-related again:
+**`npm install` can hang indefinitely and non-deterministically on this
+host if a previous run was killed mid-install, unrelated to network** (the
+fix is a verified-clean `rm -rf node_modules package-lock.json` before
+reinstalling, not waiting longer or blaming the network), and **Docker
+containers write bind-mounted build artifacts as root**, which blocks a
+later unprivileged `rm -rf` of `target/`/`node_modules` (worked around with
+a throwaway `alpine` container to clean up as root). Phase 6's state-doc
+section has the full diagnosis for both — read it before you burn an hour
+rediscovering either one.
+
+One more: **this session's shell has `XDG_DATA_HOME=/tmp/cosmo-test/data`
+set** (sandboxing `cosmo`'s own runtime state away from the real home
+directory — this is also why `cosmo doctor`'s disk-space check reads a
+small tmpfs, see above). `uv` itself respects this same variable for where
+it stores *tool* venvs, though -- if you ever need to run `uv tool install
+--editable .` again (e.g. after adding a dependency, which is exactly what
+broke the global `cosmo` command mid-Phase-6), run it as `env -u
+XDG_DATA_HOME uv tool install --editable --force .` or it will silently
+reinstall into `/tmp/cosmo-test/data/uv/tools/cosmo` instead of the real
+`~/.local/share/uv/tools/cosmo` the existing `~/.local/bin/cosmo` symlink
+points at, leaving the symlink dangling. `uv run cosmo ...` (this project's
+own `.venv`) is never affected by this and is the more reliable invocation
+for anything scripted.
 
 ## Conventions this codebase follows
 
@@ -83,206 +113,186 @@ should both pass; don't be surprised it's there.
   section that forced the decision. Match that.
 - **Config over constants.** Every tunable goes in `config/model.py` and
   `config/defaults.toml`, annotated with its spec section. No magic numbers.
-- **Validators catch what would fail silently.** See the existing timeout,
-  playwright-tag, and template-hash-exclusion validators/decisions for the
-  pattern: reject or exclude at the source what would otherwise misbehave
-  or drift silently. `config/model.py`'s `GateConfig._no_floating_tags`
-  validator already enforces atomic version pinning for `gate.playwright_image`
-  — Phase 6 is what actually makes that config section load-bearing.
+- **Validators catch what would fail silently.** See the existing
+  timeout-below-wall-clock, floating-tag, and quarantine-expiry validators
+  for the pattern: reject or exclude at the source what would otherwise
+  misbehave or drift silently.
 - **Tests isolate from the developer's environment.** Anything touching config
   must set `COSMO_CONFIG` and `XDG_DATA_HOME` to temp paths — see the autouse
   fixture in `tests/test_cli.py`. Anything touching a real git repo should
   build one in `tmp_path`, never touch this repo or a real target repo.
 - **Fake the external process, test the mechanics — except where "check by
   hand, then use the real thing" already proved out.** `FakeHarnessAdapter`
-  (`cosmo.harness.fake`) is the harness test double; `fake_docker.sh`,
-  `fake_claude.sh`, `fake_openspec.sh` are the subprocess test doubles
-  (`tests/fixtures/`) — `fake_docker.sh` already exists from Phase 2 and is
-  a real option for gate-runner unit tests, but the plan's own exit
-  criterion ("a fixture Java+Spring / Vite+React repo produces a full
-  structured result") asks for a real Docker run against a real fixture
-  repo too — Docker itself may or may not work on this host (WSL2 Docker
-  Desktop integration has been noted as flaky in earlier phases; check with
-  `docker ps` by hand before assuming it works, the same way Phase 5
-  checked `gitleaks`/`git worktree` semantics by hand before coding against
-  them).
-- **Boundary tests are load-bearing, not optional.** `test_harness_boundary.py`
-  keeps harness-specific tokens out of core (`harness/claude/*.py`,
-  `harness/registry.py`, and `bootstrap/symlinks.py` — added in Phase 4 —
-  are the allowed exceptions, plus `config/defaults.toml`).
-  `test_store_boundary.py` keeps `connect_writer` from leaking outside
-  `store/writer.py` and `store/migrations.py`. `test_git_boundary.py`
-  (Phase 5) keeps `cosmo.harness` out of `src/cosmo/git/*.py` (checked via
-  `ast`, not text search) and keeps the literal token `master` out of
-  `src/cosmo/` entirely except in `#`-comments. Check all three before
-  adding any module that imports across these boundaries. The gate runner
-  bypasses the harness entirely by spec (2.2) — it would be reasonable to
-  extend the harness-import ban to `src/cosmo/gate/` too; your call, but
-  document it either way.
+  and `FakeGate` are the two test doubles later phases should target
+  directly rather than reimplementing their own. Real-process/real-Docker
+  tests exist (`tests/test_git_secrets.py`'s real-gitleaks tests,
+  `tests/test_gate_fixture_e2e.py`'s real-Docker gate runs) but are
+  skip-guarded — the first on binary-not-on-PATH, the second on an explicit
+  opt-in env var (`COSMO_GATE_DOCKER_E2E=1`) because a real gate run takes
+  minutes even warm. Follow this same posture for Phase 7: fake
+  harness/gate for the state-machine unit tests, one real end-to-end task
+  against the real adapter and real gate for the exit criterion.
+- **Boundary tests are load-bearing, not optional.** `test_harness_boundary.py`,
+  `test_store_boundary.py`, `test_git_boundary.py`, and (new in Phase 6)
+  `test_gate_boundary.py` all enforce structural invariants via `ast`
+  inspection, not text search. Check whether anything you add to
+  `src/cosmo/task/` needs a similar boundary test — the task state machine
+  legitimately imports *both* `cosmo.harness` and `cosmo.gate` (it's the
+  first module allowed to import both), so no new import ban is obviously
+  needed here, but re-read the existing four before assuming that.
 - **Run `./check.sh` before committing.** All four must pass.
 - **When something fails, check with a real invocation before trusting a
   unit test's green.** This has found a real bug or made a real design
-  decision correctly in every phase so far — Phase 2's two worst bugs,
-  Phase 3's `rate_limit_event` deviation, Phase 4's `openspec --tools
-  claude` conflict, and Phase 5's git-worktree-hooks-are-shared-not-per-
-  worktree finding plus the merge-vs-rebase divergence mechanism (patch-id
-  empty-commit skipping) were all found this way — the last one specifically
-  by running real git commands in a scratch repo *before* writing any
-  ladder code, not by guessing what git would do. For Phase 6: actually run
-  a real gate container against a real fixture repo (build failure, unit
-  failure, e2e failure, a deliberately weakened test, an injected flaky
-  test) — don't only trust the unit tests' green.
+  decision correctly in every phase so far. Phase 6 alone found: a
+  diff-gate bug that rejected every newly-added test file (only caught by
+  running a real scenario, not by the unit tests, which had been written to
+  match the buggy behavior); `npm ci`'s stdout breaking JSON parsing when
+  combined with Vitest's own stdout on the same stream; Vite 5's
+  `preview.allowedHosts` guard blocking the entire e2e stage; and the
+  `npm install` hang described above. None of these were predictable from
+  reading the spec — all six required fixture scenarios (green run, compile
+  failure, unit failure, e2e failure, weakened test, injected flaky test)
+  were run for real against a real Docker daemon before Phase 6 was called
+  done. Do the same for Phase 7: at minimum, one real task should be driven
+  through every state against the real `FakeHarnessAdapter`+`FakeGate`
+  pair, *and* the plan's own integration exit criterion (one real task
+  against the real adapter and real gate on the fixture repo) should
+  actually be run, not just asserted possible.
 
-## Phase 6 scope
+## Phase 7 scope
 
-Spec §1.1 (container requirements), §1.2 (gate execution ordering), §1.3
-(integration test layer), §6.1 layer 2 (the diff gate / test-integrity
-detection), §6.4 (flaky-test handling), §9.3 (`error_detail` construction).
+Spec §3.2 (task state machine), §3.3 (timeout values), §4 (progress &
+liveness), §6.2 (failure types), §6.3 (per-task retries), §11 (knowledge
+management — the `COMMITTING` step specifically).
 
 Summary from the plan:
 
-1. **Docker gate runner, serial: build → unit → e2e** (§1.2), each stage
-   attributed to a distinct `failure_stage` (the enum already exists,
-   `store/enums.py: FailureStage` — `BUILD`, `UNIT_TESTS`, `E2E_TESTS`,
-   `TEST_INTEGRITY` are already there, sitting unused since Phase 1).
-2. **Non-negotiable container flags** (§1.1): `--ipc=host`, `--shm-size=2gb`
-   (`config.gate.ipc_host`/`shm_size` already exist, Phase 0), and
-   `--label orchestrator.run_id=... --label orchestrator.task_id=...` —
-   **required** by Phase 2's `proc.orphans.sweep_containers`, which already
-   filters on exactly these two label keys and has had nothing to find
-   until now.
-3. **Atomic version pinning** (§1.1): Playwright npm version, the
-   `mcr.microsoft.com/playwright` image tag, browser binaries, and any
-   cache key bump as one unit. `config.gate.playwright_image`/
-   `playwright_npm_version` already exist (Phase 0) with a validator
-   rejecting `:latest` or an untagged image (`GateConfig._no_floating_tags`)
-   — a test should assert no `latest` tag appears anywhere in the gate
-   runner's own Dockerfile/compose content, not just in config.
-4. **Diff gate** (§6.1 layer 2), run *before* tests execute, against
-   `git diff develop...task/<spec-id>` — you have a real git module to
-   build this on top of now (`cosmo.git`), though note `attempt_merge_ladder`
-   deliberately runs the *repo-level* merge/rebase, not a diff computation;
-   the diff gate is a new, separate git invocation, most naturally run
-   against the task's own worktree before the container even starts. Fails
-   the task when `allow_test_edits` is unset (`task_queue.allow_test_edits`,
-   Phase 1) and any of: a test-path file modified/deleted; net assertion
-   count decreased; a skip/disable annotation introduced; test-file LOC
-   dropped beyond a configured threshold. Language-specific assertion
-   counting for JUnit/AssertJ and Vitest/Playwright is **Open Item 1** —
-   read spec's "Open Items for Follow-Up Specs" section for the exact
-   framing before guessing at a heuristic. Classified `code_error` /
-   `failure_stage=test_integrity`, `error_detail` names the specific
-   violation.
-5. **Flaky handling** (§6.4): a version-controlled `quarantine.yml` in
-   Cosmo's own repo (owner + expiry required per entry; an expired entry
-   fails validation of the file itself, don't let a stale quarantine
-   silently keep protecting a test). Confirm-by-rerun: a failing
-   non-quarantined e2e test reruns in isolation up to 3×; a pass classifies
-   `flaky` (the enum value already exists, `FailureType.FLAKY`) and
-   consumes no retry attempt. Three `flaky` classifications of the same
-   test across distinct runs appends to `quarantine-candidates.yml` for
-   human review — **never auto-quarantine** (§6.4 step 4 is explicit about
-   this; it's the same self-weakening failure mode as §6.1, just performed
-   by Cosmo instead of the agent).
-6. **`gitleaks` scan as gate-side backstop** (§6.1) — Phase 5 already
-   installs a local pre-commit hook and gitleaks is now a `cosmo doctor`
-   core check; this is the *second*, non-bypassable layer, run inside the
-   gate container or against the worktree before/after the container run
-   (your call — document which and why). "Any secret that reaches a commit
-   is treated as compromised and requires rotation — detection is not
-   remediation" (spec 6.1) — don't build auto-remediation, just detection
-   and a hard fail.
-7. **Structured gate result**: unit and e2e reported **separately, never
-   one combined boolean** (spec 9.2), plus `flaky_detected[]` and
-   `quarantined_skipped[]`.
-8. **`error_detail` construction** (spec 9.3): failing test name +
-   assertion + trimmed stack; build error; failing Playwright step +
-   trace/screenshot **path only, never embedded binary**. Model-consumable,
-   not archival — a test asserts a size ceiling.
-9. **Log actual gate duration on every run** (spec 3.3's own note) so the
-   45-minute `VALIDATING` timeout (`config.timeouts.validating_wall`,
-   already exists) becomes empirically tunable later (**Open Item 2**) —
-   this phase just needs to *record* it; retuning the default is a later
-   decision once real data exists.
-10. **`FakeGate` for Phases 7-8** — the same shape as `FakeHarnessAdapter`
-    (`cosmo.harness.fake`): a test double later phases can drive without a
-    real Docker container. This is also very likely what should satisfy
-    `cosmo.git.merge.GateRerun` in Phase 5's merge ladder — re-read
-    `src/cosmo/git/merge.py`'s module docstring and `GateRerun`'s type
-    (`Callable[[], bool]`) before deciding whether the real gate runner's
-    entry point should conform to that exact signature or whether Phase
-    7/8 should wrap it. Nothing calls `GateRerun` for real yet; that's
-    still open, same shape as Phase 4's `sync_harness_assets(run_id=...)`
-    seam being "real, but uncalled" until its second call site landed.
+1. **State machine**: `QUEUED → PROPOSING → PROPOSED → IMPLEMENTING →
+   VALIDATING → COMMITTING → MERGING → DONE`, with `FAILED_RETRY` and
+   `BLOCKED`, every transition persisted (`task_transitions`, already
+   schema'd and partially exercised by `queue_add`/`queue_block`/
+   `queue_retry`/`queue_complete` — Phase 5's note: those four write plain
+   transitions without a paired `task.state_changed` event; Phase 7 owns
+   making every transition emit one) and emitting `task.state_changed`.
+2. **Per-state timeouts** wired to `proc.timers`' `WallClockTimer`/
+   `StallTimer` (Phase 2, unused as *state-machine* timers until now — Phase
+   3 used them for the harness probe's own ad hoc timeout, not this) with
+   spec §3.3's exact semantics — in particular, **`VALIDATING` timeouts do
+   not consume the code-level retry budget** (a hanging gate is an
+   environment problem — this already matches how Phase 6's
+   `run_validation_gate` classifies a stage timeout as
+   `FailureType.ENVIRONMENT_ERROR`, not `CODE_ERROR`; the state machine
+   should trust that classification rather than re-deriving it), while
+   `IMPLEMENTING` timeouts do count.
+3. **Progress watcher** (§4): `watchdog`/inotify on the change's
+   `tasks.md`, polling fallback at 5-10s. Store numerator and denominator
+   separately, never percent alone (`task_progress` is already schema'd for
+   exactly this). Debounced writes through `StoreWriter.submit()`/`drain()`
+   (Phase 1's cross-thread handoff, exercised in `test_store_writer.py`
+   but with no real background-thread caller yet — this is that caller).
+4. **Heartbeat** (§9.2) with an explicit `source: stream | file | mtime`
+   (`task_heartbeat` schema and `HeartbeatSource` enum already exist);
+   mtime fallback where `supports_structured_stream` is false
+   (`HarnessCapabilities.supports_structured_stream`, Phase 3).
+5. **Failure classifier** producing the §6.2 quadrant. Most of this already
+   exists as a *result*, not yet as a *decision*: `HarnessResult.success`
+   (Phase 3) tells you the harness's own verdict, and Phase 6's
+   `GateResult.failure_type`/`failure_stage` already do this classification
+   for the `VALIDATING` state specifically. What Phase 7 adds is the
+   equivalent classification for `PROPOSING`/`IMPLEMENTING` failures (a
+   harness process failure, a timeout, a rate-limit signal) and the
+   retry-vs-block decision that `gate.validate_task` deliberately left as a
+   "conservative placeholder" (see its docstring) pending this phase's real
+   circuit-breaker-aware logic.
+6. **Informed retries** (§6.3): the retry prompt carries the previous
+   `error_detail` (already a first-class field on `GateResult` and on
+   `task_failures`, spec 9.3) plus `previous_attempts_summary`, passed as
+   `retry_context` to `HarnessAdapter.implement()` (already a parameter,
+   Phase 3 — `supports_retry_context` is declared but nothing has passed a
+   non-`None` value yet). 30-60s delay between attempts
+   (`config.retries.delay_min`/`delay_max`, already exist). Stage-varying
+   budget: build/compile failures get the full budget; e2e failures pass
+   through §6.4 (Phase 6's `confirm_by_rerun`, already wired inside the
+   gate itself) before consuming an attempt at all — this already happens
+   *inside* `run_validation_gate`, so by the time Phase 7 sees a `VALIDATING`
+   failure, flaky e2e failures have already been filtered out; only genuine
+   `code_error`/`environment_error` reach the state machine.
+7. **`COMMITTING`'s spec 11 knowledge step**: append 2-3 lines to the
+   relevant `docs/` file as an edit/reconcile instruction (revise a
+   contradicted line, don't stack contradictions), append a structured
+   `decisions-log.md` entry, and fail `COMMITTING` if a knowledge file
+   exceeds its 400-line cap (`config.knowledge.max_file_lines`, already
+   exists, Phase 0). `src/cosmo/knowledge/` is empty — this is its first code.
+8. **No mid-state resumption** (§3.2) — but `session_id` is persisted
+   already (`task_queue.session_id`, Phase 1 schema; `HarnessResult
+   .session_id`, Phase 3) so deferred item 3 needs no schema change later.
 
 ### Exit criteria (from the plan)
 
-- `cosmo validate <worktree>` on a fixture Java+Spring / Vite+React repo
-  produces a full structured result.
-- Fixture cases pass: green run; compile failure; unit failure; e2e
-  failure; an injected flaky test correctly classified `flaky`; a
-  deliberately weakened test caught by the diff gate.
-- Gate durations are recorded and queryable.
+- `cosmo run --task <id>` drives one task through every state against
+  `FakeHarnessAdapter` + `FakeGate`, with a complete event trail.
+- Tests: retry exhaustion → `BLOCKED` with correct `blocked_reason`;
+  environment error does not consume an attempt; `VALIDATING` timeout does
+  not consume an attempt; a checkbox count that shrinks mid-run does not
+  produce a nonsense percent.
+- One real end-to-end task against the real adapter and real gate on a
+  fixture repo. *(Integration — `tests/fixtures/gate_repo` already exists
+  for this; you may not need a second fixture.)*
 
 ## Things to know before you start
 
-**The validation gate bypasses the harness entirely (spec 2.2).** Nothing in
-`src/cosmo/gate/` should import `cosmo.harness` — consider extending
-`test_git_boundary.py`'s `ast`-based import check (or writing an equivalent
-`test_gate_boundary.py`) to enforce this the same structural way Phase 5
-enforced "the merge ladder never sees a harness adapter."
-
-**`FailureStage`, `FailureType`, and the `task_failures` table already exist
-and are fully unused** (Phase 1 schema, `store/enums.py`). This phase is
-their first real writer. Read `store/migrations.py`'s `task_failures` table
-definition before designing your own result dataclasses — the columns
-(`error_summary`, `error_detail`, `files_touched`, `will_retry`,
-`next_action`) are effectively spec 9.3's payload shape already committed to
-schema; match it rather than inventing a parallel structure.
-
-**`config.gate.*` (playwright image/version, shm_size, ipc_host) has existed
-since Phase 0 with real validators, but nothing has read it yet.** This
-phase is what makes that section load-bearing — a good early sanity check is
-confirming the shipped defaults actually pull and run before building the
-gate runner around them.
-
-**Phase 2's `proc.orphans.sweep_containers()` filters on
-`orchestrator.run_id`/`orchestrator.task_id` labels that no container has
-ever actually carried, because nothing has launched a labeled container
-yet.** Once your gate runner launches its first real container with those
-labels, this is a good moment to re-verify `sweep_containers` end-to-end for
-real (label a container by hand, run the sweep, confirm it's force-removed)
-rather than trusting Phase 2's fake-docker-only test coverage in isolation.
-
-**`git.merge.attempt_merge_ladder`'s `gate_rerun` parameter is real but has
-no real caller yet** — same seam shape as Phase 4's `sync_harness_assets
-(run_id=...)` before Phase 5 gave it one. If the real gate runner's natural
-entry-point signature doesn't match `Callable[[], bool]` cleanly, that's
-useful information — record it as a Phase 5 spec-deviation-shaped note
-retroactively rather than silently reshaping `GateRerun` without saying so
-(same discipline Phase 4/5 both followed for their own seams).
-
 **Nothing before Phase 8 should implement circuit-breaker trip logic or run
-scheduling** — unchanged since Phase 3's handoff, still applies. Phase 6 is
-about the gate producing a correct, structured result — not about what the
-run loop does with it.
+scheduling** — unchanged since Phase 3's handoff, still applies. Phase 7 is
+about one task's state machine being correct — not about what a multi-task
+run loop does with several of them, or when it pauses.
+
+**`gate.validate_task`'s retry/next-action logic is explicitly provisional**
+— read its docstring (`src/cosmo/gate/validate.py`) before assuming it's
+Phase 7's real decision. It applies spec 6.2/6.3's literal rule
+(`code_error` counts, `environment_error` doesn't) but does not know about
+the circuit breaker (§6.5, Phase 8) or about `attempt_number`/`max_attempts`
+in the way the real state machine will track them across `PROPOSING` and
+`IMPLEMENTING` too, not just `VALIDATING`. Decide whether Phase 7 calls this
+function as-is (accepting its placeholder policy for `VALIDATING`
+specifically) or whether the state machine's own classifier should
+subsume it — either is defensible, but document whichever you choose.
+
+**The merge ladder (`git.merge.merge_task`) has a real, tested `gate_rerun`
+parameter but no real caller yet** — same seam shape as Phase 4's
+`sync_harness_assets(run_id=...)` before Phase 5 gave it one, and as
+`GateRerun`/`FakeGate.as_gate_rerun` (Phase 6) before Phase 7 gives it one.
+`MERGING`'s real handler is very likely this phase's second real caller
+of `run_validation_gate` (via `FakeGate.as_gate_rerun`-shaped closure,
+or the real gate wrapped the same way) — re-read `git/merge.py`'s module
+docstring before wiring this.
+
+**Phase 6's `run_validation_gate` already absorbs a fair amount of what
+looks like Phase 7 scope** — flaky-test confirm-by-rerun, the diff gate,
+the gitleaks backstop, and stage-level `FailureType`/`FailureStage`
+classification all happen *inside* the gate, before Phase 7 ever sees a
+result. Don't re-implement any of this in the state machine; call
+`gate.validate_task` (or `FakeGate.validate` in tests) and trust its
+`GateResult`.
+
+**Worktree cleanup after a real gate run may hit root-owned files** (Phase
+6 decision 11, state doc) — if `remove_worktree` fails or behaves oddly
+after `VALIDATING` runs a real gate in your end-to-end test, this is the
+first thing to check, not a new bug.
 
 ## When you finish
 
 1. `./check.sh` green.
-2. Update `v3-implementation-state.md`: mark Phase 6 complete, list what
+2. Update `v3-implementation-state.md`: mark Phase 7 complete, list what
    exists, record every decision made and anything a future session would
    otherwise rediscover. Append any new spec deviation to the cumulative
-   table at the bottom.
+   table at the bottom (next number is 16).
 3. Commit to `develop` with a message explaining *why*, in the style of the
-   Phase 0-5 commits.
-4. Rewrite this handoff for Phase 7 (task state machine, progress,
-   liveness, retries) — or delete it if the next session continues
-   immediately.
+   Phase 0-6 commits.
+4. Rewrite this handoff for Phase 8 — or delete it if the next session
+   continues immediately.
 
-Phase 7 is next: the full task state machine (`QUEUED` through `DONE`,
-`FAILED_RETRY`, `BLOCKED`), per-state timeouts wired to Phase 2's timers,
-the progress watcher (`tasks.md` checkboxes via `watchdog`), the heartbeat,
-the failure classifier, informed retries, and `COMMITTING`'s spec 11
-knowledge-file step. It is the phase that finally gives Phase 5's worktree
-lifecycle and Phase 6's gate real callers end to end.
+Phase 8 is next: the run loop itself (DAG scheduling over the task queue,
+dependency ordering), the global circuit breaker (§6.5 — explicitly not
+Phase 7's job), quota detection and the dollar-cost hard stop (§7), and
+tying `sync_harness_assets`/worktree creation/the merge ladder/the gate
+into one coherent per-task pipeline the run loop drives task by task.

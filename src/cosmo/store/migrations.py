@@ -199,8 +199,52 @@ CREATE TABLE task_failures (
 CREATE INDEX idx_task_failures_task ON task_failures(task_id);
 """
 
+# ============================================================================
+# Migration 2 -- Phase 6: `task_failures.failure_stage` gains 'secrets'.
+#
+# Spec 9.3 enumerates `failure_stage` without a value for the gate-side
+# `gitleaks` backstop (spec 6.1) -- a secret reaching the diff is not a
+# test-integrity violation, so it needs its own attribution rather than
+# overloading `test_integrity` (see `store.enums.FailureStage.SECRETS`'s
+# docstring, and deviation #12 in `docs/v3-implementation-state.md`).
+# SQLite has no `ALTER TABLE ... DROP CONSTRAINT`, so a CHECK-constraint
+# change means recreate-copy-swap, same recipe SQLite's own docs recommend;
+# safe here because `task_failures` has never had a real writer until this
+# phase, but written as a genuine copy (not a blind DROP+CREATE) so this
+# migration is correct even after real rows exist.
+# ============================================================================
+_SCHEMA_V2 = """
+CREATE TABLE task_failures_v2 (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id        TEXT NOT NULL REFERENCES task_queue(task_id),
+    run_id         TEXT REFERENCES run_state(run_id),
+    attempt_number INTEGER NOT NULL,
+    failure_type   TEXT NOT NULL CHECK (failure_type IN (
+                       'code_error', 'environment_error', 'timeout', 'flaky'
+                   )),
+    failure_stage  TEXT NOT NULL CHECK (failure_stage IN (
+                       'propose', 'implement', 'build', 'unit_tests', 'e2e_tests',
+                       'test_integrity', 'secrets', 'commit', 'merge'
+                   )),
+    error_summary  TEXT NOT NULL,
+    error_detail   TEXT,
+    files_touched  TEXT NOT NULL DEFAULT '[]',
+    will_retry     INTEGER NOT NULL CHECK (will_retry IN (0, 1)),
+    next_action    TEXT NOT NULL CHECK (next_action IN (
+                       'retry', 'block', 'escalate_circuit_breaker'
+                   )),
+    timestamp      TEXT NOT NULL,
+    event_id       TEXT REFERENCES events(event_id)
+);
+INSERT INTO task_failures_v2 SELECT * FROM task_failures;
+DROP TABLE task_failures;
+ALTER TABLE task_failures_v2 RENAME TO task_failures;
+CREATE INDEX idx_task_failures_task ON task_failures(task_id);
+"""
+
 MIGRATIONS: list[Migration] = [
     Migration(1, "initial schema: events, queue, progress, run state, cost, history", _SCHEMA_V1),
+    Migration(2, "task_failures.failure_stage gains secrets (gate gitleaks backstop)", _SCHEMA_V2),
 ]
 
 

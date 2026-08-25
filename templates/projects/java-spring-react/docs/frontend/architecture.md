@@ -29,3 +29,13 @@ local-vs-server-state boundary.
   validation gate's Docker container (spec 1.1) -- never against a
   developer's locally-running dev server, so the gate result reflects what
   actually ships.
+
+## Gate compatibility: `vite.config.ts`
+
+The gate's e2e stage reaches `vite preview` by its Docker network container
+hostname, not `localhost` -- Playwright and the frontend run in separate
+containers on a shared network (Phase 6). Vite 5's preview server rejects
+any other Host header by default (a DNS-rebinding guard) and fails with
+"Blocked request. This host ... is not allowed", which surfaces in Playwright
+as a confusing "element not found" rather than a clear cause. Set
+`preview.allowedHosts: true` in `vite.config.ts` so the gate can reach it.

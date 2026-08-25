@@ -20,7 +20,7 @@ from pathlib import Path
 
 from cosmo.store.clock import utcnow_iso
 from cosmo.store.connection import checkpoint_truncate, connect_writer
-from cosmo.store.enums import BlockedReason
+from cosmo.store.enums import BlockedReason, FailureStage, FailureType, NextAction
 from cosmo.store.migrations import migrate
 
 WriteJob = Callable[[sqlite3.Connection], None]
@@ -175,6 +175,52 @@ class StoreWriter:
             )
             self._record_transition(
                 task_id, run_id=None, from_state=from_state, to_state="done", now=now
+            )
+
+    # -- task_failures (spec 9.3) -------------------------------------------
+    def record_task_failure(
+        self,
+        *,
+        task_id: str,
+        run_id: str | None,
+        attempt_number: int,
+        failure_type: FailureType,
+        failure_stage: FailureStage,
+        error_summary: str,
+        error_detail: str | None,
+        files_touched: list[str],
+        will_retry: bool,
+        next_action: NextAction,
+        event_id: str | None = None,
+    ) -> None:
+        """The append-only historical trail (spec 8) task_failures feeds --
+        this is its first real writer (Phase 1 shipped the table unused).
+        Columns match spec 9.3's `task.failed` payload shape exactly rather
+        than inventing a parallel structure."""
+        now = utcnow_iso()
+        with self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO task_failures (
+                    task_id, run_id, attempt_number, failure_type, failure_stage,
+                    error_summary, error_detail, files_touched, will_retry,
+                    next_action, timestamp, event_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    task_id,
+                    run_id,
+                    attempt_number,
+                    failure_type.value,
+                    failure_stage.value,
+                    error_summary,
+                    error_detail,
+                    json.dumps(files_touched),
+                    int(will_retry),
+                    next_action.value,
+                    now,
+                    event_id,
+                ),
             )
 
     def _current_status(self, task_id: str) -> str:

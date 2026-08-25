@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import sqlite3
+import subprocess
 import threading
 from dataclasses import Field
 from pathlib import Path
@@ -26,6 +27,8 @@ from cosmo.checks import CheckResult, CheckStatus
 from cosmo.config import DEFAULTS_PATH, CosmoConfig, load_config, user_config_path
 from cosmo.doctor import core_checks
 from cosmo.events import EventEmitter, EventType, Severity
+from cosmo.gate.runner import run_validation_gate
+from cosmo.gate.types import GateResult
 from cosmo.harness import (
     UnknownHarnessError,
     available_harnesses,
@@ -247,6 +250,86 @@ def harness_probe(
     console.print(table)
 
     if not result.success:
+        raise typer.Exit(code=1)
+
+
+def _git_current_branch(worktree: Path) -> str:
+    result = subprocess.run(
+        ["git", "-C", str(worktree), "rev-parse", "--abbrev-ref", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return result.stdout.strip()
+
+
+def _render_gate_result(result: GateResult) -> None:
+    table = Table(title="validation gate result", title_justify="left", show_header=False)
+    table.add_column("field", style="bold")
+    table.add_column("value")
+    table.add_row("passed", str(result.passed))
+    table.add_row("duration_seconds", f"{result.duration_seconds:.2f}")
+    table.add_row("diff_gate", "passed" if result.diff_gate.passed else "FAILED")
+    for stage_name, stage in (("build", result.build), ("unit", result.unit), ("e2e", result.e2e)):
+        if stage is None:
+            table.add_row(stage_name, "-")
+            continue
+        counts = (
+            f"{stage.counts.passed} passed, {stage.counts.failed} failed, "
+            f"{stage.counts.skipped} skipped"
+            if stage.counts
+            else "-"
+        )
+        table.add_row(stage_name, f"{'passed' if stage.passed else 'FAILED'} ({counts})")
+    table.add_row("flaky_detected", ", ".join(result.flaky_detected) or "-")
+    table.add_row("quarantined_skipped", ", ".join(result.quarantined_skipped) or "-")
+    if not result.passed:
+        table.add_row("failure_type", result.failure_type.value if result.failure_type else "-")
+        table.add_row("failure_stage", result.failure_stage.value if result.failure_stage else "-")
+        table.add_row("error_summary", result.error_summary or "-")
+        table.add_row("error_detail", result.error_detail or "-")
+    console.print(table)
+
+
+@app.command("validate")
+def validate_cmd(
+    worktree: Annotated[Path, typer.Argument(help="Path to the task's worktree.")],
+    task_id: Annotated[str, typer.Option(help="Task identifier, for labels and attribution.")],
+    task_branch: Annotated[
+        str | None,
+        typer.Option(help="Defaults to the worktree's current branch."),
+    ] = None,
+    base_branch: Annotated[
+        str | None, typer.Option(help="Defaults to git.base_branch from config.")
+    ] = None,
+    allow_test_edits: Annotated[
+        bool, typer.Option(help="Skip the diff gate's test-integrity checks (spec 6.1).")
+    ] = False,
+    run_id: Annotated[str | None, typer.Option(help="Attaches gate container labels only.")] = None,
+    config: ConfigOption = None,
+) -> None:
+    """Run the Docker validation gate standalone (plan Phase 6 exit
+    criterion) -- a diagnostic entry point, the same posture `cosmo harness
+    probe` takes: it runs the gate directly against `worktree` and never
+    touches the store, since a bare worktree need not correspond to a queued
+    task. `gate.validate_task` is the store-backed seam for the real
+    `VALIDATING` state handler (Phase 7/8)."""
+    cfg = _load(config)
+    resolved_branch = task_branch if task_branch is not None else _git_current_branch(worktree)
+    resolved_base = base_branch if base_branch is not None else cfg.git.base_branch
+
+    result = run_validation_gate(
+        task_id=task_id,
+        run_id=run_id,
+        worktree_path=worktree,
+        base_branch=resolved_base,
+        task_branch=resolved_branch,
+        allow_test_edits=allow_test_edits,
+        gate=cfg.gate,
+        db_path=cfg.paths.db_path,
+    )
+    _render_gate_result(result)
+    if not result.passed:
         raise typer.Exit(code=1)
 
 
