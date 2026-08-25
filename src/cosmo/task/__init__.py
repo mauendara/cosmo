@@ -1,6 +1,12 @@
-"""Placeholder package -- implemented in a later phase.
-
-See docs/v3-implementation-plan.md.
+"""The spec 3.2 task state machine (Phase 7): `task.machine.run_task` drives
+one task through every state, with per-state timeouts (`task.timeouts`),
+progress/liveness watching (`task.progress`), failure classification
+(`task.classify`), and informed retries (`task.retry`).
 """
 
-# Phase 7: task state machine, progress watcher, retries (spec 3.2, 4, 6.3).
+from __future__ import annotations
+
+from cosmo.task.machine import run_task
+from cosmo.task.types import TaskContext
+
+__all__ = ["run_task", "TaskContext"]

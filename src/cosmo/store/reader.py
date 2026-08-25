@@ -57,6 +57,22 @@ class EventRow:
 
 
 @dataclass(frozen=True, slots=True)
+class TaskFailureRow:
+    id: int
+    task_id: str
+    run_id: str | None
+    attempt_number: int
+    failure_type: str
+    failure_stage: str
+    error_summary: str
+    error_detail: str | None
+    files_touched: list[str]
+    will_retry: bool
+    next_action: str
+    timestamp: str
+
+
+@dataclass(frozen=True, slots=True)
 class ProjectRow:
     project_id: str
     target_path: str
@@ -174,6 +190,40 @@ def list_events(
                 severity=r["severity"],
                 schema_version=r["schema_version"],
                 payload=json.loads(r["payload"]),
+            )
+            for r in rows
+        ]
+    finally:
+        conn.close()
+
+
+def list_task_failures(db_path: Path, task_id: str) -> list[TaskFailureRow]:
+    """Feeds spec 6.3's informed retries: `record_task_failure` already
+    persists everything the retry prompt needs (`error_detail`, which stage,
+    which attempt), so the state machine reads it back here rather than
+    threading a `GateResult`/failure detail across the retry boundary by
+    hand."""
+    if not db_path.exists():
+        return []
+    conn = connect_reader(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT * FROM task_failures WHERE task_id = ? ORDER BY id", (task_id,)
+        ).fetchall()
+        return [
+            TaskFailureRow(
+                id=r["id"],
+                task_id=r["task_id"],
+                run_id=r["run_id"],
+                attempt_number=r["attempt_number"],
+                failure_type=r["failure_type"],
+                failure_stage=r["failure_stage"],
+                error_summary=r["error_summary"],
+                error_detail=r["error_detail"],
+                files_touched=json.loads(r["files_touched"]),
+                will_retry=bool(r["will_retry"]),
+                next_action=r["next_action"],
+                timestamp=r["timestamp"],
             )
             for r in rows
         ]

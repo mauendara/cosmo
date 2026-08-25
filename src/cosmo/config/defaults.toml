@@ -92,6 +92,13 @@ error_detail_max_chars = 4000
 # Spec 11: exceeding the cap fails COMMITTING. Compaction is never automated.
 max_file_lines = 400
 
+[progress]
+# Spec 4: "polling fallback at 5-10s". Also used as the native-progress poll
+# interval (see ProgressConfig docstring) -- there is no separate "primary"
+# interval since Phase 7 has no live stream-event callback to poll instead
+# (docs/v3-implementation-state.md's Phase 7 section explains why).
+poll_interval_seconds = 7
+
 [disk]
 # Spec 9.5: a full disk fails every later task in a way that reads as a code error.
 min_free_gb = 10.0

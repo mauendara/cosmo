@@ -147,6 +147,17 @@ class KnowledgeConfig(_Strict):
     max_file_lines: int = Field(gt=0)
 
 
+class ProgressConfig(_Strict):
+    """Spec 4: `watchdog`/inotify on the change's `tasks.md`, polling
+    fallback at 5-10s. `poll_interval_seconds` is that fallback interval --
+    also the only interval used at all when the harness adapter reports
+    native progress instead of a file to watch (`HarnessCapabilities.
+    reports_native_progress`), since there is nothing to inotify-watch in
+    that case."""
+
+    poll_interval_seconds: int = Field(gt=0)
+
+
 class DiskConfig(_Strict):
     min_free_gb: float = Field(gt=0.0)
 
@@ -187,6 +198,7 @@ class CosmoConfig(_Strict):
     cost: CostConfig
     gate: GateConfig
     knowledge: KnowledgeConfig
+    progress: ProgressConfig
     disk: DiskConfig
     git: GitConfig
     paths: PathsConfig

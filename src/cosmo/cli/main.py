@@ -6,6 +6,7 @@ import dataclasses
 import sqlite3
 import subprocess
 import threading
+import uuid
 from dataclasses import Field
 from pathlib import Path
 from typing import Annotated, Any
@@ -26,9 +27,10 @@ from cosmo.bootstrap import (
 from cosmo.checks import CheckResult, CheckStatus
 from cosmo.config import DEFAULTS_PATH, CosmoConfig, load_config, user_config_path
 from cosmo.doctor import core_checks
-from cosmo.events import EventEmitter, EventType, Severity
+from cosmo.events import EventEmitter, EventType, Severity, emit_state_changed
 from cosmo.gate.runner import run_validation_gate
 from cosmo.gate.types import GateResult
+from cosmo.git.worktree import create_worktree
 from cosmo.harness import (
     UnknownHarnessError,
     available_harnesses,
@@ -37,7 +39,7 @@ from cosmo.harness import (
 )
 from cosmo.harness.base import HarnessCapabilities, HarnessResult
 from cosmo.store import StoreWriter, TaskNotFoundError
-from cosmo.store.enums import BlockedReason
+from cosmo.store.enums import BlockedReason, TaskStatus
 from cosmo.store.reader import (
     find_project_by_path,
     get_progress,
@@ -46,6 +48,7 @@ from cosmo.store.reader import (
     list_projects,
     list_tasks,
 )
+from cosmo.task import TaskContext, run_task
 
 app = typer.Typer(
     name="cosmo",
@@ -333,6 +336,81 @@ def validate_cmd(
         raise typer.Exit(code=1)
 
 
+@app.command("run")
+def run_cmd(
+    task_id: Annotated[
+        str, typer.Option("--task", help="A task already added via `cosmo queue add`.")
+    ],
+    repo: Annotated[
+        Path, typer.Option(help="Cosmo's own checkout of the target repo, on base_branch.")
+    ],
+    base_branch: Annotated[
+        str | None, typer.Option(help="Defaults to git.base_branch from config.")
+    ] = None,
+    harness: HarnessOption = None,
+    config: ConfigOption = None,
+) -> None:
+    """Drive one queued task through the full spec 3.2 state machine (plan
+    Phase 7 exit criterion): `QUEUED -> PROPOSING -> ... -> DONE`, or
+    `BLOCKED` on an unrecoverable failure. Creates the task's worktree
+    (spec 3.2/10.5), then calls `task.machine.run_task`."""
+    cfg = _load(config)
+    task = get_task(cfg.paths.db_path, task_id)
+    if task is None:
+        err_console.print(f"[red]no such task: {task_id!r}[/red]")
+        raise typer.Exit(code=1)
+    if task.status != "queued":
+        err_console.print(f"[red]task {task_id!r} is {task.status!r}, not queued[/red]")
+        raise typer.Exit(code=1)
+
+    resolved_base = base_branch if base_branch is not None else cfg.git.base_branch
+    name, source = resolve_harness_name(harness, None, cfg.harness.name)
+    console.print(f"harness: [bold]{name}[/bold] (from {source})")
+    try:
+        adapter = get_adapter(name)(cfg)
+    except UnknownHarnessError as exc:
+        err_console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from None
+
+    writer = StoreWriter(cfg.paths.db_path)
+    try:
+        emitter = EventEmitter(writer)
+        run_id = uuid.uuid4().hex
+        spec_id = Path(task.spec_path).stem
+        info = create_worktree(
+            repo_path=repo,
+            work_dir=cfg.paths.work_dir,
+            run_id=run_id,
+            task_id=task_id,
+            spec_id=spec_id,
+            base_branch=resolved_base,
+            harness=name,
+            writer=writer,
+            emitter=emitter,
+        )
+        adapter.cwd = info.path
+
+        ctx = TaskContext(
+            task_id=task_id,
+            spec_path=task.spec_path,
+            worktree_path=info.path,
+            branch=info.branch,
+            base_branch=resolved_base,
+            allow_test_edits=task.allow_test_edits,
+            max_attempts=task.max_attempts,
+        )
+        final_status = run_task(
+            ctx=ctx, config=cfg, writer=writer, emitter=emitter, adapter=adapter, repo_path=repo
+        )
+    finally:
+        writer.close()
+
+    style = "green" if final_status is TaskStatus.DONE else "yellow"
+    console.print(f"[{style}]{final_status.value}[/{style}] {task_id}")
+    if final_status is not TaskStatus.DONE:
+        raise typer.Exit(code=1)
+
+
 @app.command()
 def doctor(
     config: ConfigOption = None,
@@ -575,7 +653,7 @@ def queue_add(
     resolved_task_id = task_id or Path(spec_path).stem
     writer = StoreWriter(cfg.paths.db_path)
     try:
-        writer.queue_add(
+        result = writer.queue_add(
             task_id=resolved_task_id,
             spec_path=spec_path,
             depends_on=list(depends_on) if depends_on else [],
@@ -583,12 +661,7 @@ def queue_add(
             max_attempts=max_attempts if max_attempts is not None else cfg.retries.max_attempts,
             allow_test_edits=allow_test_edits,
         )
-        EventEmitter(writer).emit(
-            event_type=EventType.TASK_STATE_CHANGED,
-            severity=Severity.INFO,
-            task_id=resolved_task_id,
-            payload={"from_state": None, "to_state": "queued", "attempt_number": 0},
-        )
+        emit_state_changed(EventEmitter(writer), result)
     except sqlite3.IntegrityError:
         err_console.print(f"[red]task {resolved_task_id!r} already queued[/red]")
         raise typer.Exit(code=1) from None
@@ -654,13 +727,8 @@ def queue_retry(task_id: str, config: ConfigOption = None) -> None:
     cfg = _load(config)
     writer = StoreWriter(cfg.paths.db_path)
     try:
-        writer.queue_retry(task_id)
-        EventEmitter(writer).emit(
-            event_type=EventType.TASK_STATE_CHANGED,
-            severity=Severity.INFO,
-            task_id=task_id,
-            payload={"to_state": "queued"},
-        )
+        result = writer.queue_retry(task_id)
+        emit_state_changed(EventEmitter(writer), result)
     except TaskNotFoundError:
         err_console.print(f"[red]no such task: {task_id!r}[/red]")
         raise typer.Exit(code=1) from None
@@ -685,13 +753,15 @@ def queue_block(
 
     writer = StoreWriter(cfg.paths.db_path)
     try:
-        writer.queue_block(task_id, blocked_reason)
-        EventEmitter(writer).emit(
+        result = writer.queue_block(task_id, blocked_reason)
+        emitter = EventEmitter(writer)
+        emitter.emit(
             event_type=EventType.TASK_BLOCKED,
             severity=Severity.WARNING,
             task_id=task_id,
             payload={"blocked_reason": blocked_reason.value},
         )
+        emit_state_changed(emitter, result)
     except TaskNotFoundError:
         err_console.print(f"[red]no such task: {task_id!r}[/red]")
         raise typer.Exit(code=1) from None

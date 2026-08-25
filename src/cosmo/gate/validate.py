@@ -22,6 +22,7 @@ always reports `next_action=RETRY`.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 from cosmo.config.model import CosmoConfig
@@ -31,6 +32,8 @@ from cosmo.gate.runner import run_validation_gate
 from cosmo.gate.types import GateResult, StageResult
 from cosmo.store.enums import FailureType, NextAction, Severity
 from cosmo.store.writer import StoreWriter
+
+GateRunner = Callable[..., GateResult]
 
 
 def _stage_payload(stage: StageResult | None) -> dict[str, object] | None:
@@ -59,8 +62,15 @@ def validate_task(
     config: CosmoConfig,
     writer: StoreWriter,
     emitter: EventEmitter,
+    gate_runner: GateRunner = run_validation_gate,
 ) -> GateResult:
-    result = run_validation_gate(
+    """`gate_runner` defaults to the real Docker gate; Phase 7's state-machine
+    tests inject a closure over `FakeGate.validate` instead, so this
+    function's side effects (the `task.validation_result` event and, on
+    failure, the `task_failures` row below) are exercised for real against a
+    scripted result without a Docker daemon -- rather than duplicating this
+    function's retry/classification logic a second time in a fake."""
+    result = gate_runner(
         task_id=task_id,
         run_id=run_id,
         worktree_path=worktree_path,

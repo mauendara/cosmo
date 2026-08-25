@@ -27,7 +27,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from cosmo.events import EventEmitter, EventType, Severity
+from cosmo.events import EventEmitter, EventType, Severity, emit_state_changed
 from cosmo.git.worktree import remove_worktree
 from cosmo.store.enums import BlockedReason
 from cosmo.store.writer import StoreWriter
@@ -167,7 +167,7 @@ def merge_task(
 
     if outcome.merged:
         remove_worktree(repo_path=repo_path, worktree_path=worktree_path, branch=branch)
-        writer.queue_complete(task_id)
+        transition = writer.queue_complete(task_id)
         emitter.emit(
             event_type=EventType.TASK_COMPLETED,
             severity=Severity.INFO,
@@ -175,10 +175,11 @@ def merge_task(
             task_id=task_id,
             payload={"rebase_attempted": outcome.rebase_attempted},
         )
+        emit_state_changed(emitter, transition)
     else:
         # attempt_merge_ladder always sets blocked_reason when merged=False.
         assert outcome.blocked_reason is not None
-        writer.queue_block(
+        transition = writer.queue_block(
             task_id, outcome.blocked_reason, note="automated merge/rebase recovery did not succeed"
         )
         emitter.emit(
@@ -191,5 +192,6 @@ def merge_task(
                 "rebase_attempted": outcome.rebase_attempted,
             },
         )
+        emit_state_changed(emitter, transition)
 
     return MergeResult(outcome=outcome, worktree_removed=outcome.merged)

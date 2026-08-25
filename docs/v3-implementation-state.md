@@ -12,7 +12,7 @@ rediscover.
 |---|---|
 | Last updated | 2026-08-25 |
 | Working branch | `develop` |
-| Head commit | `f805ad3` — Phase 5 (Phase 6 not yet committed) |
+| Head commit | `b1b4d98` — Phase 6 (Phase 7 not yet committed) |
 | Spec | [v3-cosmo-autonomous-agent-spec.md](v3-cosmo-autonomous-agent-spec.md) |
 
 ## Phase status
@@ -26,7 +26,7 @@ rediscover.
 | 4 — Template system and `cosmo init` | **Complete** |
 | 5 — Worktree lifecycle and git operations | **Complete** |
 | 6 — Validation gate | **Complete** |
-| 7 — Task state machine | Not started |
+| 7 — Task state machine | **Complete** |
 | 8 — Run loop, DAG, circuit breaker, quota | Not started |
 | 9 — Observability, logs, deployment | Not started |
 | 10 — Acceptance run | Not started |
@@ -1169,6 +1169,248 @@ but a repo that doesn't follow this exact `backend/`+`frontend/` layout, or
 uses a different build tool, is out of scope until a future spec revision
 generalizes it (most likely via a per-repo manifest, not attempted here).
 
+## Phase 7 — Complete
+
+All exit criteria met. `cosmo run --task <id>` drives one task through the
+full spec 3.2 state machine (`QUEUED -> PROPOSING -> PROPOSED ->
+IMPLEMENTING -> VALIDATING -> COMMITTING -> MERGING -> DONE`, with
+`FAILED_RETRY`/`BLOCKED`), with a real per-state persisted transition +
+`task.state_changed` event trail, against `FakeHarnessAdapter` for the fast
+suite and against the **real** Docker gate (`COSMO_GATE_DOCKER_E2E=1`,
+opt-in, actually run this session -- 1 task, real worktree, real merge, 2m40s)
+for the integration exit criterion. `./check.sh`: 264 tests, 7 skipped (the
+6 real-Docker gate tests from Phase 6 plus this phase's own opt-in
+real-adapter+real-gate test), ~17s.
+
+### What exists
+
+| Path | Contents |
+|---|---|
+| `src/cosmo/task/machine.py` | `run_task` -- the actual driver. One `_do_*` helper per state; see its own module docstring for the full attempt-counting model (below) |
+| `src/cosmo/task/timeouts.py` | `run_with_wall_clock_timeout`/`run_with_liveness_timeout` -- generalizes the background-thread+join+cancel pattern `cli/main.py`'s Phase-3 `harness probe` command hand-rolled once; `on_tick` lets a caller drain `StoreWriter` and poll progress on the right cadence while a harness call blocks |
+| `src/cosmo/task/progress.py` | `ProgressWatcher` -- `watchdog` observer (file mode) + `on_tick`-driven polling (both modes), `parse_tasks_md`/`read_progress_from_file`; every write, including event emission, goes through `writer.submit()` -- see decision 4 below, a real bug this phase found and fixed |
+| `src/cosmo/task/classify.py` | `classify_harness_failure` -- `PROPOSING`/`IMPLEMENTING` failure classification (spec 6.2) |
+| `src/cosmo/task/retry.py` | `build_retry_context` -- spec 6.3 informed retries, reads back `task_failures` via the new `list_task_failures` reader |
+| `src/cosmo/task/types.py` | `TaskContext`, `FailureClassification` |
+| `src/cosmo/knowledge/caps.py` | `docs_md_files` (git diff, `docs/**/*.md` only), `files_over_cap` -- spec 11's line-cap enforcement |
+| `src/cosmo/knowledge/decisions_log.py` | `append_decision_entry` -- one Cosmo-authored, structured `decisions-log.md` line per task that reaches `COMMITTING` |
+| `src/cosmo/store/writer.py` | `TransitionResult` (every `task_queue.status` writer now returns one); `queue_transition` (generic setter for the six states with no dedicated method); `queue_begin_attempt` (the one place `attempt_count` increments) |
+| `src/cosmo/store/reader.py` | `list_task_failures`/`TaskFailureRow` |
+| `src/cosmo/events/helpers.py` | `emit_state_changed(emitter, TransitionResult)` -- the one canonical `task.state_changed` payload builder, now used everywhere a transition happens (`cli/main.py`'s `queue add`/`queue retry`/`queue block`, `git/merge.py`'s two `merge_task` outcomes, and every transition `task/machine.py` drives) |
+| `src/cosmo/gate/validate.py` | `validate_task` gains a `gate_runner: GateRunner = run_validation_gate` parameter -- the real seam that lets `task/machine.py` call the exact same tested side-effect logic (the `task.validation_result` event, `record_task_failure` on failure) against a scripted `FakeGate` result in tests, without duplicating that logic in a second place |
+| `src/cosmo/config/model.py`, `defaults.toml` | New `ProgressConfig`/`[progress]` section: `poll_interval_seconds` (spec 4's "5-10s" polling fallback, also used for native-progress polling -- no config field existed for this at all before Phase 7) |
+| `src/cosmo/cli/main.py` | `cosmo run --task <id> --repo <path> [--base-branch] [--harness]` -- creates the worktree, then calls `task.machine.run_task` |
+| `tests/test_task_*.py`, `test_knowledge.py`, `test_cli_run.py` | Fast suite: state machine (4 exit-criterion scenarios), progress watcher (checkbox parsing, debounce, real `watchdog` file-mode test, a real thread-safety bug regression), classify, retry, knowledge caps/decisions-log, CLI glue |
+| `tests/test_task_fixture_e2e.py` | The one real-adapter(fake)+real-gate integration test, opt-in via `COSMO_GATE_DOCKER_E2E=1` (same var as Phase 6's, not a new one) -- run for real this session |
+
+### Decisions made during Phase 7
+
+**1. `attempt_count` is 0-indexed and peeked-before-incremented, not
+incremented eagerly.** The first design written incremented
+`task_queue.attempt_count` as soon as `IMPLEMENTING` succeeded and control
+reached `VALIDATING` -- wrong, caught before any test was written by
+working through spec 6.3's "Third code-level failure -> BLOCKED" against the
+default `max_attempts=2`: that phrasing only holds if `attempt_count`
+represents *attempts already consumed* (0 for the first attempt), passed to
+`validate_task`/re-derived in `run_task` **before** the new attempt's
+outcome is known, and only persisted (`queue_begin_attempt`) afterward, and
+only for a genuine code-level judgment -- a pass, a `code_error`/
+`test_integrity` verdict at `VALIDATING`, or a timeout at `IMPLEMENTING`.
+An `environment_error`, wherever it originates, never persists the
+increment. `test_retry_exhaustion_blocks_with_code_failure` pins the
+resulting arithmetic: three consecutive `code_error` verdicts are needed to
+reach `BLOCKED` with `max_attempts=2`, and `attempt_count` reads `3` at that
+point (not `2`) -- a correct, if initially counter-intuitive, consequence of
+0-indexing.
+
+**2. `COMMITTING` never calls the harness.**
+`templates/harness/claude/CLAUDE.md` (built in Phase 4, already committed)
+already instructs the agent to append knowledge notes and commit its own
+work as the *last step of `IMPLEMENTING`* -- found by rereading that file
+before writing any Phase 7 code, not assumed from the spec text alone,
+which reads ambiguously enough to suggest a separate harness call at
+`COMMITTING` time. `COMMITTING` is therefore fully deterministic: it
+inspects whatever `docs/**/*.md` files the task's own commits touched
+(`git diff base...branch`, computed fresh, not threaded through from
+`HarnessResult.files_changed`), enforces `knowledge.max_file_lines`
+(failing `code_error`/`failure_stage=commit`, informed-retry-eligible, on a
+violation -- exactly the enforcement `CLAUDE.md` explicitly leaves to
+Cosmo: "say so in your summary instead of trimming yourself"), and appends
+one Cosmo-authored, structured `decisions-log.md` line unconditionally
+(trading spec 11's conditional "if a decision was introduced" for a cheap,
+consistent, always-parseable entry -- deciding "was this a decision" would
+need exactly the unverified LLM self-report spec 11 is designed to avoid).
+
+**3. `gate.validate_task` gains an injectable `gate_runner` parameter
+rather than `task/machine.py` reimplementing its retry/event logic against
+`FakeGate` separately.** The alternative -- give `task/machine.py` its own
+`ValidateFn` abstraction bound to either `validate_task` (real) or a
+hand-rolled `FakeGate`-based equivalent (tests) -- would have duplicated
+`validate_task`'s already-tested side-effect logic (the
+`task.validation_result` event, `record_task_failure` on failure) in a
+second, divergence-prone place. Instead `validate_task(..., gate_runner:
+Callable[..., GateResult] = run_validation_gate)` lets a test inject `lambda
+**kw: fake_gate.validate(kw["task_id"])` underneath the *same*, real
+`validate_task` call `task/machine.py` always makes -- spec 6.2/6.3's
+retry logic is exercised for real in every test, never mocked out. `MERGING`
+keeps the *other* seam Phase 6 already built for this
+(`gate_runner`-shaped closure wrapping `run_validation_gate` directly, no
+second `task_failures` row) -- two distinct integration points, not one,
+matching Phase 6 decision 3's own guidance.
+
+**4. A real cross-thread SQLite bug, caught by `test_watchdog_observer_
+detects_a_real_write_to_tasks_md`, not by inspection.** An early
+`ProgressWatcher.check()` wrote `task_progress`/`task_heartbeat` through
+`writer.submit()` (correct, cross-thread-safe) but called
+`emitter.emit(...)` **directly** for the paired `task.progress`/
+`task.heartbeat` events -- `EventEmitter.emit` uses `self._writer
+.connection` with no locking of its own (spec 8 assumes one thread calls
+it). Calling it from the `watchdog` observer's own background thread raised
+`sqlite3.ProgrammingError: SQLite objects created in a thread can only be
+used in that same thread` the first time the real-file-watching test
+actually exercised that code path -- the fake-clock/synchronous tests
+earlier in the same file didn't catch it because they only ever call
+`check()` from the main thread. Fixed by folding the event emission *inside*
+the submitted job closure, so it always runs on the connection-owning
+thread via `drain()`. A second, unrelated bug found by the same test file:
+the submitted job functions executed `conn.execute(...)` with no `with
+conn:` wrapper, so the write was never committed -- a second connection
+(`connect_reader`, used by `get_progress`) never saw it. Both are now fixed
+and pinned by tests; recorded because both are the kind of bug that a
+type checker cannot catch and only exercising the real background-thread
+path surfaced.
+
+**5. A real `fnmatch` bug in the knowledge-cap filter, also caught by a
+test, not inspection.** `docs_md_files` originally matched touched paths
+against `"docs/**/*.md"` with `fnmatch.fnmatch`. `fnmatch`'s `**` is not a
+recursive-directory wildcard -- it is just two ordinary `*`s, so the pattern
+still requires a literal `/` between them and the trailing `*.md`, meaning
+it silently **rejected** `docs/architecture.md` itself (a file directly
+under `docs/`, no subdirectory) while matching `docs/backend/x.md` just
+fine. `test_docs_md_files_finds_only_docs_markdown_touched_on_the_branch`
+caught this on first run. Fixed by replacing the glob with a plain
+`path.startswith("docs/") and path.endswith(".md")` check -- simpler and
+has no such edge case.
+
+**6. `environment_error`'s bounded local retry (both `IMPLEMENTING`'s own
+process failures and `VALIDATING`'s environment-error verdicts) reuses
+`config.retries.max_attempts` as its bound rather than a new config field.**
+Spec 6.2 says `environment_error` "does not count toward the task's retry
+limit," full stop -- taken completely literally, a task stuck against a
+broken environment would retry forever within one `run_task()` call, since
+nothing before Phase 8's circuit breaker exists to stop it. Reusing the
+existing retry-count config (rather than inventing
+`environment_retry_limit` or similar) is a deliberately conservative,
+minimal interim choice, explicitly not the real fix -- the real fix is
+Phase 8's circuit breaker noticing repeated `environment_error`s *across
+distinct tasks* and pausing the whole run, which this bound cannot see or
+substitute for. `gate.validate_task`'s own docstring already flagged this
+exact gap ("Until Phase 8 exists, an environment_error here always reports
+next_action=RETRY"); this decision is what keeps that documented gap from
+becoming an actual infinite loop in the meantime.
+
+**7. `VALIDATING`'s own external wall/stall timeout
+(`timeouts.validating_wall`/`validating_stall`) is not wired to a timer in
+this phase -- a deliberate, documented scope reduction, not an oversight.**
+`gate.stage_timeout_seconds` (Phase 6, already tuned and verified against
+real Docker) bounds each of the gate's three stages individually and
+already converts a stage timeout into `FailureType.ENVIRONMENT_ERROR`
+before `GateResult` reaches `task/machine.py` at all
+(`StageResult.timed_out`'s docstring) -- combined with decision 6 above,
+spec 3.3's "VALIDATING timeouts do not consume the code-level retry budget"
+already holds structurally, without a second timer. Building a real outer
+wall-clock wrapper was considered and rejected: `run_validation_gate` has
+no `cancel()` hook (unlike `HarnessAdapter`), so an outer timeout could only
+abandon a background thread without stopping the Docker containers it
+started -- worse than no timeout, since it would claim a bound it can't
+actually enforce. `PROPOSING`/`IMPLEMENTING` don't have this problem
+because `HarnessAdapter.cancel()` exists and genuinely terminates the
+process group (spec 2.4). Recorded as a deferred item, not silently
+dropped.
+
+**8. `HeartbeatSource.STREAM` is never produced.** Nothing in the current
+`HarnessAdapter` ABC exposes a live per-event callback during a blocking
+`implement()`/`propose()` call -- even the real Claude adapter, which
+declares `supports_structured_stream=True` and does parse `stream-json`
+internally, only returns a single `HarnessResult` at the end of one
+blocking call; there is no channel back to the caller mid-flight. Progress/
+liveness is observed the only way actually available from outside that one
+call: `ProgressWatcher`'s `on_tick`-driven polling (both for a native-
+progress adapter's `get_progress()` and for `tasks.md` file reads) plus a
+`watchdog` observer for immediate file-change detection. Both existing
+sources are reused for this: `FILE` for a real `watchdog` event, `MTIME` for
+every poll-driven check regardless of *what* is being polled (a file's
+mtime, or an adapter's native progress) -- the schema has no fourth value,
+and "detected via a poll, not a push" is the honest, shared description of
+both cases. Realizing `source=stream` for real needs an ABC change (a
+progress/event callback parameter on `implement()`), out of scope here;
+recorded for whichever future phase revisits the harness interface.
+
+**9. `run_task()` never creates or removes the worktree itself.** `cosmo
+run` (the CLI command) calls `git.worktree.create_worktree` before invoking
+`run_task`, and `MERGING`'s success path already removes the worktree
+*inside* `git.merge.merge_task` (Phase 5, unchanged). This keeps
+`task/machine.py`'s own unit tests free of any real git worktree setup
+except where `merge_task` itself is exercised (`test_task_machine.py`
+builds a real repo + real worktree via `create_worktree`, matching
+`test_git_merge.py`'s own pattern, since `MERGING` is a real code path this
+phase actually drives for the first time).
+
+**10. `task_transitions.run_id`/`task_failures.run_id` stay `None`
+everywhere Phase 7 writes them, including inside `run_task`.** Both columns
+carry a real, `PRAGMA foreign_keys = ON`-enforced FK to `run_state`, and
+nothing writes a `run_state` row until Phase 8's run-level state machine
+exists -- a non-`None` `run_id` here would raise `sqlite3.IntegrityError`
+outright. `cosmo run` does generate a `run_id` (a fresh uuid), but only to
+namespace the worktree's path (`work_dir/<run_id>/<task_id>`, `git.worktree
+.create_worktree`'s own existing parameter), never to any FK'd column.
+
+**11. Real, confirmed evidence of Phase 6's "Things that will matter
+later" item on root-owned worktree files.** Running the opt-in real-gate
+integration test for real left `backend/target/` (Maven, root-owned inside
+the Docker container) undeletable by `remove_worktree`'s unprivileged
+fallback (`shutil.rmtree(..., ignore_errors=True)`) -- confirmed by hand,
+not merely predicted: `merge_task` still reported success (the `git
+worktree remove --force`/prune path tolerates the leftover directory), but
+pytest's own `tmp_path` teardown later warned with a real `PermissionError`
+trying to clean the same directory. Not fixed here (same as Phase 6 left
+it) -- worked around by hand with a throwaway root `alpine` container,
+identical to Phase 6's own workaround. Still the natural candidate for a
+future phase to fix for real (`--user $(id -u):$(id -g)` on gate
+containers, or teaching `remove_worktree` the same root-container trick).
+
+### Things that will matter later
+
+**No mid-state resumption, as spec 3.2 already accepts.** A crash during
+`IMPLEMENTING`/`VALIDATING` restarts that state from scratch on the next
+`cosmo run` invocation for the same task -- `session_id` is still not
+threaded anywhere (deviation 3's `HarnessResult.session_id` field exists
+but nothing persists or reads it back yet). Unchanged from the plan's own
+framing; still deliberately deferred (§12).
+
+**`cosmo run` takes `--repo` explicitly; there is still no `task_id ->
+project/repo` linkage anywhere in the schema.** `task_queue` has no
+`project_id` column, so a multi-project run loop (Phase 8) will need to add
+one, or otherwise resolve which registered project a given task belongs to
+before it can drive tasks across more than one repo in the same run. Not a
+regression -- `cosmo project register` (Phase 4) and `task_queue` (Phase 1)
+were never linked before Phase 7 either -- but Phase 7 is the first code
+that would have benefited from it, so it's worth Phase 8 addressing
+directly rather than working around again.
+
+**Per-stage container cache mounts are still not implemented** (Phase 6's
+own note, reconfirmed): the opt-in integration test's 2m40s runtime is
+almost entirely fresh `mvn`/`npm` dependency resolution inside three
+separate `--rm` containers, same as Phase 6 observed. Still the natural
+Phase 9 item.
+
+**`RetryConfig.delay_min`/`delay_max` are real `time.sleep()` calls in
+production** (spec 6.3: "not rate-limiting, but letting transient resource
+contention settle") -- every Phase 7 test therefore overrides them to `0`
+via `model_copy`. A future run-loop-level test (Phase 8) driving several
+tasks through real retries back to back should keep doing the same, or the
+suite will slow down proportionally to how many retries a scenario needs.
+
 ## Deviations from the spec, cumulative
 
 Kept here so a future spec revision can absorb them in one pass.
@@ -1190,3 +1432,8 @@ Kept here so a future spec revision can absorb them in one pass.
 | 13 | Diff gate never flags a newly *added* test file, only modified/deleted | §6.1 | 6 | §6.1's own wording is "modified or deleted"; flagging additions too rejected every task that wrote a new test at all -- found by hand against a real run |
 | 14 | `GateConfig` gains `backend_image`/`backend_dir`/`frontend_image`/`frontend_dir`/`stage_timeout_seconds`/`diff_gate_*`/`flaky_*`/`quarantine_*`/`error_detail_max_chars` | §1, §6.1, §6.4 | 6 | The spec names the target stack and the guardrail behaviors conceptually but never their concrete build images/commands/thresholds/file locations; this phase needed real values to run anything against |
 | 15 | `run_validation_gate`'s signature does not conform to `git.merge.GateRerun` (`Callable[[], bool]`) | §3.4 | 6 | Its natural signature needs `worktree_path`/`base_branch`/`task_branch`/etc. and returns a full `GateResult`; `FakeGate.as_gate_rerun()` is the adapter, per the Phase 5 handoff's own instruction to record this rather than reshape either signature |
+| 16 | `COMMITTING` never invokes the harness | §11 | 7 | `templates/harness/claude/CLAUDE.md` (Phase 4) already has the agent append knowledge notes and commit as the last step of `IMPLEMENTING`; `COMMITTING` only enforces the line cap and appends a Cosmo-authored `decisions-log.md` entry, deterministically |
+| 17 | `HeartbeatSource.STREAM` is never produced; `MTIME` is reused for both file-mtime polling and native-progress polling | §4, §9.2 | 7 | No adapter ABC method exposes a live per-event callback during a blocking `implement()`/`propose()` call, even for an adapter that declares `supports_structured_stream=True`; realizing it needs an ABC change, out of scope here |
+| 18 | `VALIDATING`'s `timeouts.validating_wall`/`validating_stall` are not wired to an external timer | §3.3 | 7 | `gate.stage_timeout_seconds` (Phase 6) already bounds each gate stage and converts a stage timeout to `environment_error` before `task/machine.py` ever sees it; `run_validation_gate` has no `cancel()` hook, so a second outer timer could only abandon a thread without stopping the Docker containers it started |
+| 19 | `environment_error`'s retry bound (both `IMPLEMENTING` and `VALIDATING`) reuses `retries.max_attempts` rather than a dedicated field | §6.2, §6.5 | 7 | Spec 6.2 says it "does not count toward the retry limit" with no bound at all; without Phase 8's circuit breaker to eventually stop a stuck environment across tasks, an explicit local bound is the conservative interim choice, not the real fix |
+| 20 | `ProgressConfig`/`[progress].poll_interval_seconds` added | §4 | 7 | Spec names "polling fallback at 5-10s" but no config field existed for it; also reused as the native-progress poll interval since there is no separate stream-driven path (deviation 17) |

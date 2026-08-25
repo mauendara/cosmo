@@ -16,11 +16,12 @@ import queue
 import sqlite3
 import uuid
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 from cosmo.store.clock import utcnow_iso
 from cosmo.store.connection import checkpoint_truncate, connect_writer
-from cosmo.store.enums import BlockedReason, FailureStage, FailureType, NextAction
+from cosmo.store.enums import BlockedReason, FailureStage, FailureType, NextAction, TaskStatus
 from cosmo.store.migrations import migrate
 
 WriteJob = Callable[[sqlite3.Connection], None]
@@ -28,6 +29,22 @@ WriteJob = Callable[[sqlite3.Connection], None]
 
 class TaskNotFoundError(KeyError):
     """Raised by a queue mutation naming a task_id that isn't queued."""
+
+
+@dataclass(frozen=True, slots=True)
+class TransitionResult:
+    """What every `task_queue.status`-mutating method returns (Phase 7):
+    enough for a caller to emit a canonical `task.state_changed` event
+    (`events.helpers.emit_state_changed`) without re-querying the row it
+    just wrote. `run_id` is carried through rather than looked up -- every
+    write site already knows it (or knows it's `None`, spec 3.2's "no run
+    tracking yet" posture before Phase 8)."""
+
+    task_id: str
+    run_id: str | None
+    from_state: str | None
+    to_state: str
+    attempt_number: int
 
 
 class StoreWriter:
@@ -81,7 +98,7 @@ class StoreWriter:
         priority: int = 0,
         max_attempts: int,
         allow_test_edits: bool = False,
-    ) -> None:
+    ) -> TransitionResult:
         now = utcnow_iso()
         with self._conn:
             self._conn.execute(
@@ -103,11 +120,11 @@ class StoreWriter:
                     now,
                 ),
             )
-            self._record_transition(
+            return self._record_transition(
                 task_id, run_id=None, from_state=None, to_state="queued", now=now
             )
 
-    def queue_retry(self, task_id: str) -> None:
+    def queue_retry(self, task_id: str) -> TransitionResult:
         """Reset a `blocked` or `failed_retry` task back to `queued`."""
         now = utcnow_iso()
         with self._conn:
@@ -120,7 +137,7 @@ class StoreWriter:
                 """,
                 (now, task_id),
             )
-            self._record_transition(
+            return self._record_transition(
                 task_id, run_id=None, from_state=from_state, to_state="queued", now=now
             )
 
@@ -130,7 +147,7 @@ class StoreWriter:
         blocked_reason: BlockedReason,
         *,
         note: str | None = None,
-    ) -> None:
+    ) -> TransitionResult:
         now = utcnow_iso()
         with self._conn:
             from_state = self._current_status(task_id)
@@ -143,9 +160,51 @@ class StoreWriter:
                 """,
                 (blocked_reason.value, note, now, task_id),
             )
-            self._record_transition(
+            return self._record_transition(
                 task_id, run_id=None, from_state=from_state, to_state="blocked", now=now
             )
+
+    def queue_transition(self, task_id: str, to_state: TaskStatus) -> TransitionResult:
+        """The generic `task_queue.status` setter Phase 7 needs for every
+        state that has no dedicated method above (`proposing`, `proposed`,
+        `implementing`, `validating`, `committing`, `merging`,
+        `failed_retry`) -- `queued`/`blocked`/`done` keep their own named
+        methods above since they also touch other columns
+        (`blocked_reason`, `worktree_path`). `run_id` is always `None` here,
+        like every other write site in this class -- `task_transitions.
+        run_id` has a real, enforced FK to `run_state`, which nothing writes
+        a row to until Phase 8's run-level state machine exists."""
+        now = utcnow_iso()
+        with self._conn:
+            from_state = self._current_status(task_id)
+            self._conn.execute(
+                "UPDATE task_queue SET status = ?, updated_at = ? WHERE task_id = ?",
+                (to_state.value, now, task_id),
+            )
+            return self._record_transition(
+                task_id, run_id=None, from_state=from_state, to_state=to_state.value, now=now
+            )
+
+    def queue_begin_attempt(self, task_id: str) -> int:
+        """Increments `task_queue.attempt_count` -- called once per
+        `IMPLEMENTING` entry (the first attempt and every retry), spec 6.3's
+        code-level retry budget. Deliberately not folded into
+        `queue_transition`: `PROPOSING`/`COMMITTING` also transition through
+        this writer but their own retry-once policy (spec 3.3) never touches
+        this column (see `docs/v3-implementation-state.md` Phase 7 decision
+        on `attempt_count` scope)."""
+        now = utcnow_iso()
+        with self._conn:
+            self._current_status(task_id)  # raises TaskNotFoundError if absent
+            self._conn.execute(
+                "UPDATE task_queue SET attempt_count = attempt_count + 1, updated_at = ? "
+                "WHERE task_id = ?",
+                (now, task_id),
+            )
+            row = self._conn.execute(
+                "SELECT attempt_count FROM task_queue WHERE task_id = ?", (task_id,)
+            ).fetchone()
+            return int(row["attempt_count"])
 
     def queue_set_worktree_path(self, task_id: str, worktree_path: Path) -> None:
         """Spec 3.2: recorded the moment `git worktree add` succeeds, so a
@@ -159,7 +218,7 @@ class StoreWriter:
                 (str(worktree_path), now, task_id),
             )
 
-    def queue_complete(self, task_id: str) -> None:
+    def queue_complete(self, task_id: str) -> TransitionResult:
         """`DONE`: the worktree has already been removed by the caller (spec
         3.2), so `worktree_path` is cleared here rather than left dangling."""
         now = utcnow_iso()
@@ -173,7 +232,7 @@ class StoreWriter:
                 """,
                 (now, task_id),
             )
-            self._record_transition(
+            return self._record_transition(
                 task_id, run_id=None, from_state=from_state, to_state="done", now=now
             )
 
@@ -239,7 +298,7 @@ class StoreWriter:
         from_state: str | None,
         to_state: str,
         now: str,
-    ) -> None:
+    ) -> TransitionResult:
         attempt_count = self._conn.execute(
             "SELECT attempt_count FROM task_queue WHERE task_id = ?", (task_id,)
         ).fetchone()["attempt_count"]
@@ -250,6 +309,13 @@ class StoreWriter:
             ) VALUES (?, ?, ?, ?, ?, ?)
             """,
             (task_id, run_id, from_state, to_state, attempt_count, now),
+        )
+        return TransitionResult(
+            task_id=task_id,
+            run_id=run_id,
+            from_state=from_state,
+            to_state=to_state,
+            attempt_number=attempt_count,
         )
 
     # -- projects (spec 10.4 step 6) ---------------------------------------
