@@ -405,14 +405,22 @@ it can't introspect (permission denied, exited mid-scan) rather than
 raising. Untested on anything but Linux/WSL2 -- consistent with spec 2.4's
 own "on POSIX" framing, so this is not considered a gap.
 
-**Pre-existing environment breakage, unrelated to Phase 2:** this WSL2 box's
-`docker` binary is on `PATH` (satisfying `check_executable`) but its
-invocation fails -- Docker Desktop's WSL2 integration isn't enabled in this
-session. `cosmo doctor` now reports this accurately as "docker ps failed"
-rather than silently misreporting phantom leaked containers, but no
-Phase-2-owned code makes `docker` itself work. Also observed: this box is
-usually near the 10 GB disk floor, so `cosmo doctor`'s disk check may show
-`FAIL` for reasons unrelated to whatever change is under test.
+**Docker now works on this box (fixed 2026-08-24, after Phase 2 was written).**
+Earlier in the session `docker` was on `PATH` but non-functional -- Docker
+Desktop's WSL2 integration for this "Ubuntu" distro was stuck (its
+per-distro setup step, which `wslexec`s into the distro to write
+`~/.docker/config.json`, was timing out; Docker Desktop's own "WSL
+integration ... unexpectedly stopped" dialog surfaced this and a "Restart
+the WSL integration" click fixed it). `docker` now resolves to the real
+integrated binary at `/usr/bin/docker`, and `sweep_containers`/`sweep()` was
+verified end-to-end against a real labeled container (created, found by its
+labels, force-removed) -- not just the `fake_docker.sh` unit tests. The
+returncode-guard fix from decision 3 was written defensively before this was
+fixed and remains correct/necessary regardless (a real `docker` can still
+exit non-zero for other reasons, e.g. daemon down). No code changes were
+needed once the environment was fixed. Also observed independently: this
+box is usually near the 10 GB disk floor, so `cosmo doctor`'s disk check may
+still show `FAIL` for reasons unrelated to whatever change is under test.
 
 ## Deviations from the spec, cumulative
 

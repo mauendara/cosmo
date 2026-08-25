@@ -52,12 +52,10 @@ If `cosmo` is not on PATH, run `uv tool install --editable .` from the repo root
 Editable means your source edits are live — no rebuild between changes.
 
 **Known, pre-existing environment noise on this host** (not something Phase 3
-broke, don't chase it): `cosmo doctor` may show `disk space: FAIL` (this WSL2
-box runs close to the 10 GB floor) and `leaked gate containers: WARN, docker
-ps failed` (Docker Desktop's WSL2 integration isn't enabled in this session,
-so `docker` is on PATH but every invocation fails). Both are reported
-accurately by the doctor checks; neither blocks anything Phase 3 needs to do,
-since Phase 3's adapter work doesn't touch Docker at all.
+broke, don't chase it): `cosmo doctor` may show `disk space: FAIL` — this
+WSL2 box runs close to the 10 GB floor. (Docker is fine: WSL2 integration
+was fixed during the Phase 2 session and `docker`/`cosmo doctor`'s docker
+checks now pass for real.)
 
 Try the process-supervision surface Phase 2 built before touching anything —
 Phase 3's adapter will lean on it directly:
@@ -85,13 +83,15 @@ print(Path("/tmp/probe.log").read_text())
 - **Tests isolate from the developer's environment.** Anything touching config
   must set `COSMO_CONFIG` and `XDG_DATA_HOME` to temp paths — see the autouse
   fixture in `tests/test_cli.py`.
-- **Fake the external process, test the mechanics.** Phase 2's tests never
-  invoked a real `docker`; they used a recording shell-script fake
-  (`tests/fixtures/fake_docker.sh`) because this sandbox's own `docker`
-  doesn't actually work, and because that's the right posture for a unit
-  test regardless. Phase 3's `FakeHarnessAdapter` is the same idea applied to
-  `claude -p` — build it as the thing every later phase's tests target, and
-  keep the real CLI invocation to the one integration exit criterion.
+- **Fake the external process, test the mechanics.** Phase 2's unit tests
+  never invoke a real `docker`; they use a recording shell-script fake
+  (`tests/fixtures/fake_docker.sh`) — that's the right posture for a unit
+  test regardless of whether `docker` happens to work on the host (it does
+  now; it didn't for most of the Phase 2 session, which is exactly why the
+  fake exists and why `sweep_containers` was later verified for real too —
+  see the state doc). Phase 3's `FakeHarnessAdapter` is the same idea applied
+  to `claude -p` — build it as the thing every later phase's tests target,
+  and keep the real CLI invocation to the one integration exit criterion.
 - **Boundary tests are load-bearing, not optional.** `test_harness_boundary.py`
   keeps harness-specific tokens out of core; `test_store_boundary.py` keeps
   `connect_writer` from leaking outside `store/writer.py` and
