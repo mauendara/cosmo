@@ -16,7 +16,9 @@ SRC = Path(__file__).resolve().parents[1] / "src" / "cosmo"
 
 # Modules permitted to name a specific harness.
 ALLOWED_HARNESS_AWARE = {
-    SRC / "harness" / "claude.py",
+    SRC / "harness" / "claude" / "__init__.py",
+    SRC / "harness" / "claude" / "adapter.py",
+    SRC / "harness" / "claude" / "stream.py",
     SRC / "harness" / "registry.py",  # maps names to classes; that is its job
     SRC / "config" / "defaults.toml",  # configuration data, not logic
 }

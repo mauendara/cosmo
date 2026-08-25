@@ -1,0 +1,4 @@
+{"type":"system","subtype":"init","cwd":"/tmp","session_id":"tool-call-session"}
+{"type":"assistant","message":{"model":"claude-sonnet-5","role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"echo hi"}}]},"session_id":"tool-call-session"}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"hi"}]},"session_id":"tool-call-session"}
+{"type":"result","subtype":"success","is_error":false,"duration_ms":900,"num_turns":2,"result":"done","session_id":"tool-call-session","total_cost_usd":0.01}

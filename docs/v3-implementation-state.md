@@ -12,7 +12,7 @@ rediscover.
 |---|---|
 | Last updated | 2026-08-24 |
 | Working branch | `develop` |
-| Head commit | `bc62bfc` — Phase 1 (Phase 2 not yet committed) |
+| Head commit | `d774204` — docs fix (Phase 3 not yet committed) |
 | Spec | [v3-cosmo-autonomous-agent-spec.md](v3-cosmo-autonomous-agent-spec.md) |
 
 ## Phase status
@@ -22,7 +22,7 @@ rediscover.
 | 0 — Repository skeleton and configuration | **Complete** |
 | 1 — Persistent state and the event log | **Complete** |
 | 2 — Process supervision | **Complete** |
-| 3 — Harness abstraction and Claude Code adapter | Stub only (see below) |
+| 3 — Harness abstraction and Claude Code adapter | **Complete** |
 | 4 — Template system and `cosmo init` | Not started |
 | 5 — Worktree lifecycle and git operations | Not started |
 | 6 — Validation gate | Not started |
@@ -422,6 +422,175 @@ needed once the environment was fixed. Also observed independently: this
 box is usually near the 10 GB disk floor, so `cosmo doctor`'s disk check may
 still show `FAIL` for reasons unrelated to whatever change is under test.
 
+## Phase 3 — Complete
+
+All exit criteria met. 118 tests passing; `ruff`, `ruff format`, and `mypy --strict` clean.
+
+### What exists
+
+| Path | Contents |
+|---|---|
+| `src/cosmo/harness/base.py` | Adds `HarnessAdapter.cwd` (constructor arg, defaults to `Path.cwd()`) and the abstract `probe(prompt)` method |
+| `src/cosmo/harness/claude/__init__.py` | Re-exports `ClaudeCodeAdapter`, `BILLING_ENV_VAR` |
+| `src/cosmo/harness/claude/adapter.py` | `ClaudeCodeAdapter` -- full `propose`/`implement`/`probe`/`get_progress`/`cancel`, argv/env construction, `preflight()` (carried over from Phase 0) |
+| `src/cosmo/harness/claude/stream.py` | `NdjsonLineBuffer`, `classify_line`, `StreamReader` -- the stream-json reader and classifier |
+| `src/cosmo/harness/fake/__init__.py`, `adapter.py` | `FakeHarnessAdapter`, `FakeOutcome`, `ScriptedCall` -- registered in the harness registry as `"fake"` |
+| `src/cosmo/harness/registry.py` | Now registers both `claude` and `fake` |
+| `src/cosmo/proc/managed.py` | Adds `ManagedProcess(..., on_stdout_chunk=...)` -- a tee of the stdout drain, not a second reader of the fd |
+| `src/cosmo/cli/main.py` | Adds `cosmo harness probe --prompt TEXT [--timeout SECONDS]` |
+| `tests/fixtures/fake_claude.sh` | Recording stand-in for the `claude` CLI, mirrors `fake_docker.sh` |
+| `tests/fixtures/stream_json/*.ndjson` | `normal_run`, `tool_call`, `api_retry`, `truncated`, `malformed` fixtures |
+
+Working commands (new):
+
+```
+cosmo harness probe --prompt "print hello" [--harness NAME] [--timeout SECONDS] [--config PATH]
+```
+
+### Decisions made during Phase 3
+
+**1. `HarnessAdapter.cwd` — extension to spec §2.2, alongside `preflight()`.**
+Every subprocess-based adapter needs a working directory to launch its child
+in, and `cancel()`'s orphan sweep (spec 2.4 step 4) needs a worktree path to
+check for surviving holders. Phase 5 doesn't exist yet, so there is no real
+worktree lifecycle to ask. Per the handoff's own suggestion, `cwd` is a
+constructor argument (`HarnessAdapter.__init__(config, *, cwd=None)`,
+defaulting to `Path.cwd()`), harness-agnostic, living in the base class
+rather than being invented per-adapter. `ClaudeCodeAdapter.cancel()` passes
+`self.cwd` as `cancel_and_reap`'s `worktree_path`.
+
+**2. `probe(prompt) -> HarnessResult` — a third extension to spec §2.2.**
+`propose`/`implement` both presuppose an OpenSpec change on disk; the plan's
+own exit criterion (`cosmo harness probe --prompt "print hello"`) needs a
+harness-agnostic raw-prompt entry point that doesn't. Added as an abstract
+method next to `preflight()`, implemented by both adapters. `cosmo harness
+probe` (in `cli/main.py`) stays harness-agnostic by calling it generically.
+
+**3. Adapter constructor also takes optional `run_id`/`emitter` (`ClaudeCodeAdapter` only).**
+Phase 8's run loop is what will normally supply these. Without them,
+`cancel()` still kills the process (spec 2.4 steps 1-3, via a bare
+`ManagedProcess.cancel()`) but skips `cancel_and_reap`'s orphan sweep and
+`task.failed` emission. With them, `cancel()` routes through
+`cancel_and_reap` for the full spec 2.4 sequence. This degrades gracefully
+rather than crashing when nothing has wired a store/emitter yet -- true of
+every call site before Phase 8 exists (`cosmo harness probe` included).
+
+**4. `_invoke()` imposes no timeout of its own; `cosmo harness probe` does, externally.**
+`has_internal_timeout=False` means Cosmo's orchestration layer owns the wall
+clock (spec 3.3), and the adapter genuinely has no correct value to use even
+if it wanted one -- it doesn't know which task-state wall clock
+(proposing/implementing/validating, each configured separately) applies to a
+given call. `ClaudeCodeAdapter._invoke()` therefore blocks on a plain
+`process.wait()` with no timeout; it is unblocked only by another thread
+calling `cancel()`, which is what actually kills the child. `cosmo harness
+probe` demonstrates the pattern Phase 7/8 will need for real: it runs the
+adapter call on a background thread, joins with a timeout
+(`--timeout`, default `timeouts.proposing_wall`), and calls `adapter.cancel
+("probe")` if the join times out.
+
+**5. `on_stdout_chunk` on `ManagedProcess` is a tee on the existing drain thread, not a second reader.**
+Considered three options (handoff explicitly flagged this as a real design
+decision): a second consumer of the raw log file, a tee at the
+`ManagedProcess` level, or extending `ManagedProcess` itself. Chose the tee:
+a second reader of the same fd would race the drain thread for bytes, and
+re-reading the log file introduces a filesystem-polling consumer with no
+clean "caught up" signal. `on_stdout_chunk` (stdout only; stderr is untouched)
+is called synchronously on the drain thread itself, so a caller that later
+joins `_drain_threads` (any call to `ManagedProcess.cancel()`, including the
+fast no-op path on an already-exited process) has a genuine
+happens-before relationship with the callback's last invocation --
+`StreamReader.feed` needs no lock of its own as a result.
+
+**6. `ClaudeCodeAdapter` always calls `process.cancel(grace_s=...)` after `process.wait()`, even on a clean exit.**
+Established by `test_cancel_on_an_already_exited_process_returns_true` in
+Phase 2 as the correct idiom, not invented here: `cancel()` is what joins the
+drain threads (`ManagedProcess._finalize`), and it's cheap/idempotent on an
+already-exited process. Skipping this on the "normal" path would leave
+`StreamReader`'s last chunk(s) possibly unflushed when `_invoke` reads
+`reader.terminal_result` immediately after.
+
+**7. `FakeHarnessAdapter` is a first-class registered adapter (`harness/fake/`), not a test fixture.**
+The plan's own layout puts `fake/` beside `claude/` under `harness/`, not
+under `tests/fixtures/`. Registered in `_REGISTRY` as `"fake"` so `--harness
+fake` works from the CLI too (e.g. `cosmo doctor --harness fake`), which
+costs nothing (it's inert) and gives every later phase's tests a harness
+selectable the same way the real one is. Scriptable via `script=` (a
+`ScriptedCall` or a sequence consumed in order, last one repeating);
+`FakeOutcome.HANG` blocks on a `threading.Event` set only by `cancel()`,
+simulating a stuck harness that only responds to cancellation -- not a fixed
+`sleep()`, which would race whatever the test is timing.
+
+**8. Real `stream-json` output was captured before writing the classifier, not guessed.**
+Per the project's established "check with a real invocation" convention
+(Phase 2's two worst bugs were both invisible to unit tests written from
+inspection). Ran `claude -p "print hello" --output-format stream-json
+--verbose --max-turns 3 --permission-mode dontAsk < /dev/null` for real
+(CLI 2.1.207) and designed `stream.py` against the actual line shapes. This
+surfaced deviation #5 below (`rate_limit_event` vs. the spec's
+`system/api_retry`) that guessing would not have caught. No tool-call
+content-block fixture was captured this way (the smoke prompt didn't invoke
+any tool) -- `tests/fixtures/stream_json/tool_call.ndjson` is hand-derived
+from the documented Claude message content-block shape instead, flagged as
+such in the fixture's consuming test.
+
+**9. Prompt content for `propose`/`implement` is deliberately thin.**
+Spec §2.2 says these methods "run" OpenSpec's propose/apply steps, but no
+section in Phase 3's scope (§2.1-2.3, §4, §7.2) specifies the actual prompt
+text, and Phase 4's harness-facing `CLAUDE.md` (§10.3) is what's meant to
+carry the real operating policy (how to invoke OpenSpec, guardrails, etc.).
+`propose()`/`implement()` construct a minimal prompt naming the spec path,
+task id, and retry context, and rely on Phase 4's template to fill in the
+procedural knowledge. Revisit once Phase 4 exists.
+
+**10. `files_changed` on `HarnessResult` is always `[]` from this adapter.**
+No source of truth exists before Phase 5 gives Cosmo a worktree to `git
+diff` against; the stream itself only reports tool *names*, not file paths
+touched. Left empty rather than parsed out of tool-call `input` payloads,
+which would be guessing at argument shapes per-tool.
+
+### Things that will matter later
+
+**A headless `claude -p` run inherits the *operator's* full user-level Claude
+Code config -- global hooks, plugins, MCP servers -- not just the target
+repo's.** Observed directly during the real probe capture: the child process
+ran this box's own `engram` plugin's `SessionStart` hook (visible as
+`hook_started`/`hook_response` events in the raw log) even though the probe's
+`cwd` was `/tmp`, nothing to do with the cosmo project. For a droplet with a
+clean `~/.claude` this is probably fine; for a developer box it means
+unattended runs pull in whatever plugins/hooks happen to be configured
+globally, with unknown token cost and side effects. Not fixed here --
+Phase 4 owns `.claude/settings.json`/hook installation and is the natural
+place to decide whether the child needs `HOME`/`XDG_CONFIG_HOME` isolation
+or a `--settings` override to prevent this.
+
+**`get_progress()` on `ClaudeCodeAdapter` still raises `NotImplementedError`, deliberately.**
+`reports_native_progress=False` means core should never call it for real --
+progress comes from watching `tasks.md` (Phase 7). `FakeHarnessAdapter.
+get_progress()` is a real, settable implementation (`set_progress()`) since
+later phases' tests will want to script it.
+
+**`ClaudeCodeAdapter._running` is a plain `dict` guarded by one `threading.Lock`,**
+covering exactly the concurrent-`cancel()`-during-`_invoke()` case Phase 3
+needs. `ManagedProcess.cancel()` itself already tolerates being called twice
+(once from `_invoke`'s `finally`, once from an external `cancel()`) via its
+existing `ProcessLookupError` handling -- no additional synchronization was
+added there.
+
+**Getting a pgid for an already-separately-reaped direct child is a latent gap, not new here.**
+If a child leaves a live grandchild running in its process group *after* the
+direct child has already been `wait()`-ed on elsewhere, a later
+`os.getpgid(that_pid)` can raise `ProcessLookupError` even though the group
+technically still has members -- `getpgid` needs the exact pid it's given to
+still exist. `ClaudeCodeAdapter`'s normal-exit path (`wait()` then
+`cancel()`) matches the exact sequence Phase 2's own
+`test_cancel_on_an_already_exited_process_returns_true` already covers, so
+this isn't a new risk Phase 3 introduces -- just noted in case a future
+phase sees an orphaned grandchild survive a clean-exit reap.
+
+**`cosmo doctor`/`cosmo project register` are unaffected by the `cwd`/`run_id`/`emitter` additions** --
+`get_adapter(name)(cfg)` still constructs an adapter with just `config`;
+every new constructor argument defaults to `None`/`Path.cwd()`.
+
 ## Deviations from the spec, cumulative
 
 Kept here so a future spec revision can absorb them in one pass.
@@ -432,3 +601,6 @@ Kept here so a future spec revision can absorb them in one pass.
 | 2 | `validate()` not on the adapter interface | §2.2 | 0 | Contradicts §2.2's own statement that validation bypasses the harness |
 | 3 | State paths default to XDG, not `/var/cosmo` | §3.2 | 0 | `/var` needs root on WSL2; droplet overrides via config |
 | 4 | `cosmo project register` CLI added, ahead of `cosmo init` | §10.4 | 1 | The `projects` table (step 6) needs a populator before Phase 4's full bootstrap exists; this is the persistence primitive only, no templates/symlinks |
+| 5 | `claude -p`'s primary quota signal is a top-level `rate_limit_event`, not `system/api_retry` | §7.2, §4 | 3 | Observed on a real CLI 2.1.207 probe run, not documented anywhere upstream. Both shapes are classified as `RATE_LIMIT` so either is caught regardless of CLI version |
+| 6 | `cwd` added to the adapter base constructor | §2.2 | 3 | Every subprocess adapter needs a working directory; Phase 5's worktree lifecycle doesn't exist yet to supply one |
+| 7 | `probe(prompt)` added to the adapter interface | §2.2 | 3 | `cosmo harness probe`'s exit criterion needs a harness-agnostic raw-prompt entry point; `propose`/`implement` both presuppose an OpenSpec change on disk |

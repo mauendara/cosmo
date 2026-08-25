@@ -58,8 +58,16 @@ class HarnessAdapter(ABC):
     name: ClassVar[str]
     capabilities: ClassVar[HarnessCapabilities]
 
-    def __init__(self, config: CosmoConfig) -> None:
+    def __init__(self, config: CosmoConfig, *, cwd: Path | None = None) -> None:
         self.config = config
+        # Phase 5 introduces real worktree lifecycle; until then, every
+        # subprocess-based adapter still needs *some* working directory to
+        # launch its child in, and `cancel()`'s orphan sweep (spec 2.4 step 4)
+        # needs *some* path to check for surviving holders. A constructor
+        # argument is the deliberately minimal stand-in -- see Phase 3 state
+        # doc. Harness-agnostic (every adapter needs a cwd), so it lives here
+        # rather than being invented per-adapter.
+        self.cwd = cwd if cwd is not None else Path.cwd()
 
     @abstractmethod
     def preflight(self) -> list[CheckResult]:
@@ -69,6 +77,15 @@ class HarnessAdapter(ABC):
         harness-specific conditions without Cosmo's core knowing what they are.
         Must be cheap and side-effect free: no subprocess work beyond a PATH
         lookup, no network calls.
+        """
+
+    @abstractmethod
+    def probe(self, prompt: str) -> HarnessResult:
+        """Run a single raw prompt through the harness and return the uniform
+        result. A second extension to spec 2.2 (see `preflight()` above):
+        `cosmo harness probe` (plan Phase 3 exit criterion) needs a
+        harness-agnostic smoke-test entry point that doesn't presuppose an
+        OpenSpec change on disk the way `propose`/`implement` do.
         """
 
     @abstractmethod

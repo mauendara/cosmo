@@ -8,9 +8,11 @@ from __future__ import annotations
 
 from cosmo.harness.base import HarnessAdapter
 from cosmo.harness.claude import ClaudeCodeAdapter
+from cosmo.harness.fake import FakeHarnessAdapter
 
 _REGISTRY: dict[str, type[HarnessAdapter]] = {
     ClaudeCodeAdapter.name: ClaudeCodeAdapter,
+    FakeHarnessAdapter.name: FakeHarnessAdapter,
 }
 
 

@@ -1,0 +1,3 @@
+{"type":"system","subtype":"init","cwd":"/tmp","session_id":"f4f79cd3-194e-4084-875e-ecf47b933e5f","permissionMode":"dontAsk","model":"claude-sonnet-5"}
+{"type":"assistant","message":{"model":"claude-sonnet-5","role":"assistant","content":[{"type":"text","text":"Hello!"}]},"session_id":"f4f79cd3-194e-4084-875e-ecf47b933e5f"}
+{"type":"result","subtype":"success","is_error":false,"duration_ms":1736,"num_turns":1,"result":"Hello!","session_id":"f4f79cd3-194e-4084-875e-ecf47b933e5f","total_cost_usd":0.0733296}

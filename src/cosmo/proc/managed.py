@@ -22,6 +22,7 @@ import signal
 import subprocess
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import IO
 
@@ -51,6 +52,7 @@ class ManagedProcess:
         raw_log_path: Path,
         cwd: Path | None = None,
         env: dict[str, str] | None = None,
+        on_stdout_chunk: Callable[[bytes], None] | None = None,
     ) -> None:
         raw_log_path.parent.mkdir(parents=True, exist_ok=True)
         self._log_lock = threading.Lock()
@@ -66,13 +68,15 @@ class ManagedProcess:
         assert self._proc.stdout is not None
         assert self._proc.stderr is not None
         self._drain_threads = [
-            threading.Thread(target=self._drain, args=(self._proc.stdout,), daemon=True),
-            threading.Thread(target=self._drain, args=(self._proc.stderr,), daemon=True),
+            threading.Thread(
+                target=self._drain, args=(self._proc.stdout, on_stdout_chunk), daemon=True
+            ),
+            threading.Thread(target=self._drain, args=(self._proc.stderr, None), daemon=True),
         ]
         for t in self._drain_threads:
             t.start()
 
-    def _drain(self, pipe: IO[bytes]) -> None:
+    def _drain(self, pipe: IO[bytes], on_chunk: Callable[[bytes], None] | None) -> None:
         # Runs on its own thread so a slow or silent child never blocks
         # whatever the caller's thread is doing -- the "non-blocking" in
         # the plan's "non-blocking stdout/stderr drain". `os.read` on the
@@ -80,6 +84,15 @@ class ManagedProcess:
         # fills the requested size or hits EOF, so a few bytes followed by
         # silence -- exactly a heartbeat line -- would sit unflushed for
         # however long the harness stays quiet.
+        #
+        # `on_chunk` (stdout only) is a tee, not a second reader of the fd: a
+        # harness adapter's own structured-event reader (Phase 3) needs the
+        # same bytes this thread is already pulling off the pipe, and a
+        # second consumer of the same fd would race it for data. Called
+        # synchronously on this thread, so a caller that joins
+        # `_drain_threads` (see `_finalize`) has a genuine happens-before
+        # relationship with the last `on_chunk` call -- no separate lock
+        # needed for whatever `on_chunk` accumulates.
         fd = pipe.fileno()
         while True:
             try:
@@ -91,6 +104,8 @@ class ManagedProcess:
             with self._log_lock:
                 self._log_file.write(chunk)
                 self._log_file.flush()
+            if on_chunk is not None:
+                on_chunk(chunk)
         pipe.close()
 
     @property

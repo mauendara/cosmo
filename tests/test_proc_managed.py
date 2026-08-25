@@ -73,3 +73,22 @@ def test_stdout_and_stderr_are_drained_to_the_raw_log(tmp_path: Path) -> None:
     content = log_path.read_text()
     assert "out-line" in content
     assert "err-line" in content
+
+
+def test_on_stdout_chunk_is_a_tee_not_a_second_reader(tmp_path: Path) -> None:
+    """Phase 3's stream readers consume the same bytes the log-drain thread
+    reads, via this callback, rather than opening a second reader of the fd
+    -- that would race the log-drain thread for data (see the comment in
+    `ManagedProcess._drain`)."""
+    chunks: list[bytes] = []
+    mp = ManagedProcess(
+        ["sh", "-c", "echo out-line; echo err-line >&2"],
+        raw_log_path=tmp_path / "raw.log",
+        on_stdout_chunk=chunks.append,
+    )
+    mp.wait(timeout=2.0)
+    mp.cancel(grace_s=1.0)
+
+    received = b"".join(chunks)
+    assert b"out-line" in received
+    assert b"err-line" not in received  # stderr is never handed to the stdout tee

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import sqlite3
+import threading
 from dataclasses import Field
 from pathlib import Path
 from typing import Annotated, Any
@@ -24,7 +25,7 @@ from cosmo.harness import (
     get_adapter,
     resolve_harness_name,
 )
-from cosmo.harness.base import HarnessCapabilities
+from cosmo.harness.base import HarnessCapabilities, HarnessResult
 from cosmo.store import StoreWriter, TaskNotFoundError
 from cosmo.store.enums import BlockedReason
 from cosmo.store.reader import (
@@ -165,6 +166,69 @@ def harness_list() -> None:
 
 def _capability_fields() -> tuple[Field[Any], ...]:
     return dataclasses.fields(HarnessCapabilities)
+
+
+@harness_app.command("probe")
+def harness_probe(
+    prompt: Annotated[str, typer.Option(help="Raw prompt to send to the harness.")],
+    harness: HarnessOption = None,
+    timeout: Annotated[
+        float | None,
+        typer.Option(help="Seconds before cancelling. Defaults to timeouts.proposing_wall."),
+    ] = None,
+    config: ConfigOption = None,
+) -> None:
+    """Smoke-test the resolved harness with a raw prompt (plan Phase 3 exit criterion).
+
+    Applies an external timeout from here, on a background thread, rather
+    than inside the adapter -- `has_internal_timeout=False` means Cosmo's
+    orchestration layer owns that decision (spec 3.3), and this command is
+    the simplest stand-in for that layer before Phase 7/8 build the real one.
+    """
+    cfg = _load(config)
+    name, source = resolve_harness_name(harness, None, cfg.harness.name)
+    console.print(f"harness: [bold]{name}[/bold] (from {source})")
+    adapter = get_adapter(name)(cfg)
+
+    timeout_s = timeout if timeout is not None else float(cfg.timeouts.proposing_wall)
+    result_box: list[HarnessResult] = []
+    error_box: list[BaseException] = []
+
+    def _run() -> None:
+        try:
+            result_box.append(adapter.probe(prompt))
+        except BaseException as exc:  # noqa: BLE001 -- surfaced on the main thread below
+            error_box.append(exc)
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+    thread.join(timeout=timeout_s)
+    if thread.is_alive():
+        console.print(f"[yellow]probe exceeded {timeout_s:.0f}s -- cancelling[/yellow]")
+        adapter.cancel("probe")
+        thread.join(timeout=cfg.timeouts.kill_grace + 5.0)
+
+    if error_box:
+        raise error_box[0]
+    if not result_box:
+        err_console.print("[red]probe did not complete[/red]")
+        raise typer.Exit(code=1)
+
+    result = result_box[0]
+    table = Table(title="probe result", title_justify="left", show_header=False)
+    table.add_column("field", style="bold")
+    table.add_column("value")
+    table.add_row("success", str(result.success))
+    table.add_row("session_id", result.session_id or "-")
+    table.add_row("exit_code", str(result.exit_code))
+    table.add_row("duration_seconds", f"{result.duration_seconds:.2f}")
+    table.add_row("total_cost_usd", str(result.total_cost_usd))
+    table.add_row("output_summary", result.output_summary)
+    table.add_row("raw_log_path", str(result.raw_log_path))
+    console.print(table)
+
+    if not result.success:
+        raise typer.Exit(code=1)
 
 
 @app.command()

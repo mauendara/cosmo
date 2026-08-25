@@ -1,0 +1,4 @@
+{"type":"system","subtype":"init","cwd":"/tmp","session_id":"malformed-session"}
+this is not json at all, some noise got mixed into the pipe
+{"type":"assistant","message":{"model":"claude-sonnet-5","role":"assistant","content":[{"type":"text","text":"still going"}]},"session_id":"malformed-session"}
+{"type":"result","subtype":"success","is_error":false,"duration_ms":700,"num_turns":1,"result":"ok","session_id":"malformed-session","total_cost_usd":0.03}
