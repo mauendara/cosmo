@@ -1,21 +1,22 @@
-# Handoff — continue at Phase 1
+# Handoff — continue at Phase 2
 
-You are picking up Cosmo mid-build. Phase 0 is complete and committed. Your job is
-Phase 1: persistent state and the event log.
+You are picking up Cosmo mid-build. Phases 0 and 1 are complete. Your job is
+Phase 2: process supervision — process-group kill semantics, orphan sweep,
+and timers.
 
 ## Read these first, in this order
 
 | Document | What it is | How to treat it |
 |---|---|---|
 | [v3-cosmo-autonomous-agent-spec.md](v3-cosmo-autonomous-agent-spec.md) | The authoritative specification | **Source of truth.** v1 and v2 are superseded — read them only for history |
-| [v3-implementation-plan.md](v3-implementation-plan.md) | 11-phase build plan | The map. Phase 1 is your scope |
-| [v3-implementation-state.md](v3-implementation-state.md) | What actually exists, plus decisions and gotchas | Read the "Things that will matter later" section before writing code |
+| [v3-implementation-plan.md](v3-implementation-plan.md) | 11-phase build plan | The map. Phase 2 is your scope |
+| [v3-implementation-state.md](v3-implementation-state.md) | What actually exists, plus decisions and gotchas | Read the "Things that will matter later" section under Phase 1 before writing code |
 
 `v1-*` and `v2-*` in this folder are earlier spec drafts. v3 is a superset of
 both. Do not implement from them.
 
-**Do not edit the plan document.** It is the agreed scope. Record what you build,
-and any decision you make along the way, in `v3-implementation-state.md`.
+**Do not edit the plan document.** It is the agreed scope. Record what you
+build, and any decision you make along the way, in `v3-implementation-state.md`.
 
 ## Where things are
 
@@ -23,30 +24,43 @@ and any decision you make along the way, in `v3-implementation-state.md`.
 /home/dev/delta/cosmo/          # working branch: develop
 ├── docs/                       # the four documents above
 ├── src/cosmo/
-│   ├── checks.py               # CheckResult / CheckStatus
-│   ├── config/                 # typed model, defaults.toml, three-layer loader
-│   ├── doctor.py               # core preflight checks (harness-agnostic)
-│   ├── harness/                # base ABC, registry, claude adapter (stub)
-│   ├── cli/main.py             # the `cosmo` command
-│   ├── store/                  # EMPTY — Phase 1 fills this
-│   ├── events/                 # EMPTY — Phase 1 fills this
-│   └── {proc,git,gate,task,run,knowledge}/   # EMPTY — later phases
-├── tests/                      # 38 passing
-└── check.sh                    # ruff + format + mypy --strict + pytest
+│   ├── checks.py                # CheckResult / CheckStatus
+│   ├── config/                  # typed model, defaults.toml, three-layer loader
+│   ├── doctor.py                 # core preflight checks, incl. the store's schema check
+│   ├── harness/                  # base ABC, registry, claude adapter (stub)
+│   ├── store/                    # SQLite schema, StoreWriter, reader queries (Phase 1)
+│   ├── events/                   # envelope + EventEmitter, transactional sequence (Phase 1)
+│   ├── cli/main.py               # `cosmo` command: config, harness, doctor, queue, events, project
+│   ├── proc/                     # EMPTY — Phase 2 fills this
+│   └── {git,gate,task,run,knowledge}/   # EMPTY — later phases
+├── tests/                       # 71 passing
+└── check.sh                     # ruff + format + mypy --strict + pytest
 ```
 
 ## Get oriented (2 minutes)
 
 ```bash
 cd /home/dev/delta/cosmo
-git log --oneline           # should show 02ca48e Phase 0
+git log --oneline           # Phase 1 should be committed at HEAD
 git branch --show-current   # should say develop
 ./check.sh                  # must be green before you change anything
-cosmo doctor                # should print two tables and say "ready"
+cosmo doctor                # should print two tables; disk may warn/fail depending on host free space
 ```
 
 If `cosmo` is not on PATH, run `uv tool install --editable .` from the repo root.
 Editable means your source edits are live — no rebuild between changes.
+
+Try the Phase 1 surface before touching anything, so you have a mental model
+of what state already exists to build on:
+
+```bash
+mkdir -p /tmp/cosmo-try/target-repo
+cosmo project register /tmp/cosmo-try/target-repo
+cosmo queue add openspec/changes/add-foo/proposal.md --task-id add-foo
+cosmo queue add openspec/changes/add-bar/proposal.md --task-id add-bar --depends-on add-foo
+cosmo queue ls
+cosmo events tail
+```
 
 ## Conventions this codebase follows
 
@@ -62,79 +76,96 @@ Editable means your source edits are live — no rebuild between changes.
 - **Tests isolate from the developer's environment.** Anything touching config
   must set `COSMO_CONFIG` and `XDG_DATA_HOME` to temp paths — see the autouse
   fixture in `tests/test_cli.py`.
+- **Boundary tests are load-bearing, not optional.** `test_harness_boundary.py`
+  keeps harness-specific tokens out of core; `test_store_boundary.py` keeps
+  `connect_writer` from leaking outside `store/writer.py` and
+  `store/migrations.py`. If Phase 2 introduces a genuinely new writer or a
+  genuinely harness-aware module, add it to the relevant allowlist — don't
+  weaken the assertion.
 - **Run `./check.sh` before committing.** All four must pass.
 
-## Phase 1 scope
+## Phase 2 scope
 
-Spec §8, §8.1, §9.1, §9.2, §9.3, and the §5 queue columns. This closes half of
-the spec's Open Item 5 (the SQLite DDL; the adapter half is Phase 3).
+Spec §2.4 (all six contract points) and §3.3 (timers). Summary from the plan:
 
-Full detail is in the plan under "Phase 1". Summary:
-
-1. **Schema**, split by the §8 discipline:
-   - *Append-only*: `events` (the full §9.1 envelope, including `sequence`,
-     `schema_version`, `severity`), `task_transitions`, `task_failures`
-   - *UPSERT / current-state*: `task_queue` (all §5 columns), `task_progress`,
-     `task_heartbeat`, `run_state`, `run_cost`, `task_cost`, `projects`
-2. **Enums in the schema**, not free text — `blocked_reason`, `failure_type`,
-   `failure_stage`. §5 is explicit that free-text forces every consumer into regex
-   parsing that will drift.
-3. **Pragmas on every connection**, not once at creation: `journal_mode=WAL`,
-   `busy_timeout=10000`, `synchronous=NORMAL`, `foreign_keys=ON`. Plus a
-   `wal_checkpoint(TRUNCATE)` at run boundaries.
-4. **Single-writer discipline (§8).** One write connection owned by the main loop.
-   The file-watcher and stream reader push onto an in-process queue instead of
-   opening their own write connections. Enforce this *structurally* — the writer
-   connection must not be importable from those modules.
-5. **Event emitter** with `sequence` allocated transactionally with the row.
-6. **Forward-only migration runner** with a `schema_version` table.
-7. **CLI:** `cosmo queue add|ls|show|retry|block`, `cosmo events tail`.
+1. **`proc.ManagedProcess`**: `Popen(..., start_new_session=True)`, non-blocking
+   stdout/stderr drain to a per-task rotating log file (`raw_log_path`).
+2. **`cancel()`**: `os.killpg(os.getpgid(pid), SIGTERM)` → **20 s** grace
+   (already in config as `timeouts.kill_grace`) → `killpg(SIGKILL)`.
+3. **Orphan sweep**: `docker ps -q --filter label=orchestrator.run_id=<id>` →
+   `docker rm -f`; scan for processes holding the worktree path and log
+   `critical`.
+4. **Two independent timers per managed run**: wall-clock and stall. The
+   stall timer accepts heartbeat pokes from *either* source (§4) so a long
+   legitimate subtask does not trip it.
+5. **Reap failure** emits `task.failed` with `failure_type=environment_error`
+   and **double-weights** the circuit breaker (§6.5) — the weight is already
+   in config as `circuit_breaker.reap_failure_weight`.
 
 ### Exit criteria
 
-- `cosmo queue add` then `cosmo queue ls` round-trips a DAG with `depends_on`.
-- A concurrency test writes progress events from a watcher thread while the main
-  loop writes state, with zero `SQLITE_BUSY`.
-- Killing the process mid-write leaves an event log whose `sequence` has no gaps
-  or duplicates.
+- Test: a shell script spawning a grandchild that ignores `SIGTERM` is fully
+  reaped, verified by PID absence — the child does not survive re-parented to
+  init.
+- Test: a labeled container left running by a killed process is removed by
+  the sweep.
+- Test: stall timer fires at the configured interval and is correctly reset
+  by a poke.
 
 ## Things to know before you start
 
-**The database path already exists in config.** `config.paths.db_path` resolves to
-`<data_dir>/cosmo.db`. Do not invent a second path constant.
+**Emit through `EventEmitter`, write through `StoreWriter`, and route
+background threads through `submit()`/`drain()` — this is Phase 1's whole
+point.** A reap failure's `task.failed` event and the circuit-breaker weight
+should go through the same `store`/`events` machinery Phase 1 built, not a
+parallel path. If `proc` needs to write from a thread that is not the main
+loop's thread, that write goes through `StoreWriter.submit()` — do not open a
+second `connect_writer`. `tests/test_store_boundary.py` will fail loudly if
+you do; if `proc` turns out to be a legitimate new writer owner, that test's
+allowlist is the place to say so deliberately, not to route around.
 
-**Wire up the missing harness-resolution tier.** `cli/main.py` passes `None` for
-the project tier of `resolve_harness_name()`, with a comment saying Phase 1 adds
-it. The `projects` table (§10.4 step 6) is that tier — connect it once the table
-exists.
+**Timeout and kill-grace values already exist in config.** `kill_grace` (20s),
+`timeouts.implementing_stall` / `.implementing_wall` /
+`.validating_stall` / `.validating_wall` are all in `config/defaults.toml`
+already, annotated with their spec section. Don't reintroduce them as
+constants in `proc/`.
 
-**Add a store/events preflight check.** `doctor.py` currently checks that state
-directories are writable. Once the DB exists, consider a check that it is
-readable and at the expected schema version. Keep it in core — it is not
-harness-specific.
+**The circuit breaker itself is Phase 8.** Phase 2 only needs to emit the
+right event with the right `failure_type` and know its own reap-failure
+weight; it does not implement breaker trip logic. Don't reach ahead.
 
-**`tests/test_harness_boundary.py` is load-bearing.** It fails if harness-specific
-tokens leak into core modules. Phase 1 code is core, so it must stay clean. If you
-add a genuinely harness-aware module, add it to `ALLOWED_HARNESS_AWARE` — do not
-weaken the test.
+**Nothing in Phase 2 should invoke the real Claude Code CLI or a real gate
+container beyond what's needed to prove the kill/reap/timer mechanics.** Use
+a test fixture script (e.g. a small Python or shell script that spawns an
+ignoring-SIGTERM grandchild) rather than `claude -p`. The `FakeHarnessAdapter`
+proper is Phase 3's job; Phase 2's tests exercise `proc` directly.
 
-**Nothing in Phase 1 should invoke Claude or Docker.** It is pure persistence. If
-you find yourself needing either, you have wandered into Phase 2 or 3.
+**Docker labels are a hard requirement, not a nicety.** `--label
+orchestrator.run_id=... --label orchestrator.task_id=...` is what makes the
+orphan sweep possible at all (spec 2.4 step 5). Any code that launches a gate
+container — even a Phase 2 test fixture standing in for one — must set both
+labels from day one, or the sweep test has nothing real to find.
 
-**Design the event table for the deferred OTel migration (§9.4).** The §9.1
-envelope is deliberately shaped so `event_type` and payload keys map onto GenAI
-span attributes later. Keep payloads as structured JSON with stable key names
-rather than prose blobs.
+**`doctor` may need a new check.** Consider whether an orphaned-container or
+leaked-process check belongs in `core_checks()` (harness-agnostic, so yes if
+it's added) — not required by the exit criteria, but worth a look since §9.5
+disk-floor and §8 database checks already set the precedent of `doctor`
+catching problems before a run starts.
 
 ## When you finish
 
 1. `./check.sh` green.
-2. Update `v3-implementation-state.md`: mark Phase 1 complete, list what exists,
-   record every decision made and anything a future session would otherwise
-   rediscover. Append any new spec deviation to the cumulative table at the bottom.
-3. Commit to `develop` with a message explaining *why*, in the style of `02ca48e`.
-4. Rewrite this handoff for Phase 2 (process supervision, §2.4) — or delete it if
-   the next session continues immediately.
+2. Update `v3-implementation-state.md`: mark Phase 2 complete, list what
+   exists, record every decision made and anything a future session would
+   otherwise rediscover. Append any new spec deviation to the cumulative
+   table at the bottom.
+3. Commit to `develop` with a message explaining *why*, in the style of the
+   Phase 0 and Phase 1 commits.
+4. Rewrite this handoff for Phase 3 (harness abstraction and the Claude Code
+   CLI adapter, §2.1-2.3, §4, §7.2) — or delete it if the next session
+   continues immediately.
 
-Phase 2 is next: process-group kill semantics, orphan sweep, and timers. It is
-deliberately early because a leaked process pool poisons every later phase.
+Phase 3 is next: the real `ClaudeCodeAdapter` and its `stream-json` reader,
+plus `FakeHarnessAdapter` for every later phase's tests. It depends on Phase
+2's process-group kill semantics being correct — an adapter that can't
+reliably cancel a hung `claude -p` process poisons every phase after it.

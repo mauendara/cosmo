@@ -12,11 +12,14 @@ bypassing the harness entirely (spec 2.2).
 from __future__ import annotations
 
 import shutil
+import sqlite3
 import sys
 from pathlib import Path
 
 from cosmo.checks import CheckResult, check_executable, fail, ok, warn
 from cosmo.config import CosmoConfig
+from cosmo.store.connection import connect_reader
+from cosmo.store.migrations import current_version, latest_version
 
 
 def check_disk(config: CosmoConfig) -> CheckResult:
@@ -87,6 +90,44 @@ def check_paths_writable(config: CosmoConfig) -> CheckResult:
     return ok("state dirs writable", f"{config.paths.data_dir} and siblings")
 
 
+def check_database(config: CosmoConfig) -> CheckResult:
+    """Spec 8: the event/state store must be readable and at the schema
+    version this build expects. A database that does not exist yet is not a
+    failure -- `StoreWriter` creates and migrates it on first write -- but a
+    stale or unreadable one would silently misbehave for every later phase.
+    """
+    db_path = config.paths.db_path
+    if not db_path.exists():
+        return ok(
+            "event/state store", f"not yet created at {db_path} -- initializes on first write"
+        )
+
+    try:
+        conn = connect_reader(db_path)
+    except sqlite3.OperationalError as exc:
+        return fail("event/state store", f"cannot open {db_path}: {exc}")
+    try:
+        version = current_version(conn)
+    except sqlite3.OperationalError as exc:
+        return fail("event/state store", f"cannot read schema version from {db_path}: {exc}")
+    finally:
+        conn.close()
+
+    latest = latest_version()
+    if version < latest:
+        return fail(
+            "event/state store",
+            f"schema at version {version}, this build expects {latest} "
+            f"-- run a command that writes to trigger migration",
+        )
+    if version > latest:
+        return warn(
+            "event/state store",
+            f"schema at version {version} is newer than this build expects ({latest})",
+        )
+    return ok("event/state store", f"{db_path} at schema version {version}")
+
+
 def core_checks(config: CosmoConfig) -> list[CheckResult]:
     return [
         check_python(),
@@ -96,4 +137,5 @@ def core_checks(config: CosmoConfig) -> list[CheckResult]:
         check_disk(config),
         check_paths_writable(config),
         check_work_dir_filesystem(config),
+        check_database(config),
     ]

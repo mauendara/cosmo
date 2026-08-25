@@ -1,6 +1,8 @@
-"""Placeholder package -- implemented in a later phase.
+"""Event envelope and emitter (spec 9.1)."""
 
-See docs/v3-implementation-plan.md.
-"""
+from __future__ import annotations
 
-# Phase 1: event envelope, transactional sequence allocation (spec 9.1).
+from cosmo.events.emitter import EventEmitter
+from cosmo.events.envelope import EVENT_SCHEMA_VERSION, Event, EventType, Severity
+
+__all__ = ["Event", "EventType", "EventEmitter", "Severity", "EVENT_SCHEMA_VERSION"]

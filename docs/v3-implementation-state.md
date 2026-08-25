@@ -12,7 +12,7 @@ rediscover.
 |---|---|
 | Last updated | 2026-08-24 |
 | Working branch | `develop` |
-| Head commit | `02ca48e` — Phase 0 |
+| Head commit | `a496ced` — Phase 0 (Phase 1 not yet committed) |
 | Spec | [v3-cosmo-autonomous-agent-spec.md](v3-cosmo-autonomous-agent-spec.md) |
 
 ## Phase status
@@ -20,8 +20,8 @@ rediscover.
 | Phase | Status |
 |---|---|
 | 0 — Repository skeleton and configuration | **Complete** |
-| 1 — Persistent state and the event log | Not started — next |
-| 2 — Process supervision | Not started |
+| 1 — Persistent state and the event log | **Complete** |
+| 2 — Process supervision | Not started — next |
 | 3 — Harness abstraction and Claude Code adapter | Stub only (see below) |
 | 4 — Template system and `cosmo init` | Not started |
 | 5 — Worktree lifecycle and git operations | Not started |
@@ -164,6 +164,137 @@ Slow WSL2 filesystem I/O distorts every §3.3 timeout, but it is not a hard bloc
 
 ---
 
+## Phase 1 — Complete
+
+All exit criteria met. 71 tests passing; `ruff`, `ruff format`, and `mypy --strict`
+clean.
+
+### What exists
+
+| Path | Contents |
+|---|---|
+| `src/cosmo/store/clock.py` | One `utcnow_iso()` used by every timestamp column |
+| `src/cosmo/store/enums.py` | `TaskStatus`, `BlockedReason`, `FailureType`, `FailureStage`, `NextAction`, `RunStatus`, `PauseReason`, `StopReason`, `HeartbeatSource`, `Severity` — each mirrors a CHECK constraint in the schema |
+| `src/cosmo/store/connection.py` | Pragmas (§8.1) applied on every connection; `connect_writer` (rw) and `connect_reader` (genuine SQLite `mode=ro`) |
+| `src/cosmo/store/migrations.py` | Forward-only migration runner, `schema_migrations` table, migration 1 = the full schema DDL |
+| `src/cosmo/store/writer.py` | `StoreWriter` — the single write connection; `task_queue` add/retry/block, `task_transitions` append, `projects` registration, `submit()`/`drain()` for cross-thread handoff |
+| `src/cosmo/store/reader.py` | Read-only queries, each opening and closing its own `connect_reader` connection |
+| `src/cosmo/events/envelope.py` | `Event` dataclass (§9.1 envelope), `EventType` (§9.2), `EVENT_SCHEMA_VERSION = 1` |
+| `src/cosmo/events/emitter.py` | `EventEmitter` — transactional `sequence` allocation via one `INSERT ... ON CONFLICT ... RETURNING` plus one `INSERT` per emit, both in the same `sqlite3` transaction |
+| `src/cosmo/cli/main.py` | Adds `cosmo queue add\|ls\|show\|retry\|block`, `cosmo events tail`, `cosmo project register\|list`; wires the project tier into `doctor --project-path` |
+| `src/cosmo/doctor.py` | Adds `check_database` — readable + at the expected schema version, `ok` (not `fail`) when the DB simply doesn't exist yet |
+
+Working commands (all new):
+
+```
+cosmo queue add <spec_path> [--task-id ID] [--depends-on ID ...] [--priority N]
+                [--max-attempts N] [--allow-test-edits]
+cosmo queue ls [--status STATUS]
+cosmo queue show <task_id>
+cosmo queue retry <task_id>
+cosmo queue block <task_id> --reason REASON
+cosmo events tail [--run ID] [--task ID] [--severity SEV] [--limit N]
+cosmo project register <path> [--harness NAME] [--project-template NAME]
+cosmo project list
+cosmo doctor --project-path <path>   # now resolves the project tier for real
+```
+
+### Decisions made during Phase 1
+
+**1. `task_queue` does not carry a `project_id`, deliberately.**
+§5 lists an exact column set and it does not include one. A queue-to-project
+association is real and will be needed, but nothing in Phases 1-3 requires it
+yet (`cosmo run`, which would need it, is Phase 8) — adding it now would be
+speculating ahead of the spec. Revisit when Phase 4's `cosmo init` or Phase 8's
+run loop actually needs to resolve a task to a target repo.
+
+**2. `cosmo project register` is a deliberate, minimal addition — not part of
+`cosmo init`.**
+The handoff's instruction to "wire up the missing harness-resolution tier"
+needs *some* way to populate `projects` ahead of Phase 4's full bootstrap flow
+(templates, symlinks, `openspec/` seeding). This command does none of that —
+it only inserts a row so `doctor --project-path` has something to resolve
+against. `cosmo init` in Phase 4 should treat this as the persistence
+primitive it already has, not reimplement it.
+
+**3. Single-writer discipline is enforced two ways, not one.**
+`connect_writer` (the only function that opens a writable connection) is
+import-restricted to `store/writer.py` and `store/migrations.py` by
+`tests/test_store_boundary.py`, mirroring the Phase 0 harness-boundary test.
+Separately, `connect_reader` opens a genuine SQLite `mode=ro` connection —
+not just a convention — so a read path cannot become a second writer even by
+accident. `StoreWriter.submit()`/`.drain()` exist now for the cross-thread
+handoff the plan describes, ahead of Phase 2/3 having any threads that
+actually need it.
+
+**4. `sequence` is scoped per `run_id`, with `''` as the scope for run-less
+events.**
+§9.1 says "monotonic within the run," but §9.2 also names project-level
+events (`agent_assets.synced`) that carry no `run_id`. A single
+`event_sequence` table keyed by scope (empty string for the run-less case)
+covers both without a nullable-column special case in the counter logic.
+
+**5. `EventType`/`Severity`/`blocked_reason`/`failure_type`/`failure_stage`
+are real Python enums whose `.value` sets are hand-kept in sync with the
+schema's CHECK constraints.**
+No codegen from one to the other — the plan's "enums in the schema, not free
+text" is about the schema; mirroring it in Python is what makes a typo a
+mypy error instead of a runtime CHECK failure. `event_type` itself is *not*
+CHECK-constrained in the schema (only the three the plan names are) — new
+event types are expected to be added over the project's life without a
+migration.
+
+**6. Migration transactionality is achieved with a literal `BEGIN`/`COMMIT`
+inside each migration's own SQL text, not with Python-level transaction
+control.**
+`sqlite3.Connection.executescript()` implicitly commits any pending
+transaction before running and gives no transaction guarantee across the
+statements it runs — the transaction control has to live in the script
+itself. `migrate()` appends a generic `schema_migrations` stamp (the table
+creation plus the version-stamping `INSERT`) to every migration's script
+before wrapping the whole thing in `BEGIN; ...; COMMIT;`, so the schema
+change and its version stamp can never land separately.
+
+**7. Timestamps are UTC ISO 8601 with millisecond precision everywhere**,
+via one `store.clock.utcnow_iso()`, so every timestamp column sorts and
+compares as a plain string with no parse step.
+
+### Things that will matter later
+
+**The concurrency exit criterion is tested against the pragmas, not just the
+discipline.** `tests/test_store_concurrency.py` deliberately opens *two*
+independent write connections (the shape single-writer discipline exists to
+avoid) and hammers both for a second, asserting zero `SQLITE_BUSY`. This
+proves the §8.1 pragma set actually holds under real contention, which is
+what the plan's exit criterion literally asks for — the boundary test
+(`test_store_boundary.py`) separately proves Cosmo's own code never creates
+that situation.
+
+**The "no gaps or duplicates" exit criterion is tested as a transaction
+atomicity property, not by an actual `kill -9`.** `tests/test_events.py`
+wraps the real connection in a proxy that fails exactly the `INSERT INTO
+events` call on the second `emit()`, then asserts the next successful emit
+gets sequence 2, not 3. `sqlite3.Connection` is a C type with no per-instance
+`__dict__`, so a `monkeypatch.setattr` on the connection *object* doesn't
+work — patch `StoreWriter._conn` instead (a plain Python attribute) and route
+through a proxy that delegates everything except the one call under test.
+
+**`StoreWriter.submit()`/`.drain()` has no real caller yet.** Phase 2's
+process supervision and Phase 3's stream reader are the first consumers.
+`tests/test_store_writer.py` exercises the mechanism directly (a background
+thread submits a job, the main thread drains it) since there is no watcher to
+exercise it end-to-end yet.
+
+**`doctor --project-path` only resolves what has been registered.** Until
+Phase 4 ships `cosmo init`, the only way to populate `projects` is `cosmo
+project register`. This is expected, not a gap — see decision 2 above.
+
+**Any new migration must go through `MIGRATIONS`, never edit `_SCHEMA_V1`.**
+Once shipped, a migration's SQL is frozen (forward-only, Open Item 5). A
+schema change is always `Migration(2, ...)` appended to the list.
+
+---
+
 ## Deviations from the spec, cumulative
 
 Kept here so a future spec revision can absorb them in one pass.
@@ -173,3 +304,4 @@ Kept here so a future spec revision can absorb them in one pass.
 | 1 | `preflight()` added to the adapter interface | §2.2 | 0 | Adapters must declare their own preconditions; core cannot know them |
 | 2 | `validate()` not on the adapter interface | §2.2 | 0 | Contradicts §2.2's own statement that validation bypasses the harness |
 | 3 | State paths default to XDG, not `/var/cosmo` | §3.2 | 0 | `/var` needs root on WSL2; droplet overrides via config |
+| 4 | `cosmo project register` CLI added, ahead of `cosmo init` | §10.4 | 1 | The `projects` table (step 6) needs a populator before Phase 4's full bootstrap exists; this is the persistence primitive only, no templates/symlinks |

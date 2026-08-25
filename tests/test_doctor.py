@@ -8,8 +8,9 @@ import pytest
 
 from cosmo.checks import CheckStatus
 from cosmo.config import CosmoConfig, load_config
-from cosmo.doctor import check_disk, check_work_dir_filesystem, core_checks
+from cosmo.doctor import check_database, check_disk, check_work_dir_filesystem, core_checks
 from cosmo.harness.claude import BILLING_ENV_VAR, ClaudeCodeAdapter
+from cosmo.store import StoreWriter
 
 NO_USER_CONFIG = Path("/nonexistent/config.toml")
 
@@ -81,3 +82,20 @@ def test_preflight_is_side_effect_free(tmp_path: Path) -> None:
     before = set(tmp_path.rglob("*"))
     ClaudeCodeAdapter(_config(tmp_path)).preflight()
     assert set(tmp_path.rglob("*")) == before
+
+
+def test_database_check_passes_when_not_yet_created(tmp_path: Path) -> None:
+    """A fresh install has no database yet; that is expected, not a failure."""
+    result = check_database(_config(tmp_path))
+    assert result.status is CheckStatus.OK
+    assert "not yet created" in result.detail
+
+
+def test_database_check_passes_at_the_current_schema_version(tmp_path: Path) -> None:
+    cfg = _config(tmp_path)
+    writer = StoreWriter(cfg.paths.db_path)
+    writer.close()
+
+    result = check_database(cfg)
+    assert result.status is CheckStatus.OK
+    assert not result.blocking

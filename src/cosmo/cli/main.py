@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import sqlite3
 from dataclasses import Field
 from pathlib import Path
 from typing import Annotated, Any
@@ -16,6 +17,7 @@ from cosmo import __version__
 from cosmo.checks import CheckResult, CheckStatus
 from cosmo.config import DEFAULTS_PATH, CosmoConfig, load_config, user_config_path
 from cosmo.doctor import core_checks
+from cosmo.events import EventEmitter, EventType, Severity
 from cosmo.harness import (
     UnknownHarnessError,
     available_harnesses,
@@ -23,6 +25,16 @@ from cosmo.harness import (
     resolve_harness_name,
 )
 from cosmo.harness.base import HarnessCapabilities
+from cosmo.store import StoreWriter, TaskNotFoundError
+from cosmo.store.enums import BlockedReason
+from cosmo.store.reader import (
+    find_project_by_path,
+    get_progress,
+    get_task,
+    list_events,
+    list_projects,
+    list_tasks,
+)
 
 app = typer.Typer(
     name="cosmo",
@@ -32,8 +44,14 @@ app = typer.Typer(
 )
 config_app = typer.Typer(name="config", help="Inspect configuration.", no_args_is_help=True)
 harness_app = typer.Typer(name="harness", help="Inspect harness adapters.", no_args_is_help=True)
+queue_app = typer.Typer(name="queue", help="Manage the task queue.", no_args_is_help=True)
+events_app = typer.Typer(name="events", help="Inspect the event log.", no_args_is_help=True)
+project_app = typer.Typer(name="project", help="Manage registered projects.", no_args_is_help=True)
 app.add_typer(config_app)
 app.add_typer(harness_app)
+app.add_typer(queue_app)
+app.add_typer(events_app)
+app.add_typer(project_app)
 
 console = Console()
 err_console = Console(stderr=True)
@@ -45,6 +63,13 @@ ConfigOption = Annotated[
 HarnessOption = Annotated[
     str | None,
     typer.Option("--harness", help="Override the harness for this invocation."),
+]
+ProjectPathOption = Annotated[
+    Path | None,
+    typer.Option(
+        "--project-path",
+        help="A registered target repo -- supplies the project tier of harness resolution.",
+    ),
 ]
 
 _STATUS_STYLE = {
@@ -143,7 +168,11 @@ def _capability_fields() -> tuple[Field[Any], ...]:
 
 
 @app.command()
-def doctor(config: ConfigOption = None, harness: HarnessOption = None) -> None:
+def doctor(
+    config: ConfigOption = None,
+    harness: HarnessOption = None,
+    project_path: ProjectPathOption = None,
+) -> None:
     """Check that this host can run Cosmo.
 
     Reports core checks and harness checks separately: core checks are
@@ -152,9 +181,13 @@ def doctor(config: ConfigOption = None, harness: HarnessOption = None) -> None:
     """
     cfg = _load(config)
 
-    # Project registration is the middle precedence tier; it arrives with the
-    # project store in Phase 1, so it is None here.
-    name, source = resolve_harness_name(harness, None, cfg.harness.name)
+    project_harness = None
+    if project_path is not None:
+        project = find_project_by_path(cfg.paths.db_path, str(project_path.resolve()))
+        if project is not None:
+            project_harness = project.harness
+
+    name, source = resolve_harness_name(harness, project_harness, cfg.harness.name)
     console.print(f"harness: [bold]{name}[/bold] (from {source})\n")
 
     core = core_checks(cfg)
@@ -183,3 +216,241 @@ def doctor(config: ConfigOption = None, harness: HarnessOption = None) -> None:
         console.print(f"\n[yellow]ready, with {len(warnings)} warning(s)[/yellow]")
         return
     console.print("\n[green]ready[/green]")
+
+
+# ---------------------------------------------------------------------------
+# cosmo project -- spec 10.4 step 6. A minimal registration path so the
+# project tier of harness resolution has something to resolve against ahead
+# of the full `cosmo init` bootstrap flow (plan Phase 4).
+# ---------------------------------------------------------------------------
+
+
+@project_app.command("register")
+def project_register(
+    target_path: Annotated[Path, typer.Argument(help="Path to the target repo.")],
+    harness: HarnessOption = None,
+    project_template: Annotated[
+        str | None, typer.Option(help="Project template used at bootstrap, if any.")
+    ] = None,
+    config: ConfigOption = None,
+) -> None:
+    """Register a target repo so its harness can be resolved by path."""
+    cfg = _load(config)
+    resolved = target_path.resolve()
+    if not resolved.is_dir():
+        err_console.print(f"[red]{resolved} is not a directory[/red]")
+        raise typer.Exit(code=2)
+
+    # No project row exists yet for this path -- resolution can only fall
+    # back to the config default (spec 2, plan Phase 0 resolution order).
+    resolved_harness, _ = resolve_harness_name(harness, None, cfg.harness.name)
+
+    writer = StoreWriter(cfg.paths.db_path)
+    try:
+        project_id = writer.register_project(
+            target_path=str(resolved), harness=resolved_harness, project_template=project_template
+        )
+    except sqlite3.IntegrityError:
+        err_console.print(f"[red]{resolved} is already registered[/red]")
+        raise typer.Exit(code=1) from None
+    finally:
+        writer.close()
+    console.print(
+        f"[green]registered[/green] {resolved} ({project_id}, harness={resolved_harness})"
+    )
+
+
+@project_app.command("list")
+def project_list(config: ConfigOption = None) -> None:
+    cfg = _load(config)
+    table = Table(title="projects", title_justify="left")
+    table.add_column("id", style="bold")
+    table.add_column("path")
+    table.add_column("harness")
+    table.add_column("template")
+    for p in list_projects(cfg.paths.db_path):
+        table.add_row(p.project_id, p.target_path, p.harness, p.project_template or "-")
+    console.print(table)
+
+
+# ---------------------------------------------------------------------------
+# cosmo queue -- spec 5.
+# ---------------------------------------------------------------------------
+
+
+@queue_app.command("add")
+def queue_add(
+    spec_path: Annotated[str, typer.Argument(help="Path to the OpenSpec change.")],
+    task_id: Annotated[
+        str | None, typer.Option("--task-id", help="Defaults to the spec path's final component.")
+    ] = None,
+    depends_on: Annotated[
+        list[str] | None,
+        typer.Option("--depends-on", help="task_id this task depends on; repeatable."),
+    ] = None,
+    priority: Annotated[int, typer.Option(help="Soft tie-breaker among eligible tasks.")] = 0,
+    max_attempts: Annotated[
+        int | None, typer.Option(help="Defaults to the configured retries.max_attempts.")
+    ] = None,
+    allow_test_edits: Annotated[
+        bool, typer.Option(help="Bypass the test-path guard for this task (spec 2.5).")
+    ] = False,
+    config: ConfigOption = None,
+) -> None:
+    cfg = _load(config)
+    resolved_task_id = task_id or Path(spec_path).stem
+    writer = StoreWriter(cfg.paths.db_path)
+    try:
+        writer.queue_add(
+            task_id=resolved_task_id,
+            spec_path=spec_path,
+            depends_on=list(depends_on) if depends_on else [],
+            priority=priority,
+            max_attempts=max_attempts if max_attempts is not None else cfg.retries.max_attempts,
+            allow_test_edits=allow_test_edits,
+        )
+        EventEmitter(writer).emit(
+            event_type=EventType.TASK_STATE_CHANGED,
+            severity=Severity.INFO,
+            task_id=resolved_task_id,
+            payload={"from_state": None, "to_state": "queued", "attempt_number": 0},
+        )
+    except sqlite3.IntegrityError:
+        err_console.print(f"[red]task {resolved_task_id!r} already queued[/red]")
+        raise typer.Exit(code=1) from None
+    finally:
+        writer.close()
+    console.print(f"[green]queued[/green] {resolved_task_id}")
+
+
+@queue_app.command("ls")
+def queue_ls(
+    status: Annotated[str | None, typer.Option(help="Filter by status.")] = None,
+    config: ConfigOption = None,
+) -> None:
+    cfg = _load(config)
+    table = Table(title="task queue", title_justify="left")
+    columns = (
+        "task_id",
+        "status",
+        "attempts",
+        "depends_on",
+        "priority",
+        "blocked_reason",
+        "spec_path",
+    )
+    for col in columns:
+        table.add_column(col)
+    for t in list_tasks(cfg.paths.db_path, status=status):
+        table.add_row(
+            t.task_id,
+            t.status,
+            f"{t.attempt_count}/{t.max_attempts}",
+            ",".join(t.depends_on) or "-",
+            str(t.priority),
+            t.blocked_reason or "-",
+            t.spec_path,
+        )
+    console.print(table)
+
+
+@queue_app.command("show")
+def queue_show(task_id: str, config: ConfigOption = None) -> None:
+    cfg = _load(config)
+    task = get_task(cfg.paths.db_path, task_id)
+    if task is None:
+        err_console.print(f"[red]no such task: {task_id!r}[/red]")
+        raise typer.Exit(code=1)
+
+    table = Table(title=task_id, title_justify="left", show_header=False)
+    table.add_column("field", style="bold")
+    table.add_column("value")
+    for field_name, value in dataclasses.asdict(task).items():
+        table.add_row(field_name, str(value))
+    console.print(table)
+
+    progress = get_progress(cfg.paths.db_path, task_id)
+    if progress is not None:
+        label = progress.last_label or "-"
+        console.print(f"progress: {progress.completed}/{progress.total} ({label})")
+
+
+@queue_app.command("retry")
+def queue_retry(task_id: str, config: ConfigOption = None) -> None:
+    cfg = _load(config)
+    writer = StoreWriter(cfg.paths.db_path)
+    try:
+        writer.queue_retry(task_id)
+        EventEmitter(writer).emit(
+            event_type=EventType.TASK_STATE_CHANGED,
+            severity=Severity.INFO,
+            task_id=task_id,
+            payload={"to_state": "queued"},
+        )
+    except TaskNotFoundError:
+        err_console.print(f"[red]no such task: {task_id!r}[/red]")
+        raise typer.Exit(code=1) from None
+    finally:
+        writer.close()
+    console.print(f"[green]requeued[/green] {task_id}")
+
+
+@queue_app.command("block")
+def queue_block(
+    task_id: str,
+    reason: Annotated[str, typer.Option(help="A blocked_reason value (spec 5).")],
+    config: ConfigOption = None,
+) -> None:
+    cfg = _load(config)
+    try:
+        blocked_reason = BlockedReason(reason)
+    except ValueError:
+        valid = ", ".join(r.value for r in BlockedReason)
+        err_console.print(f"[red]invalid reason {reason!r}; must be one of: {valid}[/red]")
+        raise typer.Exit(code=2) from None
+
+    writer = StoreWriter(cfg.paths.db_path)
+    try:
+        writer.queue_block(task_id, blocked_reason)
+        EventEmitter(writer).emit(
+            event_type=EventType.TASK_BLOCKED,
+            severity=Severity.WARNING,
+            task_id=task_id,
+            payload={"blocked_reason": blocked_reason.value},
+        )
+    except TaskNotFoundError:
+        err_console.print(f"[red]no such task: {task_id!r}[/red]")
+        raise typer.Exit(code=1) from None
+    finally:
+        writer.close()
+    console.print(f"[yellow]blocked[/yellow] {task_id} ({reason})")
+
+
+# ---------------------------------------------------------------------------
+# cosmo events -- spec 9.1/9.2.
+# ---------------------------------------------------------------------------
+
+
+@events_app.command("tail")
+def events_tail(
+    run: Annotated[str | None, typer.Option("--run", help="Filter by run_id.")] = None,
+    task: Annotated[str | None, typer.Option("--task", help="Filter by task_id.")] = None,
+    severity: Annotated[str | None, typer.Option("--severity", help="Filter by severity.")] = None,
+    limit: Annotated[int, typer.Option(help="Most recent N events.")] = 50,
+    config: ConfigOption = None,
+) -> None:
+    cfg = _load(config)
+    table = Table(title="events", title_justify="left")
+    for col in ("seq", "timestamp", "severity", "event_type", "run_id", "task_id"):
+        table.add_column(col)
+    rows = list_events(cfg.paths.db_path, run_id=run, task_id=task, severity=severity, limit=limit)
+    for e in rows:
+        table.add_row(
+            str(e.sequence),
+            e.timestamp,
+            e.severity,
+            e.event_type,
+            e.run_id or "-",
+            e.task_id or "-",
+        )
+    console.print(table)
