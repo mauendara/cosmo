@@ -4,9 +4,10 @@ Nothing in this module may name a specific harness, its binary, or its
 environment variables. Harness-specific preconditions are obtained by calling
 `preflight()` on the resolved adapter (spec 2). A test enforces this boundary.
 
-`git`, `docker` and `openspec` are core rather than harness-specific: Cosmo calls
-OpenSpec's CLI itself (spec 10.4), and the validation gate invokes Docker directly,
-bypassing the harness entirely (spec 2.2).
+`git`, `docker`, `openspec` and `gitleaks` are core rather than harness-specific:
+Cosmo calls OpenSpec's CLI itself (spec 10.4), the validation gate invokes Docker
+directly, bypassing the harness entirely (spec 2.2), and the gitleaks pre-commit
+hook (spec 6.1) is installed by Cosmo's own worktree lifecycle, not by an adapter.
 """
 
 from __future__ import annotations
@@ -174,6 +175,7 @@ def core_checks(config: CosmoConfig) -> list[CheckResult]:
         check_executable("git", "git", "worktree isolation and merges"),
         check_executable("docker", "docker", "the validation gate"),
         check_executable("openspec", "openspec", "the propose/apply flow"),
+        check_executable("gitleaks", "gitleaks", "the worktree secret-commit guardrail (spec 6.1)"),
         check_disk(config),
         check_paths_writable(config),
         check_work_dir_filesystem(config),

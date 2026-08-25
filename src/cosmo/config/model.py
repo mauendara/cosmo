@@ -119,6 +119,13 @@ class DiskConfig(_Strict):
 
 class GitConfig(_Strict):
     base_branch: str = Field(min_length=1)
+    # Identity for commits Cosmo creates itself (merge commits, rebase
+    # replays) -- spec 3.4's merge ladder needs one regardless of whether
+    # this host has a global git identity configured (it may not; Phase 5
+    # found this by hand). Passed as `-c user.name=...` per invocation, never
+    # written to global git config.
+    commit_author_name: str = Field(min_length=1)
+    commit_author_email: str = Field(min_length=1)
 
 
 class PathsConfig(_Strict):

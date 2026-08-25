@@ -32,7 +32,7 @@ def _config(tmp_path: Path, **overrides: object) -> CosmoConfig:
 def test_core_checks_produce_a_result_per_check(tmp_path: Path) -> None:
     results = core_checks(_config(tmp_path))
     assert len(results) == len({r.name for r in results}), "check names must be unique"
-    assert {"git", "docker", "openspec", "disk space"} <= {r.name for r in results}
+    assert {"git", "docker", "openspec", "gitleaks", "disk space"} <= {r.name for r in results}
 
 
 def test_disk_floor_fails_when_below_threshold(tmp_path: Path) -> None:

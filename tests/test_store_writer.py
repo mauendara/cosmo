@@ -69,6 +69,46 @@ def test_queue_retry_unknown_task_raises(tmp_path: Path) -> None:
     writer.close()
 
 
+def test_queue_set_worktree_path_round_trips(tmp_path: Path) -> None:
+    db_path = tmp_path / "cosmo.db"
+    writer = StoreWriter(db_path)
+    writer.queue_add(task_id="add-foo", spec_path="p1", max_attempts=2)
+
+    writer.queue_set_worktree_path("add-foo", Path("/var/cosmo/work/run-1/add-foo"))
+
+    task = get_task(db_path, "add-foo")
+    assert task is not None
+    assert task.worktree_path == "/var/cosmo/work/run-1/add-foo"
+    writer.close()
+
+
+def test_queue_set_worktree_path_unknown_task_raises(tmp_path: Path) -> None:
+    writer = StoreWriter(tmp_path / "cosmo.db")
+    with pytest.raises(TaskNotFoundError):
+        writer.queue_set_worktree_path("nonexistent", Path("/tmp/x"))
+    writer.close()
+
+
+def test_queue_complete_clears_worktree_path_and_sets_done(tmp_path: Path) -> None:
+    db_path = tmp_path / "cosmo.db"
+    writer = StoreWriter(db_path)
+    writer.queue_add(task_id="add-foo", spec_path="p1", max_attempts=2)
+    writer.queue_set_worktree_path("add-foo", Path("/var/cosmo/work/run-1/add-foo"))
+
+    writer.queue_complete("add-foo")
+
+    task = get_task(db_path, "add-foo")
+    assert task is not None
+    assert task.status == "done"
+    assert task.worktree_path is None
+
+    rows = writer.connection.execute(
+        "SELECT from_state, to_state FROM task_transitions WHERE task_id = 'add-foo' ORDER BY id"
+    ).fetchall()
+    assert [(r["from_state"], r["to_state"]) for r in rows][-1] == ("queued", "done")
+    writer.close()
+
+
 def test_every_transition_is_recorded_append_only(tmp_path: Path) -> None:
     writer = StoreWriter(tmp_path / "cosmo.db")
     writer.queue_add(task_id="add-foo", spec_path="p1", max_attempts=2)

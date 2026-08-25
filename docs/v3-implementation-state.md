@@ -12,7 +12,7 @@ rediscover.
 |---|---|
 | Last updated | 2026-08-25 |
 | Working branch | `develop` |
-| Head commit | `97b1742` — the `--config` fix (Phase 4 not yet committed) |
+| Head commit | `c7167aa` — Phase 4 (Phase 5 not yet committed) |
 | Spec | [v3-cosmo-autonomous-agent-spec.md](v3-cosmo-autonomous-agent-spec.md) |
 
 ## Phase status
@@ -24,7 +24,7 @@ rediscover.
 | 2 — Process supervision | **Complete** |
 | 3 — Harness abstraction and Claude Code adapter | **Complete** |
 | 4 — Template system and `cosmo init` | **Complete** |
-| 5 — Worktree lifecycle and git operations | Not started |
+| 5 — Worktree lifecycle and git operations | **Complete** |
 | 6 — Validation gate | Not started |
 | 7 — Task state machine | Not started |
 | 8 — Run loop, DAG, circuit breaker, quota | Not started |
@@ -814,6 +814,148 @@ per-task sync (once it exists) makes staleness self-correcting rather than
 something a preflight check needs to catch. Revisit only if a real gap
 shows up in practice.
 
+## Phase 5 — Complete
+
+All exit criteria met. 201 tests passing (181 carried forward + 20 new);
+`ruff`, `ruff format`, and `mypy --strict` clean.
+
+### What exists
+
+| Path | Contents |
+|---|---|
+| `src/cosmo/git/worktree.py` | `create_worktree()` (`git worktree add` + `sync_harness_assets` + gitleaks hook install + `worktree_path` write), `remove_worktree()`, `sweep_stale_worktrees()` |
+| `src/cosmo/git/secrets.py` | `install_gitleaks_pre_commit_hook()` -- the spec 6.1 hook, idempotent, marker-based refresh-not-clobber |
+| `src/cosmo/git/merge.py` | `attempt_merge_ladder()` (pure git mechanics, spec 3.4) and `merge_task()` (ties the ladder to `StoreWriter`/`EventEmitter`) |
+| `src/cosmo/store/writer.py` | Adds `queue_set_worktree_path()`, `queue_complete()` |
+| `src/cosmo/config/model.py`, `defaults.toml` | `GitConfig.commit_author_name` / `commit_author_email` |
+| `src/cosmo/doctor.py` | `gitleaks` added to `core_checks` |
+| `tests/test_git_worktree.py`, `test_git_secrets.py`, `test_git_merge.py`, `test_git_boundary.py` | All against real `git`; `test_git_secrets.py`'s real-scan tests skip if `gitleaks` isn't on PATH (same posture as Phase 4's `openspec` tests) |
+
+No CLI command was added for any of this, deliberately -- see decision 5 below.
+
+### Decisions made during Phase 5
+
+**1. `gitleaks` hooks are shared across a repo's worktrees, not genuinely
+per-worktree -- confirmed by hand before writing any code.** `git rev-parse
+--git-path hooks`, run from any linked worktree, resolves to the *same*
+common `.git/hooks/` directory as the main checkout (there is no per-worktree
+hooks directory in git at all). Spec 6.1's "a gitleaks pre-commit hook in
+each worktree" is satisfied by installing once, idempotently, on every
+`create_worktree()` call -- cheap, and self-healing if the file is ever
+deleted. `install_gitleaks_pre_commit_hook()` resolves the hooks dir via
+`git rev-parse --git-path hooks` rather than assuming `<repo>/.git/hooks`,
+so this keeps working even if `repo_path`'s `.git` layout is ever unusual.
+
+**2. The hook fails closed on a missing `gitleaks` binary** (refuses the
+commit rather than silently skipping the scan), mirroring the Phase 4
+test-path-guard hook's posture. `cosmo doctor` now checks for `gitleaks` on
+PATH (`core_checks`, alongside `git`/`docker`/`openspec`) so this is a
+preflight-visible surprise, not a silent one at commit time. This box had no
+`gitleaks` installed at the start of this phase; installed via the upstream
+release tarball to `~/.local/bin` for real-invocation testing (not via
+`apt`, which needed interactive `sudo` this sandbox doesn't have) --
+`test_installed_hook_blocks_a_commit_containing_a_secret` and its
+clean-commit counterpart exercise the real binary, skipped automatically
+where it's absent.
+
+**3. The hook installer never clobbers a pre-existing, non-Cosmo
+`pre-commit` hook.** Detected via a `HOOK_MARKER` comment line written by
+Cosmo itself -- present means safe to overwrite (idempotent refresh),
+absent means some other tool owns that file (`husky`, `pre-commit`
+framework, a developer's own script) and installation reports
+`skipped_conflict` rather than destroying it. Same refresh-not-clobber
+posture `bootstrap/symlinks.py` (Phase 4) uses for root-level symlinks.
+
+**4. `repo_path` is Cosmo's own dedicated checkout of `base_branch`, and the
+merge ladder runs directly against it -- there is no separate "integration
+worktree."** The first design attempted was a throwaway worktree checked out
+on `base_branch` solely for the merge, specifically so `repo_path`'s own
+working tree would never be touched. That's impossible: git refuses to check
+out a branch that's already checked out in another worktree (confirmed by
+hand), and `base_branch` is already checked out in `repo_path` itself in
+normal operation. `attempt_merge_ladder()` therefore asserts `repo_path` is
+on `base_branch` with a clean `git status` before doing anything, and raises
+`MergeCommandError` (an environment-shaped error, not a merge conflict) if
+that precondition doesn't hold. Practical implication for Phase 7/8: nothing
+else may ever check out a different branch in `repo_path`, or leave
+uncommitted changes there -- `repo_path` is not a place for interactive
+human use while Cosmo is running (task work always happens in the isolated
+linked worktrees; `docs/` being "edited directly in the target repo",
+spec 10.1, does not require touching this specific checkout).
+
+**5. Constructing the "rebase recovery succeeds" exit-criterion scenario
+needed a real, deliberately-chosen git mechanism, not just "two branches
+touch the same file."** Verified by hand (a real experiment, reproduced in
+`test_git_merge.py`'s module docstring and its first test) before writing
+any ladder code: for a plain divergent edit on the same line, `git merge`
+and `git rebase` onto the same target hit the *identical* conflict --
+rebase's default merge-backend uses the same 3-way logic per commit, so
+there is no "rebase magically resolves what merge couldn't" for a simple
+case. The reliable, well-documented mechanism that *does* produce the
+asymmetry: a task branch whose first commit is byte-identical (same diff) to
+a commit already merged into `develop` gets silently skipped by `git
+rebase`'s empty-commit / patch-id detection, while a flat `git merge` of the
+un-rebased branch still sees a real disagreement against `develop`'s current
+tip and conflicts. This is the scenario `test_git_merge.py` builds; it is
+not a contrived edge case invented for the test -- it is exactly the shape a
+real "two tasks edited the same line, one already landed" conflict takes.
+
+**6. No CLI command was added for worktree lifecycle or the merge ladder.**
+Same posture Phase 2 took toward `proc.orphans.sweep()`/`proc.reap
+.cancel_and_reap()`: these are functions with real test coverage against
+real `git`, awaiting the run loop (Phase 7/8) as their real caller, not a
+CLI stand-in. `cosmo harness probe` (Phase 3) was a deliberate exception
+because harness probing has independent diagnostic value standalone; git
+worktree/merge operations don't -- they only make sense as part of driving
+an actual task through the state machine.
+
+**7. `attempt_merge_ladder()`/`merge_task()` never import `cosmo.harness`,
+enforced by `tests/test_git_boundary.py` via `ast`-based import inspection
+(not a text search, which would false-positive on this module's own
+docstring explaining the invariant).** This is what makes spec 3.4 step 2
+("the conflict is never handed back to the agent to resolve blind")
+structural: there is no harness adapter anywhere in scope on this code path
+for a conflict to be handed to. The same test file also asserts `master` is
+never named as a merge target anywhere under `src/cosmo/` (spec 3.2's own
+exit criterion), case-insensitively, permitting only full-line `#` comments
+explaining the exclusion.
+
+**8. `check_work_dir_filesystem` (Phase 0's `/mnt/c` WSL2 warning) needed no
+changes now that worktrees are actually created under `config.paths
+.work_dir` for real.** It already inspects the exact path worktrees land in;
+Phase 0's check was correctly anticipatory.
+
+### Things that will matter later
+
+**`create_worktree()` will raise `WorktreeError` on a duplicate branch name**
+(`git worktree add -b task/<spec-id>` fails if that branch already exists --
+e.g. a task retried after a crash left the old branch around). Phase 5 does
+not resolve this: branch-name collision handling on retry is a Phase 7
+concern (it owns `FAILED_RETRY`/attempt-numbering), not a git-mechanics one.
+`sweep_stale_worktrees()` deletes the branch for any worktree it prunes when
+it can determine the branch name (`git worktree list --porcelain`), which
+covers the common case, but a task retried *without* an intervening startup
+sweep could still hit this. Worth a real end-to-end check once Phase 7
+exists.
+
+**`queue_complete()` and `queue_set_worktree_path()` are plain column
+writers, not part of a `task.state_changed` sequence.** Phase 7 owns "every
+transition persisted and emitting `task.state_changed`" (plan Phase 7); the
+Phase 5 exit criteria only asked for `task.completed`/`task.blocked` around
+the merge outcome, which `merge_task()` emits directly, matching the
+existing `cosmo queue block` CLI command's precedent (it also emits
+`task.blocked` without a paired `task.state_changed`).
+
+**The "commit step" named in the plan's Phase 5 bullet is the *agent's* own
+`git commit`, already covered by Phase 4** (`CLAUDE.md`'s "Committing"
+section + `commit_integrity_guard.py`'s `--no-verify` denial) -- Phase 5
+builds no separate commit primitive of its own. `COMMITTING`'s spec 11
+knowledge-file step (append 2-3 lines, enforce the 400-line cap) is
+explicitly Phase 7's (plan Phase 7: "`COMMITTING` also runs the §11
+knowledge step"). The merge ladder's only precondition is "the task
+branch's HEAD already has the committed work," which every Phase 5 test
+satisfies explicitly before calling into it.
+
 ## Deviations from the spec, cumulative
 
 Kept here so a future spec revision can absorb them in one pass.
@@ -830,3 +972,4 @@ Kept here so a future spec revision can absorb them in one pass.
 | 8 | `openspec init` invoked with `--tools none`, never `--tools claude` | §10.4 | 4 | `--tools claude` writes a real `.claude/commands`/`.claude/skills` tree that conflicts with the spec's own `.claude` symlink (§10.2); found by hand |
 | 9 | `--setting-sources project` added to the Claude adapter's argv | §2.3 | 4 | Not named in the spec's invocation description at all; fixes the Phase 3 global-config-inheritance finding, verified by a real invocation |
 | 10 | `COSMO_TASK_ID` / `COSMO_DB_PATH` env vars added to the child process | §2.5 | 4 | The test-path guard hook is a separate OS process with no other way to read `allow_test_edits`; the handoff explicitly left this variable's name undecided |
+| 11 | `GitConfig.commit_author_name` / `commit_author_email` added | §3.4 | 5 | Spec never names a git identity for Cosmo's own merge/rebase commits; this box (and a fresh dev box generally) has no global git identity configured, found by hand -- passed as `-c user.name=...` per invocation, never written globally |

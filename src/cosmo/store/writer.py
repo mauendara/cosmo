@@ -147,6 +147,36 @@ class StoreWriter:
                 task_id, run_id=None, from_state=from_state, to_state="blocked", now=now
             )
 
+    def queue_set_worktree_path(self, task_id: str, worktree_path: Path) -> None:
+        """Spec 3.2: recorded the moment `git worktree add` succeeds, so a
+        crash before the task reaches a terminal state still leaves a trail
+        pointing at the worktree (the startup sweep's only source of truth)."""
+        now = utcnow_iso()
+        with self._conn:
+            self._current_status(task_id)  # raises TaskNotFoundError if absent
+            self._conn.execute(
+                "UPDATE task_queue SET worktree_path = ?, updated_at = ? WHERE task_id = ?",
+                (str(worktree_path), now, task_id),
+            )
+
+    def queue_complete(self, task_id: str) -> None:
+        """`DONE`: the worktree has already been removed by the caller (spec
+        3.2), so `worktree_path` is cleared here rather than left dangling."""
+        now = utcnow_iso()
+        with self._conn:
+            from_state = self._current_status(task_id)
+            self._conn.execute(
+                """
+                UPDATE task_queue
+                SET status = 'done', worktree_path = NULL, updated_at = ?
+                WHERE task_id = ?
+                """,
+                (now, task_id),
+            )
+            self._record_transition(
+                task_id, run_id=None, from_state=from_state, to_state="done", now=now
+            )
+
     def _current_status(self, task_id: str) -> str:
         row = self._conn.execute(
             "SELECT status, attempt_count FROM task_queue WHERE task_id = ?", (task_id,)
