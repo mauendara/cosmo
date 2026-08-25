@@ -12,7 +12,7 @@ rediscover.
 |---|---|
 | Last updated | 2026-08-24 |
 | Working branch | `develop` |
-| Head commit | `a496ced` — Phase 0 (Phase 1 not yet committed) |
+| Head commit | `bc62bfc` — Phase 1 (Phase 2 not yet committed) |
 | Spec | [v3-cosmo-autonomous-agent-spec.md](v3-cosmo-autonomous-agent-spec.md) |
 
 ## Phase status
@@ -21,7 +21,7 @@ rediscover.
 |---|---|
 | 0 — Repository skeleton and configuration | **Complete** |
 | 1 — Persistent state and the event log | **Complete** |
-| 2 — Process supervision | Not started — next |
+| 2 — Process supervision | **Complete** |
 | 3 — Harness abstraction and Claude Code adapter | Stub only (see below) |
 | 4 — Template system and `cosmo init` | Not started |
 | 5 — Worktree lifecycle and git operations | Not started |
@@ -294,6 +294,125 @@ Once shipped, a migration's SQL is frozen (forward-only, Open Item 5). A
 schema change is always `Migration(2, ...)` appended to the list.
 
 ---
+
+## Phase 2 — Complete
+
+All exit criteria met. 91 tests passing; `ruff`, `ruff format`, and `mypy --strict`
+clean.
+
+### What exists
+
+| Path | Contents |
+|---|---|
+| `src/cosmo/proc/managed.py` | `ManagedProcess` — `Popen(..., start_new_session=True)`, non-blocking stdout/stderr drain to a raw log file, `cancel()` |
+| `src/cosmo/proc/timers.py` | `WallClockTimer`, `StallTimer`, `LivenessTimers` — the two independent timers per managed run (spec 3.3) |
+| `src/cosmo/proc/orphans.py` | `sweep_containers` (docker label filter + `rm -f`), `find_worktree_holders` (`/proc` scan), `sweep` (both, spec 2.4 steps 4-5) |
+| `src/cosmo/proc/reap.py` | `cancel_and_reap` — ties `cancel()` + `sweep()` together and emits `task.failed`/`environment_error` with the breaker weight on a failed reap (spec 2.4 step 6) |
+| `src/cosmo/doctor.py` | Adds `check_no_leaked_gate_containers` to `core_checks()` |
+| `tests/fixtures/spawn_ignoring_grandchild.sh` | Shell fixture: a process with no SIGTERM trap spawns a grandchild that ignores SIGTERM and loops forever |
+| `tests/fixtures/fake_docker.sh` | Recording stand-in for the `docker` CLI, including a `FAKE_DOCKER_FAIL` mode (see decision 3) |
+
+### Decisions made during Phase 2
+
+**1. `cancel()`'s liveness check is `killpg(pgid, 0)`, not "has our direct
+child's `wait()` returned."**
+The obvious-looking implementation -- `Popen.wait(timeout=grace_s)` then
+escalate -- only proves the *direct* child exited. A grandchild that traps
+and ignores `SIGTERM` survives its parent's death, is still in the same
+process group, and is exactly the leak spec 2.4's opening paragraph
+describes. `_wait_for_group_empty` polls `os.killpg(pgid, 0)` (raises
+`ProcessLookupError` once no process anywhere carries that pgid) instead,
+which is the only check that actually proves the whole tree is gone. This
+also drives the escalation to `SIGKILL` correctly: a `SIGTERM`-only reap that
+looked "done" because the direct child died would never send the `SIGKILL`
+a stubborn grandchild needs.
+
+**2. Reaping the direct child is interleaved with the liveness poll, not
+deferred until the group is confirmed empty.**
+The first version of `_wait_for_group_empty` deferred `Popen.wait()` to
+avoid a pid-reuse race (reaping early frees the pid, which is also the pgid,
+for the kernel to hand to an unrelated process while still polling). That
+created a real deadlock instead: a child with *no* surviving descendants of
+its own becomes a zombie the moment it exits, and only its actual parent
+(us) can reap it -- nothing else ever will. `killpg(pgid, 0)` sees the
+zombie as "still there" forever, so `cancel()` timed out even against a
+plain `sleep` that dies cleanly on `SIGTERM` (`tests/test_proc_managed.py`
+caught this immediately). Fixed by calling `self._proc.poll()` on every
+polling iteration -- `Popen.poll()` reaps via `waitpid(WNOHANG)` the instant
+the child exits. The pid-reuse race this reopens is real but is the same
+order of risk every process supervisor using pgids accepts; not worth
+architecting around for a serial, single-host v1.
+
+**3. `sweep_containers` / `check_no_leaked_gate_containers` check
+`returncode`, not just whether stdout parsed into plausible-looking lines.**
+Found by manually running `cosmo doctor` on this WSL2 box, not by a unit
+test: the local `docker` resolves to the Docker Desktop shim, which is
+non-functional here and, on failure, prints its "command not found" banner
+to **stdout** (not stderr) and exits 1. The original code treated every line
+of that banner as a container id and would have called `docker rm -f` on
+them. Both call sites now short-circuit to "found nothing" / "warn, docker
+ps failed" on a non-zero exit rather than parsing stdout at all.
+`fake_docker.sh` gained a `FAKE_DOCKER_FAIL` mode specifically to pin this
+regression in tests, since the real shim's behavior can't be exercised in
+CI.
+
+**4. `ManagedProcess._drain` reads via `os.read(fd, 4096)`, not
+`pipe.read(4096)`.**
+A `BufferedReader.read(size)` blocks until it fills the requested size *or*
+hits EOF -- it does not return early just because some bytes are available.
+A short heartbeat line followed by silence would sit unflushed in the pipe
+buffer for however long the harness stayed quiet, which defeats the entire
+point of "non-blocking drain" the plan asks for. `os.read` mirrors the raw
+POSIX `read(2)`: it returns as soon as *any* data is available, up to the
+requested size. Also caught by a test hang, not by inspection.
+
+**5. `docker`/container tests use a recording fake script, not a live
+daemon.**
+This sandbox's `docker` does not actually work (see decision 3) -- the
+handoff's own instruction to fake `claude -p` rather than invoke it for real
+extends naturally to a fake `docker`. `tests/fixtures/fake_docker.sh` logs
+every invocation and returns canned `ps -q` output (or, in `FAKE_DOCKER_FAIL`
+mode, a non-zero exit with stdout-only error text). A future integration
+test against real Docker belongs with Phase 6's gate work, where a real
+container is actually launched.
+
+**6. `check_no_leaked_gate_containers` added to `core_checks()`, per the
+handoff's "worth a look."**
+Scoped narrowly: it only checks for containers still carrying
+`orchestrator.run_id`, which only step 5's convention makes possible. It
+does not attempt the worktree-holder half of the sweep across a process
+restart (that needs the task queue's `worktree_path` column cross-referenced
+against a "run in progress" concept that doesn't fully exist before Phase
+8) -- left for whichever later phase actually needs it.
+
+### Things that will matter later
+
+**`ManagedProcess.cancel(grace_s=...)` takes the grace period as an
+argument, not read from config internally.** `cancel_and_reap` is what wires
+`config.timeouts.kill_grace` in. Keeping `ManagedProcess` itself
+config-ignorant kept the fast unit tests fast (grace periods of 0.3s instead
+of the real 20s) without needing a config fixture in every test.
+
+**The circuit breaker is still not implemented (Phase 8, as planned).**
+`cancel_and_reap` emits `task.failed` with `failure_type=environment_error`
+and `circuit_breaker_weight` in the payload on a failed reap, but nothing
+consumes that weight yet -- there is no breaker to trip. This matches the
+handoff's explicit scope boundary; don't reach ahead of it in Phase 3 either.
+
+**`find_worktree_holders` is a `/proc` scan, not `lsof` or `psutil`.**
+No new dependency needed for a Linux-only, best-effort scan; skips any pid
+it can't introspect (permission denied, exited mid-scan) rather than
+raising. Untested on anything but Linux/WSL2 -- consistent with spec 2.4's
+own "on POSIX" framing, so this is not considered a gap.
+
+**Pre-existing environment breakage, unrelated to Phase 2:** this WSL2 box's
+`docker` binary is on `PATH` (satisfying `check_executable`) but its
+invocation fails -- Docker Desktop's WSL2 integration isn't enabled in this
+session. `cosmo doctor` now reports this accurately as "docker ps failed"
+rather than silently misreporting phantom leaked containers, but no
+Phase-2-owned code makes `docker` itself work. Also observed: this box is
+usually near the 10 GB disk floor, so `cosmo doctor`'s disk check may show
+`FAIL` for reasons unrelated to whatever change is under test.
 
 ## Deviations from the spec, cumulative
 

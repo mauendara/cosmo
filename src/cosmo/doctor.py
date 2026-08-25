@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import shutil
 import sqlite3
+import subprocess
 import sys
 from pathlib import Path
 
@@ -128,6 +129,45 @@ def check_database(config: CosmoConfig) -> CheckResult:
     return ok("event/state store", f"{db_path} at schema version {version}")
 
 
+def check_no_leaked_gate_containers(*, docker_bin: str = "docker") -> CheckResult:
+    """Spec 2.4 steps 4-5: an orchestrator-labeled container still running
+    means a previous run's reap (proc.reap.cancel_and_reap) didn't fully
+    clean up, or Cosmo was killed before it could try. A warning, not a
+    blocker -- a human may be intentionally inspecting a live container --
+    but silently starting a new run on top of one is how a leaked pool
+    poisons the next task (spec 6.5).
+    """
+    if shutil.which(docker_bin) is None:
+        return ok("leaked gate containers", "docker not on PATH -- see the docker check above")
+    try:
+        result = subprocess.run(
+            [docker_bin, "ps", "-q", "--filter", "label=orchestrator.run_id"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return warn("leaked gate containers", f"could not query docker: {exc}")
+
+    if result.returncode != 0:
+        # A non-zero exit means stdout is not a container-id list -- it may
+        # be an error banner (observed: the WSL2 Docker Desktop shim prints
+        # its "could not be found" message to stdout, not stderr, on exit 1).
+        # Parsing that as ids would misreport an unrelated docker problem as
+        # leaked containers.
+        detail = (result.stderr or result.stdout).strip() or f"exit code {result.returncode}"
+        return warn("leaked gate containers", f"docker ps failed: {detail}")
+
+    ids = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    if ids:
+        return warn(
+            "leaked gate containers",
+            f"{len(ids)} orchestrator-labeled container(s) still running: {', '.join(ids)}",
+        )
+    return ok("leaked gate containers", "none found")
+
+
 def core_checks(config: CosmoConfig) -> list[CheckResult]:
     return [
         check_python(),
@@ -138,4 +178,5 @@ def core_checks(config: CosmoConfig) -> list[CheckResult]:
         check_paths_writable(config),
         check_work_dir_filesystem(config),
         check_database(config),
+        check_no_leaked_gate_containers(),
     ]

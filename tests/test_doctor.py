@@ -8,7 +8,13 @@ import pytest
 
 from cosmo.checks import CheckStatus
 from cosmo.config import CosmoConfig, load_config
-from cosmo.doctor import check_database, check_disk, check_work_dir_filesystem, core_checks
+from cosmo.doctor import (
+    check_database,
+    check_disk,
+    check_no_leaked_gate_containers,
+    check_work_dir_filesystem,
+    core_checks,
+)
 from cosmo.harness.claude import BILLING_ENV_VAR, ClaudeCodeAdapter
 from cosmo.store import StoreWriter
 
@@ -99,3 +105,41 @@ def test_database_check_passes_at_the_current_schema_version(tmp_path: Path) -> 
     result = check_database(cfg)
     assert result.status is CheckStatus.OK
     assert not result.blocking
+
+
+_FAKE_DOCKER = Path(__file__).resolve().parent / "fixtures" / "fake_docker.sh"
+
+
+def test_leaked_containers_check_warns_when_orchestrator_containers_remain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Spec 2.4/6.5: a container left behind by a previous unclean reap must
+    not be silently ignored by the next run's preflight."""
+    monkeypatch.setenv("FAKE_DOCKER_LOG", str(tmp_path / "docker_calls.log"))
+    monkeypatch.setenv("FAKE_DOCKER_CONTAINERS", "leaked1")
+    result = check_no_leaked_gate_containers(docker_bin=str(_FAKE_DOCKER))
+    assert result.status is CheckStatus.WARN
+    assert "leaked1" in result.detail
+
+
+def test_leaked_containers_check_passes_when_none_found(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FAKE_DOCKER_LOG", str(tmp_path / "docker_calls.log"))
+    monkeypatch.setenv("FAKE_DOCKER_CONTAINERS", "")
+    result = check_no_leaked_gate_containers(docker_bin=str(_FAKE_DOCKER))
+    assert result.status is CheckStatus.OK
+
+
+def test_leaked_containers_check_does_not_mistake_a_docker_error_banner_for_containers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: observed on this host -- the WSL2 Docker Desktop shim
+    exits 1 and prints its "could not be found" banner to stdout. A naive
+    line-count of stdout would misreport that banner as N leaked
+    containers."""
+    monkeypatch.setenv("FAKE_DOCKER_LOG", str(tmp_path / "docker_calls.log"))
+    monkeypatch.setenv("FAKE_DOCKER_FAIL", "the command 'docker' could not be found")
+    result = check_no_leaked_gate_containers(docker_bin=str(_FAKE_DOCKER))
+    assert result.status is CheckStatus.WARN
+    assert "docker ps failed" in result.detail
