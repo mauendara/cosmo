@@ -1,0 +1,105 @@
+"""The adapter interface every harness must implement (spec 2.2)."""
+
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, ClassVar
+
+from cosmo.checks import CheckResult
+from cosmo.config import CosmoConfig
+
+
+@dataclass(frozen=True, slots=True)
+class HarnessCapabilities:
+    """Spec 2.2. Each flag names a fallback Cosmo must take when it is false."""
+
+    reports_native_progress: bool
+    """False -> fall back to file-watching tasks.md."""
+
+    supports_retry_context: bool
+    """False -> compose a synthetic retry prompt instead."""
+
+    has_internal_timeout: bool
+    """False -> Cosmo imposes an external timeout."""
+
+    reports_native_cost: bool
+    """False -> estimate from token counts, or disable the cost hard stop."""
+
+    supports_gating: bool
+    """False -> post-hoc diff inspection only (spec 6.1 layer 3), strictly weaker."""
+
+    supports_structured_stream: bool
+    """False -> fall back to file-mtime liveness; the stall timeout is the only guard."""
+
+
+@dataclass(frozen=True, slots=True)
+class HarnessResult:
+    """The uniform result object every adapter method returns (spec 2.2)."""
+
+    success: bool
+    output_summary: str
+    raw_log_path: Path | None
+    files_changed: list[str]
+    duration_seconds: float
+    total_cost_usd: float | None
+    exit_code: int | None
+    session_id: str | None
+
+
+class HarnessAdapter(ABC):
+    """Base adapter.
+
+    `name` and `capabilities` are class-level declarations so the registry can
+    report them without instantiating or running anything.
+    """
+
+    name: ClassVar[str]
+    capabilities: ClassVar[HarnessCapabilities]
+
+    def __init__(self, config: CosmoConfig) -> None:
+        self.config = config
+
+    @abstractmethod
+    def preflight(self) -> list[CheckResult]:
+        """Environmental preconditions specific to this harness.
+
+        Extends the spec's 2.2 interface. It exists so `cosmo doctor` can report
+        harness-specific conditions without Cosmo's core knowing what they are.
+        Must be cheap and side-effect free: no subprocess work beyond a PATH
+        lookup, no network calls.
+        """
+
+    @abstractmethod
+    def propose(self, spec_path: Path, context: dict[str, Any]) -> HarnessResult: ...
+
+    @abstractmethod
+    def implement(
+        self,
+        task_id: str,
+        spec_path: Path,
+        retry_context: str | None = None,
+    ) -> HarnessResult: ...
+
+    @abstractmethod
+    def get_progress(self, task_id: str) -> tuple[int, int]:
+        """Completed and total subtasks -- never a precomputed percent.
+
+        Spec 4: the total is not constant and progress can legitimately move
+        backwards, so numerator and denominator are stored separately.
+        """
+
+    @abstractmethod
+    def cancel(self, task_id: str) -> None:
+        """Terminate the run AND its entire process group (spec 2.4)."""
+
+
+# Deviation from spec 2.2, recorded deliberately.
+#
+# The spec lists `validate(task_id)` among the adapter's interface methods, while
+# also stating that validation "bypasses the LLM harness entirely (direct Docker
+# invocation)". Those two statements conflict: a method that never touches the
+# harness does not belong on the harness adapter. Validation is therefore owned by
+# `cosmo.gate` (Phase 6), not by this interface. Folding this into a future spec
+# revision is tracked in docs/v3-implementation-plan.md.

@@ -1,0 +1,13 @@
+# Cosmo runtime state — never versioned
+data/
+work/
+logs/
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
