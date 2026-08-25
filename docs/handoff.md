@@ -37,7 +37,7 @@ build, and any decision you make along the way, in `v3-implementation-state.md`.
 │   ├── proc/                     # ManagedProcess (+on_stdout_chunk), timers, orphan sweep, reap (Phase 2/3)
 │   ├── cli/main.py               # `cosmo` command: config, harness (+probe), doctor, queue, events, project
 │   └── {git,gate,task,run,knowledge}/   # EMPTY — later phases
-├── tests/                       # 118 passing
+├── tests/                       # 119 passing
 └── check.sh                     # ruff + format + mypy --strict + pytest
 ```
 

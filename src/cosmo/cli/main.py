@@ -81,6 +81,14 @@ _STATUS_STYLE = {
 
 
 def _load(config_path: Path | None) -> CosmoConfig:
+    # `load_config` itself treats a missing path as "no override, use
+    # defaults" regardless of whether that path came from the user's
+    # environment (XDG/COSMO_CONFIG -- legitimately absent on a fresh
+    # install) or from an explicit `--config` flag (a typo, which should be
+    # loud, not silently ignored). Only the CLI layer knows which case it is.
+    if config_path is not None and not config_path.is_file():
+        err_console.print(f"[red]--config file not found:[/red] {config_path}")
+        raise typer.Exit(code=2)
     try:
         return load_config(config_path)
     except ValidationError as exc:

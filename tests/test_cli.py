@@ -81,6 +81,15 @@ def test_invalid_config_exits_two_with_a_named_field(tmp_path: Path) -> None:
         assert "max_attempts" in result.stdout or "max_attempts" in str(result.output)
 
 
+def test_explicit_config_flag_naming_a_missing_file_fails_loudly() -> None:
+    """A typo'd --config path must not silently fall back to defaults --
+    only the *absence* of a user config (nothing passed at all) is expected
+    and silent; naming a file that doesn't exist is a mistake worth surfacing."""
+    result = runner.invoke(app, ["doctor", "--config", "/nonexistent/typo.toml"])
+    assert result.exit_code == 2
+    assert "not found" in result.stderr
+
+
 def test_no_args_shows_help() -> None:
     result = runner.invoke(app, [])
     assert "Autonomous spec-driven" in result.stdout

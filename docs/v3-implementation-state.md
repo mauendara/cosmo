@@ -10,9 +10,9 @@ rediscover.
 
 | | |
 |---|---|
-| Last updated | 2026-08-24 |
+| Last updated | 2026-08-25 |
 | Working branch | `develop` |
-| Head commit | `d774204` — docs fix (Phase 3 not yet committed) |
+| Head commit | `76a1699` — Phase 3 (the `--config` fix below not yet committed) |
 | Spec | [v3-cosmo-autonomous-agent-spec.md](v3-cosmo-autonomous-agent-spec.md) |
 
 ## Phase status
@@ -590,6 +590,44 @@ phase sees an orphaned grandchild survive a clean-exit reap.
 **`cosmo doctor`/`cosmo project register` are unaffected by the `cwd`/`run_id`/`emitter` additions** --
 `get_adapter(name)(cfg)` still constructs an adapter with just `config`;
 every new constructor argument defaults to `None`/`Path.cwd()`.
+
+### Post-Phase-3 fix, found during manual testing
+
+**`cosmo <command> --config <missing-file>` silently fell back to shipped
+defaults instead of erroring.** Found by running `cosmo doctor --harness fake
+--config /nonexistent` by hand and noticing it produced output identical to
+omitting `--config` entirely. Root cause: `load_config()` (Phase 0) treats
+*any* missing config path -- whether it's the computed XDG default (where
+absence is legitimate: a fresh install has no user config yet) or an
+explicit `--config` flag (where absence is almost always a typo) -- as "no
+override, use defaults," with no distinction between the two callers.
+
+**Not fixed inside `load_config()` itself.** Tests across Phases 0-3
+(`test_doctor.py`, `test_proc_reap.py`, `test_harness_claude_adapter.py`,
+`test_harness_fake.py`, ...) deliberately pass an explicit
+`Path("/nonexistent/config.toml")` to `load_config()` directly as their
+isolation idiom -- it's how they force "shipped defaults only" without
+touching the developer's real `~/.config/cosmo/config.toml` or needing the
+`monkeypatch`-based env isolation `test_cli.py` uses instead. Making
+`load_config()` raise on a missing explicit path would have broken that
+idiom across every one of those files.
+
+**Fixed one layer up, in `cli/main.py`'s `_load()`** -- the CLI-facing
+wrapper is the only place that knows *which* case it's in (a `--config` flag
+was typed vs. nothing was typed at all). It now checks
+`config_path.is_file()` itself before calling `load_config()`, and exits 2
+with a clear message if an explicitly-named file doesn't exist. `load_config()`'s
+own behavior, and every test that relies on it, is unchanged. Regression
+test: `test_explicit_config_flag_naming_a_missing_file_fails_loudly` in
+`tests/test_cli.py`.
+
+**The engram/`SessionStart`-hook-inheritance finding (see above) was
+independently reproduced by manual testing and confirmed still open.** User
+decision: leave it for Phase 4 rather than attempting a partial mitigation
+now -- consistent with the reasoning already recorded above (a real fix
+needs `--settings`/`XDG_CONFIG_HOME` isolation that doesn't also break
+Pro/Max subscription auth, which needs real experimentation Phase 4 is
+better positioned to do once it owns `.claude/settings.json` anyway).
 
 ## Deviations from the spec, cumulative
 
