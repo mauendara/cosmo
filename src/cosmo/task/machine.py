@@ -1,6 +1,9 @@
 """The spec 3.2 task state machine: `QUEUED -> PROPOSING -> PROPOSED ->
-IMPLEMENTING -> VALIDATING -> COMMITTING -> MERGING -> DONE`, with
-`FAILED_RETRY`/`BLOCKED`.
+IMPLEMENTING -> VALIDATING -> REVIEWING -> COMMITTING -> MERGING ->
+FINISHING -> DONE`, with `FAILED_RETRY`/`BLOCKED`. `REVIEWING`/`FINISHING`
+are v4 workflow-changes additions (`docs/v4-changes-to-workflow-plan.md`),
+layered onto the original spec 3.2 sequence -- see this module's own
+`_do_reviewing`/`_do_finishing` sections below for their docstrings.
 
 Design decisions recorded in `docs/v3-implementation-state.md`'s Phase 7
 section (summarized at each relevant point below, not repeated in full):
@@ -68,6 +71,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from cosmo.bootstrap.openspec import OpenSpecInitError, archive_change
 from cosmo.config.model import CosmoConfig
 from cosmo.events.emitter import EventEmitter
 from cosmo.events.envelope import EventType
@@ -93,6 +97,7 @@ from cosmo.store.writer import StoreWriter
 from cosmo.task.classify import classify_harness_failure
 from cosmo.task.progress import ProgressWatcher, read_progress_from_file
 from cosmo.task.retry import build_retry_context
+from cosmo.task.review import read_review_verdict
 from cosmo.task.timeouts import run_with_liveness_timeout, run_with_wall_clock_timeout
 from cosmo.task.types import FailureClassification, RunGuardAction, TaskContext
 
@@ -287,6 +292,31 @@ def run_task(
             _retry_delay(config)
             continue
 
+        # -- REVIEWING (v4 workflow changes) -------------------------------
+        if config.review.enabled:
+            review_step = _do_reviewing(
+                ctx=ctx,
+                config=config,
+                writer=writer,
+                emitter=emitter,
+                adapter=adapter,
+                run_id=run_id,
+                on_harness_result=on_harness_result,
+                attempt_count=attempt_count,
+                will_retry=will_retry,
+                validating_env_retries=validating_env_retries,
+            )
+            validating_env_retries = review_step.validating_env_retries
+            if review_step.outcome is _ReviewOutcome.RETRY:
+                emit_state_changed(
+                    emitter,
+                    writer.queue_transition(task_id, TaskStatus.FAILED_RETRY, run_id=run_id),
+                )
+                _retry_delay(config)
+                continue
+            if review_step.outcome is _ReviewOutcome.BLOCKED:
+                return TaskStatus.BLOCKED
+
         # -- COMMITTING -----------------------------------------------------
         committing = _do_committing(
             ctx=ctx,
@@ -308,7 +338,7 @@ def run_task(
 
     # -- MERGING ------------------------------------------------------------
     emit_state_changed(emitter, writer.queue_transition(task_id, TaskStatus.MERGING, run_id=run_id))
-    return _do_merging(
+    merged_status = _do_merging(
         ctx=ctx,
         config=config,
         writer=writer,
@@ -317,6 +347,24 @@ def run_task(
         run_id=run_id,
         gate_runner=gate_runner,
     )
+    if merged_status is TaskStatus.DONE:
+        # -- FINISHING (v4 workflow changes) --------------------------------
+        # `merge_task` (called by `_do_merging` above) already set the task
+        # `done` and emitted `task.completed`/`task.state_changed` itself
+        # (spec 3.2's own merge-success path, unchanged) -- FINISHING is a
+        # deliberately best-effort step layered *after* that real
+        # completion, not a precondition for it. The task_transitions trail
+        # therefore genuinely reads `..., merging, done, finishing, done`:
+        # honest about a task that fully completed at MERGING, with an
+        # optional archive step recorded afterward rather than gating on it.
+        emit_state_changed(
+            emitter, writer.queue_transition(task_id, TaskStatus.FINISHING, run_id=run_id)
+        )
+        _do_finishing(ctx=ctx, repo_path=repo_path, emitter=emitter, run_id=run_id)
+        emit_state_changed(
+            emitter, writer.queue_transition(task_id, TaskStatus.DONE, run_id=run_id)
+        )
+    return merged_status
 
 
 def _record_failure(
@@ -512,6 +560,142 @@ def _do_implementing(
     )
 
 
+# -- REVIEWING (v4 workflow changes) ---------------------------------------
+
+
+class _ReviewOutcome:
+    APPROVED = "approved"
+    RETRY = "retry"
+    BLOCKED = "blocked"
+
+
+@dataclass(frozen=True, slots=True)
+class _ReviewStepResult:
+    outcome: str
+    validating_env_retries: int
+    """Handed back so `run_task` can keep threading it into a later
+    `VALIDATING` cycle -- see the parameter's own docstring below."""
+
+
+def _do_reviewing(
+    *,
+    ctx: TaskContext,
+    config: CosmoConfig,
+    writer: StoreWriter,
+    emitter: EventEmitter,
+    adapter: HarnessAdapter,
+    run_id: str | None,
+    on_harness_result: OnHarnessResult | None,
+    attempt_count: int,
+    will_retry: bool,
+    validating_env_retries: int,
+) -> _ReviewStepResult:
+    """v4 workflow changes: a fresh, session-less adversarial review, run
+    once `VALIDATING`'s gate has confirmed `gate_result.passed` -- see
+    `HarnessAdapter.review`'s docstring for why the call itself carries no
+    memory of the implementation session.
+
+    Two independent budgets, matching this module's own "environment_error
+    never consumes the code-level retry budget" discipline (see the module
+    docstring):
+
+    - A **rejected review** is a genuine code-level judgment, exactly like a
+      gate `code_error`/`test_integrity` verdict -- it reuses the
+      `attempt_count`/`will_retry` judgment `run_task`'s own `VALIDATING`
+      step already computed for this cycle (passed in rather than
+      recomputed, the same "no new ceiling on top of the judgment already
+      made" pattern `_do_committing`'s knowledge-cap check uses), and blocks
+      with `BlockedReason.CODE_FAILURE` when that budget is spent.
+    - A review call that itself never produced a usable verdict (crashed,
+      timed out, or wrote no/malformed file) is an environment problem with
+      the call, not a judgment about the code -- it shares `VALIDATING`'s
+      own `validating_env_retries` counter (threaded in and back out via
+      `_ReviewStepResult`, since both states are "post-implementation
+      environment reliability" problems in the same sense), and blocks with
+      `BlockedReason.ENVIRONMENT`/`TIMEOUT` instead, never touching
+      `attempt_count` at all.
+    """
+    task_id = ctx.task_id
+    emit_state_changed(
+        emitter, writer.queue_transition(task_id, TaskStatus.REVIEWING, run_id=run_id)
+    )
+
+    timeout_result = run_with_wall_clock_timeout(
+        lambda: adapter.review(task_id, Path(ctx.spec_path), ctx.base_branch),
+        wall_s=float(config.timeouts.reviewing_wall),
+        cancel=lambda: adapter.cancel(task_id),
+        kill_grace_s=float(config.timeouts.kill_grace),
+    )
+    result = timeout_result.value
+    if result is not None and on_harness_result is not None:
+        on_harness_result(result)
+
+    verdict = None
+    if result is not None and result.success:
+        verdict = read_review_verdict(ctx.worktree_path)
+
+    if verdict is not None and verdict.approved:
+        return _ReviewStepResult(_ReviewOutcome.APPROVED, validating_env_retries)
+
+    if verdict is not None and not verdict.approved:
+        classification = FailureClassification(
+            failure_type=FailureType.CODE_ERROR,
+            failure_stage=FailureStage.ADVERSARIAL_REVIEW,
+            error_summary=verdict.reason or "adversarial review rejected the diff",
+            error_detail=None,
+        )
+        _record_failure(writer, task_id, run_id, attempt_count, classification, will_retry)
+        if not will_retry:
+            _block(
+                writer=writer,
+                emitter=emitter,
+                task_id=task_id,
+                run_id=run_id,
+                reason=BlockedReason.CODE_FAILURE,
+                note=classification.error_summary,
+            )
+            return _ReviewStepResult(_ReviewOutcome.BLOCKED, validating_env_retries)
+        return _ReviewStepResult(_ReviewOutcome.RETRY, validating_env_retries)
+
+    # No usable verdict at all -- an environment problem with the review
+    # call, bounded the same way VALIDATING's own environment_error is.
+    if result is not None and result.success:
+        # The call itself completed, but wrote no (or a malformed) verdict
+        # file -- a broken contract, not a crash. `classify_harness_failure`
+        # assumes `result.success is False` (it exists for a *failed*
+        # propose/implement call), so this case is built by hand.
+        classification = FailureClassification(
+            failure_type=FailureType.ENVIRONMENT_ERROR,
+            failure_stage=FailureStage.ADVERSARIAL_REVIEW,
+            error_summary="review call completed but produced no usable verdict",
+            error_detail=None,
+        )
+    else:
+        classification = classify_harness_failure(
+            result, stage=FailureStage.ADVERSARIAL_REVIEW, timed_out=timeout_result.timed_out
+        )
+
+    validating_env_retries += 1
+    blocking = validating_env_retries > config.retries.max_attempts
+    _record_failure(writer, task_id, run_id, attempt_count, classification, will_retry=not blocking)
+    if blocking:
+        reason = (
+            BlockedReason.TIMEOUT
+            if classification.failure_type is FailureType.TIMEOUT
+            else BlockedReason.ENVIRONMENT
+        )
+        _block(
+            writer=writer,
+            emitter=emitter,
+            task_id=task_id,
+            run_id=run_id,
+            reason=reason,
+            note=classification.error_summary,
+        )
+        return _ReviewStepResult(_ReviewOutcome.BLOCKED, validating_env_retries)
+    return _ReviewStepResult(_ReviewOutcome.RETRY, validating_env_retries)
+
+
 # -- COMMITTING -----------------------------------------------------------------
 
 
@@ -691,6 +875,48 @@ def _do_merging(
         )
 
     return TaskStatus.DONE if merge_result.outcome.merged else TaskStatus.BLOCKED
+
+
+# -- FINISHING (v4 workflow changes) -----------------------------------------
+
+
+def _do_finishing(
+    *,
+    ctx: TaskContext,
+    repo_path: Path,
+    emitter: EventEmitter,
+    run_id: str | None,
+) -> None:
+    """v4 workflow changes: `openspec archive <spec_id>` only (v1 scope,
+    deliberately). Runs against `repo_path` -- Cosmo's own dedicated
+    `base_branch` checkout, which by this point already holds the
+    just-merged commit(s) (`git.merge`'s own "repo_path is always on
+    base_branch" invariant) -- never `ctx.worktree_path`, which `merge_task`
+    has already removed by the time this runs.
+
+    `spec_id` is derived the same way `run.loop._run_one_task` derives it
+    for branch naming (`Path(spec_path).stem`) -- a v4-flow task's own
+    `PROPOSING` step is expected to name its `openspec new change` the same
+    way, so the two stay in sync without either one hardcoding the other's
+    convention (see `docs/v4-changes-to-workflow-plan.md`'s state-doc
+    write-up for why this wasn't spelled out in the original plan).
+
+    Deliberately best-effort and non-blocking, per the plan's own decision:
+    the task already merged successfully by the time this runs, so a
+    failure here must never retroactively fail it -- only a warning event.
+    """
+    task_id = ctx.task_id
+    spec_id = Path(ctx.spec_path).stem
+    try:
+        archive_change(repo_path, spec_id)
+    except OpenSpecInitError as exc:
+        emitter.emit(
+            event_type=EventType.TASK_FINISHING_FAILED,
+            severity=Severity.WARNING,
+            run_id=run_id,
+            task_id=task_id,
+            payload={"spec_id": spec_id, "error": str(exc)},
+        )
 
 
 # -- shared helpers -----------------------------------------------------------

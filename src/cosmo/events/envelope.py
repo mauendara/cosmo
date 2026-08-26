@@ -41,6 +41,12 @@ class EventType(enum.Enum):
     TASK_PROGRESS = "task.progress"
     TASK_HEARTBEAT = "task.heartbeat"
     TASK_GUARDRAIL_TRIPPED = "task.guardrail_tripped"
+    TASK_FINISHING_FAILED = "task.finishing_failed"
+    """v4 workflow changes, not in spec 9.2's own enumerated list (that
+    predates `FINISHING`): `_do_finishing`'s best-effort `openspec archive`
+    step failed. Always `severity=warning` -- FINISHING never blocks a task
+    that already merged successfully, this is purely an observability
+    signal for post-run review."""
 
 
 @dataclass(frozen=True, slots=True)

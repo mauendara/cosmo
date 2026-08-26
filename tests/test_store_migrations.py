@@ -136,3 +136,93 @@ def test_migration_3_preserves_existing_run_state_rows_and_accepts_disk_low(
     reread = conn.execute("SELECT stop_reason FROM run_state WHERE run_id = 'run-1'").fetchone()
     assert reread[0] == "disk_low"
     conn.close()
+
+
+def test_migration_4_preserves_existing_task_queue_rows_and_accepts_new_states(
+    tmp_path: Path,
+) -> None:
+    """v4 workflow changes: migration 4 recreate-copy-swaps `task_queue` to
+    widen its `status` CHECK constraint (a gap the plan document itself
+    didn't name -- see `docs/v3-implementation-state.md`'s v4 section) --
+    verify a pre-existing row survives the swap, and that `reviewing`/
+    `finishing` are actually accepted afterward."""
+    db_path = tmp_path / "cosmo.db"
+    conn = connect_writer(db_path)
+    migration_1 = next(m for m in MIGRATIONS if m.version == 1)
+    conn.executescript(
+        f"BEGIN;\n{migration_1.sql}\n"
+        "CREATE TABLE schema_migrations ("
+        "    version INTEGER PRIMARY KEY, description TEXT NOT NULL, applied_at TEXT NOT NULL"
+        ");\n"
+        "INSERT INTO schema_migrations VALUES (1, 'initial', 't0');\n"
+        "COMMIT;"
+    )
+    conn.execute(
+        """
+        INSERT INTO task_queue (
+            task_id, spec_path, status, attempt_count, max_attempts, created_at, updated_at
+        ) VALUES ('t1', 'openspec/changes/t1', 'queued', 0, 2, 't0', 't0')
+        """
+    )
+    conn.commit()
+
+    applied = migrate(conn)
+    assert 4 in applied
+
+    row = conn.execute("SELECT task_id, status FROM task_queue WHERE task_id = 't1'").fetchone()
+    assert row is not None
+    assert row[1] == "queued"
+
+    for status in ("reviewing", "finishing"):
+        conn.execute("UPDATE task_queue SET status = ? WHERE task_id = 't1'", (status,))
+        conn.commit()
+        reread = conn.execute("SELECT status FROM task_queue WHERE task_id = 't1'").fetchone()
+        assert reread[0] == status
+    conn.close()
+
+
+def test_migration_5_accepts_adversarial_review_failure_stage(tmp_path: Path) -> None:
+    """v4 workflow changes: same recreate-copy-swap recipe as migration 2,
+    for `task_failures.failure_stage`."""
+    conn = connect_writer(tmp_path / "cosmo.db")
+    migrate(conn)
+    conn.execute(
+        """
+        INSERT INTO task_queue (
+            task_id, spec_path, status, attempt_count, max_attempts, created_at, updated_at
+        ) VALUES ('t1', 'openspec/changes/t1', 'queued', 0, 2, 't0', 't0')
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO task_failures (
+            task_id, attempt_number, failure_type, failure_stage, error_summary,
+            will_retry, next_action, timestamp
+        ) VALUES ('t1', 0, 'code_error', 'adversarial_review', 'rejected', 1, 'retry', 't0')
+        """
+    )
+    conn.commit()
+    row = conn.execute("SELECT failure_stage FROM task_failures WHERE task_id = 't1'").fetchone()
+    assert row[0] == "adversarial_review"
+    conn.close()
+
+
+def test_migration_6_adds_spec_batch_id_defaulting_to_null(tmp_path: Path) -> None:
+    conn = connect_writer(tmp_path / "cosmo.db")
+    migrate(conn)
+    conn.execute(
+        """
+        INSERT INTO task_queue (
+            task_id, spec_path, status, attempt_count, max_attempts, created_at, updated_at
+        ) VALUES ('t1', 'docs/specs/demo-spec/tasks/backend-task.md', 'queued', 0, 2, 't0', 't0')
+        """
+    )
+    conn.commit()
+    row = conn.execute("SELECT spec_batch_id FROM task_queue WHERE task_id = 't1'").fetchone()
+    assert row[0] is None
+
+    conn.execute("UPDATE task_queue SET spec_batch_id = 'demo-spec' WHERE task_id = 't1'")
+    conn.commit()
+    reread = conn.execute("SELECT spec_batch_id FROM task_queue WHERE task_id = 't1'").fetchone()
+    assert reread[0] == "demo-spec"
+    conn.close()

@@ -107,6 +107,7 @@ class StoreWriter:
         priority: int = 0,
         max_attempts: int,
         allow_test_edits: bool = False,
+        spec_batch_id: str | None = None,
     ) -> TransitionResult:
         now = utcnow_iso()
         with self._conn:
@@ -115,8 +116,8 @@ class StoreWriter:
                 INSERT INTO task_queue (
                     task_id, spec_path, depends_on, priority, status,
                     attempt_count, max_attempts, allow_test_edits,
-                    created_at, updated_at
-                ) VALUES (?, ?, ?, ?, 'queued', 0, ?, ?, ?, ?)
+                    created_at, updated_at, spec_batch_id
+                ) VALUES (?, ?, ?, ?, 'queued', 0, ?, ?, ?, ?, ?)
                 """,
                 (
                     task_id,
@@ -127,6 +128,7 @@ class StoreWriter:
                     int(allow_test_edits),
                     now,
                     now,
+                    spec_batch_id,
                 ),
             )
             return self._record_transition(

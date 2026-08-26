@@ -1,0 +1,149 @@
+"""`cosmo spec add` / `cosmo spec queue` (v4 workflow changes, see
+`docs/v4-changes-to-workflow-plan.md`): the raw-spec front door. Manually
+smoke-tested end to end against the real CLI before this file was written
+(see `docs/v3-implementation-state.md`'s v4 section); these pin the same
+behavior for regression.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+from typer.testing import CliRunner
+
+from cosmo.cli.main import app
+from cosmo.config import load_config
+from cosmo.store.reader import list_tasks
+
+runner = CliRunner()
+
+
+@pytest.fixture(autouse=True)
+def _isolated_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("COSMO_CONFIG", str(tmp_path / "absent.toml"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+
+
+def _db_path() -> Path:
+    return load_config().paths.db_path
+
+
+def _write_task_file(repo: Path, spec_name: str, filename: str, body: str) -> Path:
+    tasks_dir = repo / "docs" / "specs" / f"{spec_name}-spec" / "tasks"
+    tasks_dir.mkdir(parents=True, exist_ok=True)
+    path = tasks_dir / filename
+    path.write_text(body, encoding="utf-8")
+    return path
+
+
+def test_spec_add_without_a_raw_spec_file_or_from_fails_loudly(tmp_path: Path) -> None:
+    repo = tmp_path / "target"
+    repo.mkdir()
+    result = runner.invoke(app, ["spec", "add", "demo", "--repo", str(repo), "--harness", "fake"])
+    assert result.exit_code == 1
+    assert "does not exist" in result.stderr
+
+
+def test_spec_add_copies_in_a_raw_spec_via_from_and_reports_when_the_harness_writes_nothing(
+    tmp_path: Path,
+) -> None:
+    """`fake` writes no files at all (`FakeHarnessAdapter.probe` never
+    touches the filesystem), so `spec add` should still succeed at the
+    copy-in step and then report the "nothing decomposed" case cleanly --
+    not crash trying to render an empty preview."""
+    repo = tmp_path / "target"
+    repo.mkdir()
+    raw = tmp_path / "raw.md"
+    raw.write_text("# Demo\nAdd a health check endpoint.\n", encoding="utf-8")
+
+    result = runner.invoke(
+        app,
+        ["spec", "add", "demo", "--repo", str(repo), "--from", str(raw), "--harness", "fake"],
+    )
+
+    assert result.exit_code == 1
+    assert (repo / "docs" / "specs" / "demo-spec.md").is_file()
+    assert "no *-task.md files were written" in result.stderr
+
+
+def test_spec_queue_inserts_one_task_per_file_with_the_right_batch_id(tmp_path: Path) -> None:
+    repo = tmp_path / "target"
+    repo.mkdir()
+    _write_task_file(
+        repo,
+        "demo",
+        "backend-task.md",
+        "---\ntask_id: demo-backend\ndepends_on: []\npriority: 1\ntitle: Backend\n---\n\nbody\n",
+    )
+    _write_task_file(
+        repo,
+        "demo",
+        "frontend-task.md",
+        "---\ntask_id: demo-frontend\ndepends_on: [demo-backend]\ntitle: Frontend\n---\n\nbody\n",
+    )
+
+    result = runner.invoke(app, ["spec", "queue", "demo", "--repo", str(repo)])
+
+    assert result.exit_code == 0, result.stdout
+    assert "queued 2 task(s) from demo-spec" in result.stdout
+
+    tasks = {t.task_id: t for t in list_tasks(_db_path())}
+    assert set(tasks) == {"demo-backend", "demo-frontend"}
+    assert tasks["demo-frontend"].depends_on == ["demo-backend"]
+    assert tasks["demo-backend"].spec_batch_id == "demo-spec"
+    assert tasks["demo-frontend"].spec_batch_id == "demo-spec"
+    assert tasks["demo-backend"].priority == 1
+    assert tasks["demo-frontend"].priority == 0
+
+
+def test_spec_queue_with_no_task_files_fails_loudly(tmp_path: Path) -> None:
+    repo = tmp_path / "target"
+    repo.mkdir()
+    result = runner.invoke(app, ["spec", "queue", "demo", "--repo", str(repo)])
+    assert result.exit_code == 1
+    assert "no *-task.md files found" in result.stderr
+
+
+def test_spec_queue_rejects_a_cycle_atomically_before_inserting_anything(tmp_path: Path) -> None:
+    repo = tmp_path / "target"
+    repo.mkdir()
+    _write_task_file(
+        repo, "cyclic", "a-task.md", "---\ntask_id: cyc-a\ndepends_on: [cyc-b]\n---\n\na\n"
+    )
+    _write_task_file(
+        repo, "cyclic", "b-task.md", "---\ntask_id: cyc-b\ndepends_on: [cyc-a]\n---\n\nb\n"
+    )
+
+    result = runner.invoke(app, ["spec", "queue", "cyclic", "--repo", str(repo)])
+
+    assert result.exit_code == 1
+    assert "depends_on cycle" in result.stderr
+    assert list_tasks(_db_path()) == []
+
+
+def test_spec_queue_rejects_a_malformed_task_file(tmp_path: Path) -> None:
+    repo = tmp_path / "target"
+    repo.mkdir()
+    _write_task_file(repo, "bad", "only-task.md", "no frontmatter here at all\n")
+
+    result = runner.invoke(app, ["spec", "queue", "bad", "--repo", str(repo)])
+
+    assert result.exit_code == 1
+    assert "missing YAML frontmatter" in result.stderr
+
+
+def test_spec_queue_on_a_duplicate_task_id_fails_loudly(tmp_path: Path) -> None:
+    repo = tmp_path / "target"
+    repo.mkdir()
+    runner.invoke(
+        app, ["queue", "add", "openspec/changes/demo-backend", "--task-id", "demo-backend"]
+    )
+    _write_task_file(
+        repo, "demo", "backend-task.md", "---\ntask_id: demo-backend\ndepends_on: []\n---\n\nbody\n"
+    )
+
+    result = runner.invoke(app, ["spec", "queue", "demo", "--repo", str(repo)])
+
+    assert result.exit_code == 1
+    assert "already queued" in result.stderr

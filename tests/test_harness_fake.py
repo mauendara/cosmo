@@ -59,6 +59,19 @@ def test_propose_and_implement_and_probe_are_recorded_on_the_call_audit_trail() 
     ]
 
 
+def test_review_is_recorded_on_the_call_audit_trail_and_scriptable() -> None:
+    """v4 workflow changes: `review()` reuses the same script/audit-trail
+    mechanism as `propose`/`implement` -- the verdict itself is a file a
+    test writes directly (`task.review.review_result_path`), not something
+    `FakeOutcome` models (see `FakeHarnessAdapter.review`'s own comment)."""
+    adapter = _adapter(script=[ScriptedCall(outcome=FakeOutcome.SUCCESS)])
+
+    result = adapter.review("t1", Path("openspec/changes/x"), "develop")
+
+    assert result.success is True
+    assert adapter.calls == [("review", "t1", None)]
+
+
 def test_get_progress_defaults_to_zero_and_is_settable() -> None:
     adapter = _adapter()
     assert adapter.get_progress("t1") == (0, 0)

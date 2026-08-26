@@ -39,7 +39,13 @@ def _fast_config(tmp_path: Path) -> CosmoConfig:
         }
     )
     retries = cfg.retries.model_copy(update={"delay_min": 0, "delay_max": 0})
-    return cfg.model_copy(update={"paths": paths, "retries": retries})
+    # v4 workflow changes: REVIEWING is real by default (config.review.enabled
+    # defaults true) and would otherwise run for every test in this file via
+    # FakeHarnessAdapter's reused SUCCESS script, which writes no verdict file
+    # -- disabled here so these tests keep exercising exactly what they did
+    # before REVIEWING existed. `test_task_reviewing.py` covers REVIEWING itself.
+    review = cfg.review.model_copy(update={"enabled": False})
+    return cfg.model_copy(update={"paths": paths, "retries": retries, "review": review})
 
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -129,6 +135,12 @@ def test_happy_path_reaches_done_with_a_complete_event_trail(tmp_path: Path) -> 
             for e in reversed(list_events(cfg.paths.db_path, task_id=ctx.task_id, limit=200))
             if e.event_type == "task.state_changed"
         ]
+        # REVIEWING is disabled by `_fast_config` (see its own comment) so it
+        # never appears here; FINISHING always runs on a merged task
+        # regardless -- `openspec` has nothing to archive in this fixture
+        # repo (no `openspec/` at all), so it fails best-effort and still
+        # reaches `done` a second time (see `_do_finishing`'s own docstring
+        # for why the trail legitimately reads `..., done, finishing, done`).
         assert transitions == [
             "proposing",
             "proposed",
@@ -136,6 +148,8 @@ def test_happy_path_reaches_done_with_a_complete_event_trail(tmp_path: Path) -> 
             "validating",
             "committing",
             "merging",
+            "done",
+            "finishing",
             "done",
         ]
 

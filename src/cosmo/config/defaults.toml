@@ -21,6 +21,9 @@ implementing_wall = 5400
 implementing_stall = 1200
 validating_wall = 2700
 validating_stall = 600
+# v4 workflow changes: REVIEWING's own wall clock -- one bounded fresh-session
+# harness call, anchored to the same rough order of magnitude as proposing_wall.
+reviewing_wall = 900
 committing_wall = 300
 merging_wall = 300
 run_wall = 36000
@@ -91,6 +94,12 @@ error_detail_max_chars = 4000
 [knowledge]
 # Spec 11: exceeding the cap fails COMMITTING. Compaction is never automated.
 max_file_lines = 400
+
+[review]
+# v4 workflow changes: a fresh-session adversarial review between VALIDATING
+# and COMMITTING. A project can turn this off; the retry budget it uses is
+# retries.max_attempts, not a separate ceiling.
+enabled = true
 
 [progress]
 # Spec 4: "polling fallback at 5-10s". Also used as the native-progress poll

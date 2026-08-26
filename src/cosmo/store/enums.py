@@ -12,15 +12,21 @@ import enum
 
 
 class TaskStatus(enum.Enum):
-    """Spec 3.2 task state machine."""
+    """Spec 3.2 task state machine, plus `REVIEWING`/`FINISHING` (v4 workflow
+    changes, see `docs/v4-changes-to-workflow-plan.md`): `REVIEWING` sits
+    between `VALIDATING` and `COMMITTING` (a fresh adversarial-review harness
+    call, gated on `config.review.enabled`); `FINISHING` sits between
+    `MERGING` and `DONE` (best-effort `openspec archive`, never blocking)."""
 
     QUEUED = "queued"
     PROPOSING = "proposing"
     PROPOSED = "proposed"
     IMPLEMENTING = "implementing"
     VALIDATING = "validating"
+    REVIEWING = "reviewing"
     COMMITTING = "committing"
     MERGING = "merging"
+    FINISHING = "finishing"
     DONE = "done"
     FAILED_RETRY = "failed_retry"
     BLOCKED = "blocked"
@@ -62,6 +68,9 @@ class FailureStage(enum.Enum):
     E2E_TESTS = "e2e_tests"
     TEST_INTEGRITY = "test_integrity"
     SECRETS = "secrets"
+    ADVERSARIAL_REVIEW = "adversarial_review"
+    """v4 workflow changes: a fresh-session reviewer rejected the diff at
+    `REVIEWING`, or the review harness call itself failed/timed out."""
     COMMIT = "commit"
     MERGE = "merge"
 

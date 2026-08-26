@@ -48,7 +48,16 @@ def _fast_config(tmp_path: Path, **overrides: object) -> CosmoConfig:
     # environment state (see CLAUDE conventions); the disk check's own
     # mechanics get a dedicated real test instead (test_run_disk_check.py).
     disk = cfg.disk.model_copy(update={"min_free_gb": 0.001})
-    updates: dict[str, object] = {"paths": paths, "retries": retries, "disk": disk}
+    # v4 workflow changes: see test_task_machine.py's own _fast_config comment
+    # -- REVIEWING defaults on and FakeHarnessAdapter's reused SUCCESS script
+    # writes no verdict file, so it's disabled here for the same reason.
+    review = cfg.review.model_copy(update={"enabled": False})
+    updates: dict[str, object] = {
+        "paths": paths,
+        "retries": retries,
+        "disk": disk,
+        "review": review,
+    }
     updates.update(overrides)
     return cfg.model_copy(update=updates)
 

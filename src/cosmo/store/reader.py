@@ -32,6 +32,7 @@ class TaskRow:
     session_id: str | None
     created_at: str
     updated_at: str
+    spec_batch_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,6 +113,7 @@ def _task_from_row(row: sqlite3.Row) -> TaskRow:
         session_id=row["session_id"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
+        spec_batch_id=row["spec_batch_id"],
     )
 
 

@@ -20,6 +20,7 @@ from cosmo.events import EventEmitter
 from cosmo.harness.base import HarnessAdapter, HarnessCapabilities, HarnessResult
 from cosmo.harness.claude.stream import ClassifiedEvent, StreamReader, extract_quota_signal
 from cosmo.proc import ManagedProcess, cancel_and_reap
+from cosmo.task.review import REVIEW_RESULT_RELATIVE_PATH
 
 BINARY = "claude"
 
@@ -149,6 +150,28 @@ class ClaudeCodeAdapter(HarnessAdapter):
         prompt = f"Implement the OpenSpec change at {spec_path} (task {task_id})."
         if retry_context:
             prompt += f"\n\nThe previous attempt failed:\n{retry_context}"
+        return self._invoke(task_id=task_id, prompt=prompt)
+
+    def review(self, task_id: str, spec_path: Path, base_branch: str) -> HarnessResult:
+        # No `retry_context`, no session resumption -- a fresh `claude -p`
+        # call with no memory of the implementation session (v4 workflow
+        # changes: "the review is real rather than the same session grading
+        # its own work"). The verdict itself is never read from this call's
+        # stream output (spec 4's prose-parsing prohibition, see
+        # `HarnessAdapter.review`'s docstring) -- the prompt instead
+        # instructs the reviewer to write it to
+        # `task.review.REVIEW_RESULT_RELATIVE_PATH`, which
+        # `task.machine._do_reviewing` reads back after this returns.
+        prompt = (
+            f"Review this branch's implementation for task {task_id}. Run "
+            f"`git diff {base_branch}...HEAD` to see the diff and read the OpenSpec "
+            f"change at {spec_path} (its spec/tasks.md) for what was asked -- you have "
+            f"no memory of the implementation session, judge only what these show. "
+            f"When done, write your verdict to "
+            f"`{REVIEW_RESULT_RELATIVE_PATH.as_posix()}` as JSON: "
+            f'`{{"verdict": "approved"}}` or `{{"verdict": "rejected", "reason": "<why, '
+            f'specific enough to act on>"}}`.'
+        )
         return self._invoke(task_id=task_id, prompt=prompt)
 
     def get_progress(self, task_id: str) -> tuple[int, int]:

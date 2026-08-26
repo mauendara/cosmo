@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from cosmo.bootstrap.openspec import OpenSpecInitError, ensure_openspec_initialized
+from cosmo.bootstrap.openspec import OpenSpecInitError, archive_change, ensure_openspec_initialized
 
 FAKE_OPENSPEC = Path(__file__).resolve().parent / "fixtures" / "fake_openspec.sh"
 
@@ -63,6 +63,37 @@ def test_a_nonzero_exit_raises_openspecrniterror(
         ensure_openspec_initialized(target, binary=str(FAKE_OPENSPEC))
 
 
+def test_archive_change_runs_relative_to_the_given_worktree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """v4 workflow changes: `archive [change-name]` has no path argument of
+    its own -- `cwd=worktree` is what scopes it (verified by hand against
+    the real CLI, see `archive_change`'s docstring)."""
+    log = tmp_path / "calls.log"
+    monkeypatch.setenv("FAKE_OPENSPEC_LOG", str(log))
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+
+    result = archive_change(worktree, "demo-change", binary=str(FAKE_OPENSPEC))
+
+    assert result.ran is True
+    assert (worktree / "openspec" / "changes" / "archive" / "demo-change.marker").is_file()
+    assert "archive demo-change --yes" in log.read_text()
+
+
+def test_archive_change_on_a_nonzero_exit_raises_openspecrniterror(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    log = tmp_path / "calls.log"
+    monkeypatch.setenv("FAKE_OPENSPEC_LOG", str(log))
+    monkeypatch.setenv("FAKE_OPENSPEC_FAIL", "no such change")
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+
+    with pytest.raises(OpenSpecInitError, match="no such change"):
+        archive_change(worktree, "demo-change", binary=str(FAKE_OPENSPEC))
+
+
 @pytest.mark.skipif(
     subprocess.run(["which", "openspec"], capture_output=True, check=False).returncode != 0,
     reason="real openspec CLI not on PATH",
@@ -83,3 +114,28 @@ def test_real_openspec_binary_initializes_a_scratch_repo(tmp_path: Path) -> None
     # openspec's own idempotency -- but confirms no side effect either way).
     second = ensure_openspec_initialized(target)
     assert second.ran is False
+
+
+@pytest.mark.skipif(
+    subprocess.run(["which", "openspec"], capture_output=True, check=False).returncode != 0,
+    reason="real openspec CLI not on PATH",
+)
+def test_real_openspec_binary_archives_a_real_change(tmp_path: Path) -> None:
+    """v4 workflow changes: real invocation, not just the fake -- confirms
+    `archive [change-name] --yes` and its cwd-relative resolution the way
+    `docs/v4-changes-to-workflow-plan.md` cites it, against this session's
+    own real probe (see `docs/v3-implementation-state.md`'s v4 section)."""
+    target = tmp_path / "repo"
+    target.mkdir()
+    ensure_openspec_initialized(target)
+    subprocess.run(
+        ["openspec", "new", "change", "demo-change"], cwd=target, check=True, capture_output=True
+    )
+    assert (target / "openspec" / "changes" / "demo-change").is_dir()
+
+    result = archive_change(target, "demo-change")
+
+    assert result.ran is True
+    assert not (target / "openspec" / "changes" / "demo-change").exists()
+    archived = list((target / "openspec" / "changes" / "archive").glob("*-demo-change"))
+    assert len(archived) == 1

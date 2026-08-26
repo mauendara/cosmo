@@ -85,7 +85,11 @@ def _fast_config(tmp_path: Path) -> CosmoConfig:
     git = cfg.git.model_copy(
         update={"commit_author_name": AUTHOR[0], "commit_author_email": AUTHOR[1]}
     )
-    return cfg.model_copy(update={"paths": paths, "git": git})
+    # v4 workflow changes: see test_task_machine.py's own _fast_config comment
+    # -- this real-Docker E2E fixture predates REVIEWING and has no reviewer
+    # harness call scripted, so it's disabled here rather than made to fail.
+    review = cfg.review.model_copy(update={"enabled": False})
+    return cfg.model_copy(update={"paths": paths, "git": git, "review": review})
 
 
 def test_a_real_task_reaches_done_against_the_real_gate(tmp_path: Path) -> None:

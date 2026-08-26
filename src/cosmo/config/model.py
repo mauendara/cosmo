@@ -32,6 +32,10 @@ class TimeoutConfig(_Strict):
     implementing_stall: int = Field(gt=0)
     validating_wall: int = Field(gt=0)
     validating_stall: int = Field(gt=0)
+    reviewing_wall: int = Field(gt=0)
+    """v4 workflow changes: `REVIEWING`'s own wall clock. No stall variant
+    -- like `proposing_wall`, this is one bounded harness call, not a
+    multi-turn session with a liveness watcher to stall-check."""
     committing_wall: int = Field(gt=0)
     merging_wall: int = Field(gt=0)
     run_wall: int = Field(gt=0)
@@ -178,6 +182,16 @@ class QuotaConfig(_Strict):
     default_5h_resume_delay_seconds: int = Field(gt=0)
 
 
+class ReviewConfig(_Strict):
+    """v4 workflow changes (`docs/v4-changes-to-workflow-plan.md`): the
+    `REVIEWING` state's own config. `enabled=False` skips `REVIEWING`
+    entirely -- a project can opt out. The retry budget is deliberately
+    `retries.max_attempts` itself, not a separate ceiling (the plan's own
+    decision: "a failed adversarial review retries like a gate failure")."""
+
+    enabled: bool
+
+
 class DiskConfig(_Strict):
     min_free_gb: float = Field(gt=0.0)
 
@@ -227,6 +241,7 @@ class CosmoConfig(_Strict):
     cost: CostConfig
     gate: GateConfig
     knowledge: KnowledgeConfig
+    review: ReviewConfig
     progress: ProgressConfig
     quota: QuotaConfig
     disk: DiskConfig

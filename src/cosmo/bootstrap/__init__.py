@@ -20,7 +20,12 @@ from cosmo.bootstrap.discover import (
 from cosmo.bootstrap.docs import DocsCopyResult, copy_project_docs
 from cosmo.bootstrap.hashing import compute_template_version
 from cosmo.bootstrap.init import InitResult, NotAGitRepoError, run_init
-from cosmo.bootstrap.openspec import OpenSpecInitError, OpenSpecResult, ensure_openspec_initialized
+from cosmo.bootstrap.openspec import (
+    OpenSpecInitError,
+    OpenSpecResult,
+    archive_change,
+    ensure_openspec_initialized,
+)
 from cosmo.bootstrap.symlinks import SymlinkResult, create_root_symlinks
 
 __all__ = [
@@ -33,6 +38,7 @@ __all__ = [
     "SyncResult",
     "TemplatesListing",
     "TemplatesRootNotFoundError",
+    "archive_change",
     "compute_template_version",
     "copy_project_docs",
     "create_root_symlinks",

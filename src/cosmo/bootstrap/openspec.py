@@ -62,3 +62,42 @@ def ensure_openspec_initialized(
     return OpenSpecResult(
         ran=True, exit_code=result.returncode, stdout=result.stdout, stderr=result.stderr
     )
+
+
+def archive_change(
+    worktree: Path,
+    change_name: str,
+    *,
+    binary: str = BINARY,
+    timeout: float = 60.0,
+) -> OpenSpecResult:
+    """v4 workflow changes: `task.machine._do_finishing`'s own subprocess
+    call. `archive [change-name]` has no path argument of its own (verified
+    by hand against the real installed CLI) -- unlike `init`, it resolves
+    `openspec/` from `cwd`, so `cwd=worktree` is what scopes this to the
+    task's own worktree rather than wherever Cosmo's own process happens to
+    be running from. `--yes` skips the interactive confirmation prompt that
+    would otherwise block unattended use; `--skip-specs` is deliberately not
+    passed -- letting the archive update `openspec/specs/` for real is the
+    point, not something to short-circuit."""
+    try:
+        result = subprocess.run(
+            [binary, "archive", change_name, "--yes"],
+            cwd=worktree,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise OpenSpecInitError(f"could not run {binary!r} archive: {exc}") from exc
+
+    if result.returncode != 0:
+        raise OpenSpecInitError(
+            f"openspec archive {change_name!r} exited {result.returncode}: "
+            f"{(result.stderr or result.stdout).strip()}"
+        )
+
+    return OpenSpecResult(
+        ran=True, exit_code=result.returncode, stdout=result.stdout, stderr=result.stderr
+    )

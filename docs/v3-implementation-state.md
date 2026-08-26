@@ -1984,7 +1984,209 @@ again, starting a fresh `run_id`).
 unit** -- Open Item 2's own "retune against real data" posture; no real
 Phase 9/10 run has produced a usage number to size it against yet.
 
-## Deviations from the spec, cumulative
+## v4 workflow changes — Complete
+
+Not one of the plan's numbered phases -- see
+[v4-changes-to-workflow-plan.md](v4-changes-to-workflow-plan.md) for the
+full design (context, decisions already confirmed, and the exact real-code
+anchors it was written against). This section records what actually got
+built and every place real code made the plan more concrete than it was.
+`./check.sh`: 367 tests, 8 skipped (unchanged real-Docker/real-openspec
+opt-ins).
+
+### What exists
+
+| Path | Contents |
+|---|---|
+| `src/cosmo/store/enums.py` | `TaskStatus.REVIEWING`/`FINISHING`; `FailureStage.ADVERSARIAL_REVIEW` |
+| `src/cosmo/store/migrations.py` | Migrations 4-6: `task_queue.status` CHECK widened (reviewing/finishing), `task_failures.failure_stage` CHECK widened (adversarial_review), `task_queue.spec_batch_id TEXT` added |
+| `src/cosmo/config/model.py`, `defaults.toml` | `ReviewConfig`/`[review]` (`enabled=true`); `TimeoutConfig.reviewing_wall`/`[timeouts].reviewing_wall=900` |
+| `src/cosmo/harness/base.py` | `HarnessAdapter.review(task_id, spec_path, base_branch) -> HarnessResult`, new abstract method |
+| `src/cosmo/harness/fake/adapter.py`, `harness/claude/adapter.py` | `review()` implementations |
+| `src/cosmo/task/review.py` | New -- the `.cosmo/review-result.json` verdict-file contract (`ReviewVerdict`, `read_review_verdict`, `review_result_path`) |
+| `src/cosmo/task/machine.py` | `_do_reviewing`/`_do_finishing`, wired into `run_task`; module docstring's state list updated |
+| `src/cosmo/bootstrap/openspec.py`, `bootstrap/__init__.py` | `archive_change()` -- the `FINISHING` step's own subprocess call |
+| `src/cosmo/events/envelope.py` | `EventType.TASK_FINISHING_FAILED`, not in spec 9.2's own list (predates `FINISHING`) |
+| `src/cosmo/spec/` | New package -- `taskfile.py` (`SpecTaskFile`, `parse_task_file`, `list_task_files`: the `*-task.md` frontmatter contract) |
+| `src/cosmo/cli/main.py` | `spec_app` (`cosmo spec add`/`cosmo spec queue`); `_cycle_check`/`_insert_queued_task` extracted and shared with `queue add` |
+| `src/cosmo/store/writer.py`, `reader.py` | `StoreWriter.queue_add` gains `spec_batch_id`; `TaskRow` gains `spec_batch_id` (defaulted, so every existing keyword construction stays valid) |
+| `templates/harness/claude/skills/spec-enrichment/SKILL.md`, `agents/reviewer.md` | New harness-facing templates |
+| `tests/test_task_reviewing.py`, `test_spec_taskfile.py`, `test_cli_spec.py` | New |
+| `tests/test_task_machine.py`, `test_run_loop.py`, `test_task_fixture_e2e.py` | `_fast_config` helpers gain `review.enabled=False` (see decision below) |
+| `tests/test_store_migrations.py`, `test_bootstrap_openspec.py`, `test_harness_fake.py` | New migration/`archive_change`/`review()` coverage |
+| `tests/fixtures/fake_openspec.sh` | Gains an `archive <name> --yes` branch |
+
+### Decisions made during this work
+
+**`task_queue.status`'s own CHECK constraint needed widening too -- a real
+gap in the plan document, not just an implementation detail.** The plan's
+migration section named only the additive `spec_batch_id` column; it never
+mentioned that `REVIEWING`/`FINISHING` need `task_queue.status`'s CHECK
+constraint widened first, or every real `queue_transition` call for either
+new state would fail outright before any code-level logic ran. Found by
+implementing the state machine change and immediately hitting a `sqlite3.
+IntegrityError` from `queue_transition`, not by re-reading the plan closely
+enough beforehand. Fixed as migration 4 (recreate-copy-swap, same recipe as
+migrations 2/3); migration 5 does the analogous `task_failures.
+failure_stage` widening the plan *did* call out, and migration 6 is the
+plan's own `spec_batch_id` column, renumbered to come after.
+
+**A review's verdict is never read from the harness call's own output --
+spec 4's "prose parsing is prohibited as a signal" discipline
+(`harness.claude.stream`'s own docstring) rules that out, and `HarnessResult`
+has no other harness-agnostic slot for a two-way (or three-way, including
+"produced nothing usable") verdict.** Instead the reviewer writes a small
+structured file, `.cosmo/review-result.json`, to the worktree -- the same
+"watch a file the harness writes" shape `HarnessCapabilities.
+reports_native_progress=False` already uses for `tasks.md`, just a
+fixed-path single-shot file instead of a polled one. `task.review.
+read_review_verdict` reads it back after `adapter.review()` returns;
+`HarnessAdapter.review()` itself stays a plain, uniform `HarnessResult`
+producer like every other adapter method. Not spelled out at this level of
+mechanism in the plan (which only said "a new method on `HarnessAdapter`'s
+ABC, mirroring `propose()`/`implement()`").
+
+**A rejected review and a review call that never produced a usable verdict
+at all are bounded by two different, independent budgets -- not the plan's
+one-line "same `attempt_count`/`max_attempts` budget as a gate failure."**
+Rereading the module's own established discipline (`environment_error`
+never consumes the code-level retry budget, at either `IMPLEMENTING` or
+`VALIDATING`) made clear that only a genuine rejection is a code-level
+judgment; a crash, a timeout, or a call that completed but wrote no (or a
+malformed) verdict file is an environment problem with the review contract,
+not a judgment about the code. A rejection reuses the `attempt_count`/
+`will_retry` judgment `VALIDATING`'s own gate-pass already computed for this
+cycle (blocks with `BlockedReason.CODE_FAILURE`) -- an unusable verdict
+instead shares `VALIDATING`'s own `validating_env_retries` counter, threaded
+into and back out of `_do_reviewing` via a small `_ReviewStepResult`
+(blocks with `BlockedReason.ENVIRONMENT`/`TIMEOUT`). Confirmed by a test
+that hit `classify_harness_failure`'s own `assert not result.success` the
+first time this wasn't split out correctly (`test_review_call_with_no_
+verdict_file_is_an_environment_retry_not_a_rejection`).
+
+**`REVIEWING` gets its own `timeouts.reviewing_wall` (default 900s,
+`proposing_wall`'s own order of magnitude) -- not named in the plan at
+all.** Every other harness-invoking state already has a wall clock
+(`config over constants`, this codebase's own stated convention); leaving
+`adapter.review()` unbounded would have been a real, if narrow, regression
+against that convention. No stall variant, matching `proposing_wall`'s own
+shape -- one bounded call, not a multi-turn session with a liveness watcher
+to stall-check.
+
+**`FINISHING` runs `openspec archive` against `repo_path` (Cosmo's own
+dedicated `base_branch` checkout), never `ctx.worktree_path`.** By the time
+`_do_merging` returns, `merge_task` has already removed the task's worktree
+entirely (spec 3.2's own merge-success cleanup) -- there is nothing left to
+run `openspec archive` against there. `git.merge`'s own "`repo_path` is
+always on `base_branch`, clean" invariant is exactly what's needed instead:
+by the point `FINISHING` runs, `repo_path` already holds the just-merged
+commit(s). Real `openspec archive [change-name] --yes` was confirmed by
+hand to have no path argument of its own at all -- it resolves `openspec/`
+from `cwd`, which is why `archive_change(worktree, name)` passes
+`cwd=worktree` rather than a CLI flag.
+
+**`merge_task` (unchanged, per the plan's own "run.loop/git need zero
+changes" argument) already transitions a merged task straight to `done` and
+emits its own `task.completed`/`task.state_changed` -- `FINISHING` is
+layered strictly *after* that, not before it.** The task_transitions trail
+for a task with `FINISHING` enabled genuinely reads `..., merging, done,
+finishing, done` -- a second, real `done` transition once the best-effort
+archive step (successful or not) finishes. Considered and rejected:
+running `FINISHING` before `merge_task`'s own completion, to get a cleaner
+single `done` at the end -- rejected because it would mean archiving a
+change whose merge might still fail on the ladder, and because it would
+require reordering/changing `git.merge`'s already-hardened code, which the
+plan explicitly didn't want touched.
+
+**A v4-flow task's `PROPOSING` step is expected to name its own `openspec
+new change <name>` the same way `run.loop._run_one_task` already derives a
+task's branch name -- `Path(spec_path).stem`.** The plan cited that
+derivation for `FINISHING`'s own `spec_id` but never said what a *new*
+change (created lazily inside `PROPOSING` from a `*-task.md` file, which
+has no pre-existing OpenSpec change to name itself after) should be called.
+Naming it `Path(spec_path).stem` (the task file's own stem, e.g.
+`backend-task` for `docs/specs/add-login-spec/tasks/backend-task.md`) keeps
+`FINISHING`'s archive target and `_run_one_task`'s branch name in sync
+without either one hardcoding the other's convention, and needs zero
+changes to `run.loop` (this is a prompt-content decision inside `templates/
+harness/claude/skills/openspec-workflow/SKILL.md`'s existing `openspec new
+change <name>` guidance plus the new `spec-enrichment`/`implementer`
+prompts, not a state-machine change) -- consistent with the plan's own
+"`PROPOSING` gains a new responsibility, not a new contract" framing.
+
+**Existing `FakeHarnessAdapter`-driven tests needed `review.enabled=False`
+added to their `_fast_config` helpers.** `config.review.enabled` defaults
+`true`, so every pre-existing task-machine/run-loop test now drives a real
+`REVIEWING` call through `FakeHarnessAdapter`'s reused single-script
+`SUCCESS` response -- which writes no verdict file, so without this change
+every one of those tasks would retry to exhaustion and end `BLOCKED`
+instead of `DONE`. Same shape as Phase 9's own `disk.min_free_gb` test-
+isolation precedent (`docs/handoff.md`'s "Tests isolate from the developer's
+environment" convention) -- a new default-on real check, so every test
+exercising the real state machine needs an explicit override unless it's
+specifically testing that check.
+
+**`cosmo spec add`'s own harness call reuses `adapter.probe(prompt)`
+(Phase 3's existing raw-prompt entry point), not a new ABC method.**
+Decomposition doesn't fit `propose()`/`implement()`/`review()`'s shapes (no
+task_id, no existing spec_path to hand in the way those expect) and
+`probe()` already exists for exactly "run one raw prompt, harness-
+agnostically" -- the same reasoning that justified `probe()` itself in
+Phase 3 (deviation 7) applies again here rather than inventing a fourth
+near-duplicate method.
+
+**`_cycle_check`/`_insert_queued_task` extracted from `queue_add` as the
+plan asked, but `spec_queue` checks its whole batch atomically before
+inserting any of it, rather than calling the per-task check once per file
+in a loop.** A cycle introduced by hand-editing one `*-task.md` file
+between `spec add` and `spec queue` (the plan's own "the edit window is the
+preview, not a separate confirmation UI") should reject the whole batch,
+not queue half of it and fail partway through. `_cycle_check` therefore
+takes a `dict[task_id, depends_on]` of every not-yet-inserted candidate at
+once; `_insert_queued_task` (the real write + duplicate-task_id handling)
+is the piece actually shared per-call between `queue add` (one candidate)
+and `spec queue` (N candidates, already cycle-checked as a batch).
+
+### Real invocations this session (not just unit tests)
+
+- `cosmo spec add`/`cosmo spec queue`/`cosmo queue ls`/`cosmo queue show`
+  run for real (`--harness fake`) against a real scratch git target repo:
+  confirmed the preview table, the dependency graph round-tripping through
+  real frontmatter, `spec_batch_id` landing correctly, and the CLI's own
+  cycle-rejection message.
+- `openspec new change`/`openspec archive --yes` run for real against a
+  real scratch repo (`test_real_openspec_binary_archives_a_real_change`):
+  confirmed `archive`'s cwd-relative resolution (no path argument at all)
+  and that a real archive actually moves the change under `openspec/
+  changes/archive/`.
+- `cosmo init` run for real against a scratch target repo: confirmed the
+  two new template files (`agents/reviewer.md`, `skills/spec-enrichment/
+  SKILL.md`) sync into `.agent/claude/` and resolve through the `.claude`
+  symlink automatically, with zero changes needed to `bootstrap.assets.
+  sync_harness_assets` (already a generic whole-tree copy).
+
+### Things that will matter later
+
+**No real `claude -p` review invocation has ever been run** -- `adapter.
+review()`'s prompt and `agents/reviewer.md`'s instructions are written and
+internally consistent (mirroring `propose()`/`implement()`'s own "thin
+prompt, real policy lives in templates" precedent) but, unlike Phase 9's
+`claude -p` OTel probe, not yet verified against a real session that
+actually writes `.cosmo/review-result.json` in the documented shape. A
+strong Phase 10 candidate: queue one real task through a real target repo
+with `review.enabled=true` and confirm a real reviewer session produces a
+usable verdict, both accept and reject.
+
+**No real `docs/specs/<name>-spec.md` -> `spec-enrichment` -> real
+`*-task.md` fan-out has been run either** -- `cosmo spec add`'s CLI
+mechanics are verified for real (see above), but with `--harness fake`,
+which writes nothing; the skill's own instructions have not yet been
+exercised by a real session.
+
+**`review.enabled`/`timeouts.reviewing_wall` are unverified guesses, the
+same posture Open Item 2 already names for the original spec 3.3
+defaults** -- no real review-call duration data exists yet to size
+`reviewing_wall` against.
 
 Kept here so a future spec revision can absorb them in one pass.
 
@@ -2018,3 +2220,8 @@ Kept here so a future spec revision can absorb them in one pass.
 | 26 | `StopReason.DISK_LOW` added, schema migration 3 | §9.5, §3.1 | 9 | The pre-run disk check needs its own real, queryable stop reason distinct from `manual` (already reused for the startup DAG-cycle abort) |
 | 27 | `cosmo report` CLI command added | §9.5's own "post-run triage" framing | 9 | The plan's own Phase 9 summary names this explicitly; spec 9.2's `cosmo events tail` alone leaves `run.summary`'s payload as raw JSON |
 | 28 | `watchdog.notify` pings at run-level transitions and once per DAG-loop iteration, not at task-internal (heartbeat) granularity | §9.5 | 9 | The handoff's own file list names `run.loop.run_queue`'s per-task-transition point as the wiring seam, not a deeper hook into `task.machine`'s retry/heartbeat loop; recorded as a known `WatchdogSec` sizing tradeoff (decision 7) rather than silently shipped |
+| 29 | `task_queue.status` CHECK widened (schema migration 4), beyond what the v4 plan's own migration section named | v4 plan §4 | v4 | `REVIEWING`/`FINISHING` need `queue_transition` to accept their status values; the plan named only the additive `spec_batch_id` column, not this |
+| 30 | A review verdict is delivered via a worktree file (`.cosmo/review-result.json`, `task.review`), never a `HarnessResult` field or the session's own text output | v4 plan's `REVIEWING` section | v4 | Spec 4's "prose parsing is prohibited as a signal" rules out reading the session's free-text output; `HarnessResult` has no other harness-agnostic slot for a three-way verdict |
+| 31 | A rejected review and an unusable review call are bounded by two independent budgets (`attempt_count`/`will_retry` vs. a shared `validating_env_retries`), not one budget as the plan's one-line summary implied | v4 plan's `REVIEWING` section | v4 | Only a rejection is a genuine code-level judgment; a crash/timeout/malformed-verdict call is `environment_error`, which this module's own established discipline never lets consume the code-level retry budget |
+| 32 | `TimeoutConfig.reviewing_wall` added (`config.timeouts`, default 900s) | v4 plan's `REVIEWING` section (not named there) | v4 | Every other harness-invoking state already has a wall clock (`config over constants`); `adapter.review()` was otherwise the one unbounded harness call in the whole state machine |
+| 33 | `EventType.TASK_FINISHING_FAILED` added, not in spec 9.2's own enumerated list (predates `FINISHING`) | v4 plan's `FINISHING` section | v4 | `_do_finishing`'s best-effort archive failure needs a real, queryable warning event distinct from `task.blocked`/`task.failed` (FINISHING never blocks) |

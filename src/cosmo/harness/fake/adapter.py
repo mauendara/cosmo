@@ -105,6 +105,15 @@ class FakeHarnessAdapter(HarnessAdapter):
     ) -> HarnessResult:
         return self._run("implement", task_id, retry_context)
 
+    def review(self, task_id: str, spec_path: Path, base_branch: str) -> HarnessResult:
+        # The verdict itself is a file `task.review.read_review_verdict`
+        # reads back from the worktree (`HarnessAdapter.review`'s own
+        # docstring) -- a script here only needs to control whether this
+        # call *completed* (`FakeOutcome`'s usual environment-health
+        # meaning), same as `propose`/`implement`. A test wanting a specific
+        # verdict writes `task.review.review_result_path(worktree)` directly.
+        return self._run("review", task_id, None)
+
     def get_progress(self, task_id: str) -> tuple[int, int]:
         return self._progress.get(task_id, (0, 0))
 

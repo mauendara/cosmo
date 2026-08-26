@@ -282,10 +282,121 @@ DROP TABLE run_state;
 ALTER TABLE run_state_v2 RENAME TO run_state;
 """
 
+# ============================================================================
+# Migration 4 -- v4 workflow changes: `task_queue.status` gains 'reviewing'
+# and 'finishing'.
+#
+# `docs/v4-changes-to-workflow-plan.md` inserts two new task-machine states
+# (`REVIEWING` between `VALIDATING`/`COMMITTING`, `FINISHING` between
+# `MERGING`/`DONE`) but its own migration section only named the additive
+# `spec_batch_id` column -- it did not account for `task_queue.status`'s own
+# CHECK constraint, which would otherwise reject a genuine `queue_transition`
+# call for either new state before this migration ever ran. Found while
+# implementing the plan, not in the plan document itself; recorded as a
+# deviation in `docs/v3-implementation-state.md`. Same recreate-copy-swap
+# recipe as migrations 2/3 -- SQLite has no `ALTER TABLE ... DROP
+# CONSTRAINT`. Safe despite `task_progress`/`task_heartbeat`/`task_cost`/
+# `task_transitions`/`task_failures` all holding FKs to `task_queue`: SQLite
+# only checks a foreign key against the *current* schema when a child row is
+# inserted/updated, never at the parent's DDL time (same reasoning migration
+# 3's own comment already gives for `run_state`).
+# ============================================================================
+_SCHEMA_V4 = """
+CREATE TABLE task_queue_v2 (
+    task_id          TEXT PRIMARY KEY,
+    spec_path        TEXT NOT NULL,
+    depends_on       TEXT NOT NULL DEFAULT '[]',
+    priority         INTEGER NOT NULL DEFAULT 0,
+    status           TEXT NOT NULL CHECK (status IN (
+                         'queued', 'proposing', 'proposed', 'implementing',
+                         'validating', 'reviewing', 'committing', 'merging',
+                         'finishing', 'done', 'failed_retry', 'blocked'
+                     )),
+    attempt_count    INTEGER NOT NULL DEFAULT 0,
+    max_attempts     INTEGER NOT NULL,
+    last_error       TEXT,
+    blocked_reason   TEXT CHECK (blocked_reason IN (
+                         'code_failure', 'cost', 'merge_conflict', 'environment',
+                         'timeout', 'flaky_unresolved'
+                     )),
+    allow_test_edits INTEGER NOT NULL DEFAULT 0 CHECK (allow_test_edits IN (0, 1)),
+    worktree_path    TEXT,
+    session_id       TEXT,
+    created_at       TEXT NOT NULL,
+    updated_at       TEXT NOT NULL
+);
+INSERT INTO task_queue_v2 SELECT * FROM task_queue;
+DROP TABLE task_queue;
+ALTER TABLE task_queue_v2 RENAME TO task_queue;
+"""
+
+# ============================================================================
+# Migration 5 -- v4 workflow changes: `task_failures.failure_stage` gains
+# 'adversarial_review'.
+#
+# The new `REVIEWING` state (see migration 4's comment) attributes a
+# rejected review, or a review harness call that itself failed, to
+# `FailureStage.ADVERSARIAL_REVIEW` (`store.enums`) -- not `TEST_INTEGRITY`,
+# which is the gate's own diff-gate finding, a different check entirely.
+# Same recreate-copy-swap recipe as migration 2, which already did exactly
+# this for `SECRETS`.
+# ============================================================================
+_SCHEMA_V5 = """
+CREATE TABLE task_failures_v3 (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id        TEXT NOT NULL REFERENCES task_queue(task_id),
+    run_id         TEXT REFERENCES run_state(run_id),
+    attempt_number INTEGER NOT NULL,
+    failure_type   TEXT NOT NULL CHECK (failure_type IN (
+                       'code_error', 'environment_error', 'timeout', 'flaky'
+                   )),
+    failure_stage  TEXT NOT NULL CHECK (failure_stage IN (
+                       'propose', 'implement', 'build', 'unit_tests', 'e2e_tests',
+                       'test_integrity', 'secrets', 'adversarial_review', 'commit', 'merge'
+                   )),
+    error_summary  TEXT NOT NULL,
+    error_detail   TEXT,
+    files_touched  TEXT NOT NULL DEFAULT '[]',
+    will_retry     INTEGER NOT NULL CHECK (will_retry IN (0, 1)),
+    next_action    TEXT NOT NULL CHECK (next_action IN (
+                       'retry', 'block', 'escalate_circuit_breaker'
+                   )),
+    timestamp      TEXT NOT NULL,
+    event_id       TEXT REFERENCES events(event_id)
+);
+INSERT INTO task_failures_v3 SELECT * FROM task_failures;
+DROP TABLE task_failures;
+ALTER TABLE task_failures_v3 RENAME TO task_failures;
+CREATE INDEX idx_task_failures_task ON task_failures(task_id);
+"""
+
+# ============================================================================
+# Migration 6 -- v4 workflow changes: `task_queue` gains `spec_batch_id`.
+#
+# Plain nullable column, no CHECK constraint -- `ALTER TABLE ... ADD COLUMN`
+# is enough, no recreate-copy-swap needed (unlike migrations 4/5 above,
+# which had to touch this same table for a CHECK-constraint reason). Lets
+# `cosmo report`/a future `cosmo spec status` group every task a `cosmo spec
+# queue <name>` call inserted together -- the batch id is just the spec's
+# own name (`<name>-spec`), no separate opaque id to invent.
+# ============================================================================
+_SCHEMA_V6 = """
+ALTER TABLE task_queue ADD COLUMN spec_batch_id TEXT;
+"""
+
 MIGRATIONS: list[Migration] = [
     Migration(1, "initial schema: events, queue, progress, run state, cost, history", _SCHEMA_V1),
     Migration(2, "task_failures.failure_stage gains secrets (gate gitleaks backstop)", _SCHEMA_V2),
     Migration(3, "run_state.stop_reason gains disk_low (pre-run disk check)", _SCHEMA_V3),
+    Migration(4, "task_queue.status gains reviewing, finishing (v4 workflow changes)", _SCHEMA_V4),
+    Migration(
+        5,
+        "task_failures.failure_stage gains adversarial_review (v4 workflow changes)",
+        _SCHEMA_V5,
+    ),
+    Migration(
+        6, "task_queue gains spec_batch_id (v4 workflow changes, cosmo spec queue)", _SCHEMA_V6
+    ),
 ]
 
 

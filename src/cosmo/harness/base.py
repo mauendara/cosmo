@@ -122,6 +122,28 @@ class HarnessAdapter(ABC):
     ) -> HarnessResult: ...
 
     @abstractmethod
+    def review(self, task_id: str, spec_path: Path, base_branch: str) -> HarnessResult:
+        """v4 workflow changes (`docs/v4-changes-to-workflow-plan.md`): a
+        genuinely fresh, separate call -- no session resumption, no
+        `retry_context` -- so the review is real rather than the same
+        session grading its own work. Given only `spec_path` (the change's
+        own spec/tasks.md) and `base_branch` (to diff the worktree's current
+        `HEAD` against, e.g. `git diff {base_branch}...HEAD`); the reviewer
+        has no other memory of how the diff came to exist.
+
+        Verdict delivery is deliberately not a field on `HarnessResult`:
+        spec 4's "prose parsing is prohibited as a signal" discipline
+        (`harness.claude.stream`'s own docstring) rules out inspecting the
+        session's free-text final message, and `HarnessResult` otherwise
+        carries no harness-agnostic slot for it. Instead the reviewer writes
+        a small structured file to the worktree (`task.review`'s own
+        contract) -- the same "watch a file the harness writes, not the
+        stream" shape `HarnessCapabilities.reports_native_progress=False`
+        already uses for `tasks.md` -- and `task.machine._do_reviewing`
+        reads it back after this call returns, harness-agnostically.
+        """
+
+    @abstractmethod
     def get_progress(self, task_id: str) -> tuple[int, int]:
         """Completed and total subtasks -- never a precomputed percent.
 

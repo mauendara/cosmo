@@ -41,6 +41,7 @@ from cosmo.harness import (
 from cosmo.harness.base import HarnessCapabilities, HarnessResult
 from cosmo.run.dag import DagCycleError, find_cycle, resolve_execution_order
 from cosmo.run.loop import run_queue
+from cosmo.spec import SpecTaskFile, TaskFileError, list_task_files
 from cosmo.store import StoreWriter, TaskNotFoundError
 from cosmo.store.enums import BlockedReason, RunStatus, StopReason, TaskStatus
 from cosmo.store.reader import (
@@ -54,6 +55,7 @@ from cosmo.store.reader import (
     list_task_failures,
     list_tasks,
 )
+from cosmo.store.writer import TransitionResult
 from cosmo.task import TaskContext, run_task
 
 app = typer.Typer(
@@ -65,6 +67,9 @@ app = typer.Typer(
 config_app = typer.Typer(name="config", help="Inspect configuration.", no_args_is_help=True)
 harness_app = typer.Typer(name="harness", help="Inspect harness adapters.", no_args_is_help=True)
 queue_app = typer.Typer(name="queue", help="Manage the task queue.", no_args_is_help=True)
+spec_app = typer.Typer(
+    name="spec", help="Raw-spec workflow: enrich, decompose, and queue.", no_args_is_help=True
+)
 events_app = typer.Typer(name="events", help="Inspect the event log.", no_args_is_help=True)
 project_app = typer.Typer(name="project", help="Manage registered projects.", no_args_is_help=True)
 templates_app = typer.Typer(
@@ -73,6 +78,7 @@ templates_app = typer.Typer(
 app.add_typer(config_app)
 app.add_typer(harness_app)
 app.add_typer(queue_app)
+app.add_typer(spec_app)
 app.add_typer(events_app)
 app.add_typer(project_app)
 app.add_typer(templates_app)
@@ -726,6 +732,55 @@ def project_list(config: ConfigOption = None) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _cycle_check(cfg: CosmoConfig, *, candidates: dict[str, list[str]]) -> None:
+    """Spec 5: "cycle detection at enqueue". `candidates` is every
+    not-yet-inserted task_id this call is about to add, mapped to its own
+    `depends_on` -- checked together against every not-yet-`done` task
+    already in the queue. `run.dag.find_cycle` takes a plain {task_id:
+    depends_on} graph for exactly this reason, so no full `TaskRow` needs
+    constructing for a task that doesn't exist yet. Shared by `queue add`
+    (one candidate) and `spec queue` (a whole batch, checked atomically
+    before any of it is inserted -- see `spec_queue`'s own comment)."""
+    existing = {
+        t.task_id: t.depends_on for t in list_tasks(cfg.paths.db_path) if t.status != "done"
+    }
+    existing.update(candidates)
+    cycle = find_cycle(existing)
+    if cycle is not None:
+        err_console.print(f"[red]depends_on cycle: {' -> '.join(cycle)}[/red]")
+        raise typer.Exit(code=1)
+
+
+def _insert_queued_task(
+    writer: StoreWriter,
+    *,
+    task_id: str,
+    spec_path: str,
+    depends_on: list[str],
+    priority: int,
+    max_attempts: int,
+    allow_test_edits: bool = False,
+    spec_batch_id: str | None = None,
+) -> TransitionResult:
+    """Shared by `queue add` and `spec queue`: the real insert, once the
+    caller has already run `_cycle_check` above. Both commands want
+    identical CLI-facing behavior on a duplicate task_id, which is why this
+    is factored out rather than each hand-rolling its own `try`/`except`."""
+    try:
+        return writer.queue_add(
+            task_id=task_id,
+            spec_path=spec_path,
+            depends_on=depends_on,
+            priority=priority,
+            max_attempts=max_attempts,
+            allow_test_edits=allow_test_edits,
+            spec_batch_id=spec_batch_id,
+        )
+    except sqlite3.IntegrityError:
+        err_console.print(f"[red]task {task_id!r} already queued[/red]")
+        raise typer.Exit(code=1) from None
+
+
 @queue_app.command("add")
 def queue_add(
     spec_path: Annotated[str, typer.Argument(help="Path to the OpenSpec change.")],
@@ -749,23 +804,12 @@ def queue_add(
     resolved_task_id = task_id or Path(spec_path).stem
     resolved_depends_on = list(depends_on) if depends_on else []
 
-    # Spec 5: "cycle detection at enqueue". Checked against every
-    # not-yet-`done` task already in the queue plus this not-yet-inserted
-    # one -- `run.dag.find_cycle` takes a plain {task_id: depends_on} graph
-    # for exactly this reason, so no full `TaskRow` needs constructing for
-    # a task that doesn't exist yet.
-    existing = {
-        t.task_id: t.depends_on for t in list_tasks(cfg.paths.db_path) if t.status != "done"
-    }
-    existing[resolved_task_id] = resolved_depends_on
-    cycle = find_cycle(existing)
-    if cycle is not None:
-        err_console.print(f"[red]depends_on cycle: {' -> '.join(cycle)}[/red]")
-        raise typer.Exit(code=1)
+    _cycle_check(cfg, candidates={resolved_task_id: resolved_depends_on})
 
     writer = StoreWriter(cfg.paths.db_path)
     try:
-        result = writer.queue_add(
+        result = _insert_queued_task(
+            writer,
             task_id=resolved_task_id,
             spec_path=spec_path,
             depends_on=resolved_depends_on,
@@ -774,12 +818,156 @@ def queue_add(
             allow_test_edits=allow_test_edits,
         )
         emit_state_changed(EventEmitter(writer), result)
-    except sqlite3.IntegrityError:
-        err_console.print(f"[red]task {resolved_task_id!r} already queued[/red]")
-        raise typer.Exit(code=1) from None
     finally:
         writer.close()
     console.print(f"[green]queued[/green] {resolved_task_id}")
+
+
+def _spec_tasks_dir(repo: Path, name: str) -> Path:
+    return repo / "docs" / "specs" / f"{name}-spec" / "tasks"
+
+
+def _render_spec_preview(name: str, task_files: list[SpecTaskFile]) -> None:
+    table = Table(title=f"{name}-spec tasks", title_justify="left")
+    for col in ("task_id", "title", "depends_on", "priority", "file"):
+        table.add_column(col)
+    for tf in task_files:
+        table.add_row(
+            tf.task_id, tf.title, ", ".join(tf.depends_on) or "-", str(tf.priority), tf.path.name
+        )
+    console.print(table)
+
+
+@spec_app.command("add")
+def spec_add(
+    name: Annotated[str, typer.Argument(help="Short kebab-case name for this spec.")],
+    repo: Annotated[Path, typer.Option(help="Target repo containing (or to contain) docs/specs/.")],
+    from_file: Annotated[
+        Path | None,
+        typer.Option(
+            "--from", help="Copy this file in as docs/specs/<name>-spec.md if it doesn't exist yet."
+        ),
+    ] = None,
+    harness: HarnessOption = None,
+    timeout: Annotated[
+        float | None,
+        typer.Option(help="Seconds before cancelling. Defaults to timeouts.proposing_wall."),
+    ] = None,
+    config: ConfigOption = None,
+) -> None:
+    """Enrich + decompose a raw spec into `docs/specs/<name>-spec/tasks/*.md`
+    -- a preview only. Does not touch `task_queue` or `openspec/`; the
+    written files are real, git-tracked content in `repo` that a human can
+    hand-edit before `cosmo spec queue` inserts them (spec 5's own preview-
+    first precedent, `cosmo run --dry-run`)."""
+    cfg = _load(config)
+    spec_path = repo / "docs" / "specs" / f"{name}-spec.md"
+    if not spec_path.is_file():
+        if from_file is None:
+            err_console.print(
+                f"[red]{spec_path} does not exist[/red] -- write it there directly, "
+                f"or pass --from <path> to copy one in"
+            )
+            raise typer.Exit(code=1)
+        spec_path.parent.mkdir(parents=True, exist_ok=True)
+        spec_path.write_text(from_file.read_text(encoding="utf-8"), encoding="utf-8")
+
+    resolved_name, source = resolve_harness_name(harness, None, cfg.harness.name)
+    console.print(f"harness: [bold]{resolved_name}[/bold] (from {source})")
+    adapter = get_adapter(resolved_name)(cfg, cwd=repo)
+
+    tasks_dir = _spec_tasks_dir(repo, name)
+    prompt = (
+        f"Follow the spec-enrichment skill against the raw spec at "
+        f"docs/specs/{name}-spec.md. Enrich it against this project's own "
+        f"docs/backend/, docs/frontend/, docs/data-model.md, and "
+        f"docs/base-standards.md, then decompose it into one "
+        f"docs/specs/{name}-spec/tasks/<task>-task.md file per identified unit "
+        f"of work, each with task_id/depends_on/priority/title frontmatter."
+    )
+    timeout_s = timeout if timeout is not None else float(cfg.timeouts.proposing_wall)
+    result_box: list[HarnessResult] = []
+    error_box: list[BaseException] = []
+
+    def _run() -> None:
+        try:
+            result_box.append(adapter.probe(prompt))
+        except BaseException as exc:  # noqa: BLE001 -- surfaced on the main thread below
+            error_box.append(exc)
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+    thread.join(timeout=timeout_s)
+    if thread.is_alive():
+        console.print(f"[yellow]spec add exceeded {timeout_s:.0f}s -- cancelling[/yellow]")
+        adapter.cancel("probe")
+        thread.join(timeout=cfg.timeouts.kill_grace + 5.0)
+
+    if error_box:
+        raise error_box[0]
+    if not result_box or not result_box[0].success:
+        err_console.print("[red]spec enrichment failed[/red]")
+        raise typer.Exit(code=1)
+
+    try:
+        task_files = list_task_files(tasks_dir)
+    except TaskFileError as exc:
+        err_console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from None
+    if not task_files:
+        err_console.print(f"[yellow]no *-task.md files were written under {tasks_dir}[/yellow]")
+        raise typer.Exit(code=1)
+
+    _render_spec_preview(name, task_files)
+    console.print(
+        f"[green]preview ready[/green] -- edit the files above, then `cosmo spec queue {name}`"
+    )
+
+
+@spec_app.command("queue")
+def spec_queue(
+    name: Annotated[str, typer.Argument(help="The spec name a prior `cosmo spec add` produced.")],
+    repo: Annotated[Path, typer.Option(help="Target repo containing docs/specs/.")],
+    config: ConfigOption = None,
+) -> None:
+    """Insert one task per `docs/specs/<name>-spec/tasks/*.md` file into the
+    real queue, tagged `spec_batch_id=<name>-spec`. The edit window between
+    `cosmo spec add` and this command *is* the preview's confirmation step
+    -- there is no separate approval UI."""
+    cfg = _load(config)
+    tasks_dir = _spec_tasks_dir(repo, name)
+    try:
+        task_files = list_task_files(tasks_dir)
+    except TaskFileError as exc:
+        err_console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from None
+    if not task_files:
+        err_console.print(f"[red]no *-task.md files found under {tasks_dir}[/red]")
+        raise typer.Exit(code=1)
+
+    # Checked atomically across the whole batch before any of it is
+    # inserted -- a cycle introduced by hand-editing one file between `spec
+    # add` and `spec queue` should reject the whole batch, not queue half
+    # of it and then fail partway through.
+    _cycle_check(cfg, candidates={tf.task_id: tf.depends_on for tf in task_files})
+
+    spec_batch_id = f"{name}-spec"
+    writer = StoreWriter(cfg.paths.db_path)
+    try:
+        for tf in task_files:
+            result = _insert_queued_task(
+                writer,
+                task_id=tf.task_id,
+                spec_path=str(tf.path),
+                depends_on=tf.depends_on,
+                priority=tf.priority,
+                max_attempts=cfg.retries.max_attempts,
+                spec_batch_id=spec_batch_id,
+            )
+            emit_state_changed(EventEmitter(writer), result)
+    finally:
+        writer.close()
+    console.print(f"[green]queued[/green] {len(task_files)} task(s) from {spec_batch_id}")
 
 
 @queue_app.command("ls")
