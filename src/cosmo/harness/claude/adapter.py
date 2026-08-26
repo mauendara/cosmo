@@ -210,6 +210,8 @@ class ClaudeCodeAdapter(HarnessAdapter):
             str(self.config.harness.max_turns),
             "--permission-mode",
             self.config.harness.permission_mode,
+            "--model",
+            self.config.harness.model,
             # A headless run must run under Cosmo's own project settings
             # (spec 2.5 guardrail hooks, .claude/settings.json) and nothing
             # else -- `user` scope is the operator's global ~/.claude

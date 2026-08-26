@@ -69,6 +69,14 @@ def test_argv_carries_max_turns_and_permission_mode_from_config(tmp_path: Path) 
     assert argv[argv.index("--output-format") + 1] == "stream-json"
 
 
+def test_argv_carries_model_from_config(tmp_path: Path) -> None:
+    adapter = _adapter(tmp_path)
+    argv = adapter._build_argv("hello")  # noqa: SLF001
+
+    assert "--model" in argv
+    assert argv[argv.index("--model") + 1] == adapter.config.harness.model
+
+
 def test_argv_restricts_setting_sources_to_project_only(tmp_path: Path) -> None:
     """Regression pin for the Phase 3 finding: a headless run must not
     inherit the operator's global ~/.claude hooks/plugins. Verified against

@@ -24,6 +24,7 @@ class HarnessConfig(_Strict):
     name: str = Field(min_length=1)
     permission_mode: str = Field(min_length=1)
     max_turns: int = Field(gt=0)
+    model: str = Field(min_length=1)
 
 
 class TimeoutConfig(_Strict):

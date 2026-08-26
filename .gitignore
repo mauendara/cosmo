@@ -3,6 +3,8 @@ data/
 work/
 logs/
 
+docs/test-specs/
+
 # Python
 .venv/
 __pycache__/

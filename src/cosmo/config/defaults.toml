@@ -12,6 +12,9 @@ name = "claude"
 # Spec 2.3: dontAsk fails closed and fails loud. Never bypassPermissions.
 permission_mode = "dontAsk"
 max_turns = 80
+# Not a spec value -- pinned so a run's model doesn't silently drift with
+# whatever the host's `claude` CLI happens to default to.
+model = "claude-sonnet-5"
 
 [timeouts]
 # Spec 3.3. All seconds. Anchored to an observed 5-15 min validation gate;
