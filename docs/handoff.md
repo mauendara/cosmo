@@ -108,11 +108,18 @@ place and leave `~/.local/bin/cosmo` dangling.
   state doc's "Fast-follow, same session" subsection under Phase 9), so
   don't rediscover these as if they were still open: `git.worktree.
   sweep_stale_worktrees` is now wired into `run.loop.run_queue`'s startup
-  section, and `git.worktree.remove_worktree` now falls back to a
-  throwaway root container when a Docker-gate-container-written root-owned
-  file blocks `shutil.rmtree` (the Phase 6/7 finding that was worked
-  around by hand twice and never fixed until now). Both were real,
-  already-diagnosed bugs, not new Phase 10 findings.
+  section; `git.worktree.remove_worktree` now falls back to a throwaway
+  root container when a Docker-gate-container-written root-owned file
+  blocks `shutil.rmtree` (the Phase 6/7 finding that was worked around by
+  hand twice and never fixed until now); and `cosmo events tail` gained
+  `--payload`/`--type`, plus a new `cosmo queue failures <task-id>`
+  command, since diagnosing a real blocked task through the CLI alone
+  turned out to require opening the sqlite file by hand for
+  `task_failures.error_detail` -- exactly what Phase 10's own "reconstruct
+  every decision without reading a raw log" exit criterion rules out. All
+  three were real gaps, not new Phase 10 findings -- use `cosmo queue
+  failures <task-id>` and `cosmo events tail --payload` for the overnight
+  run's own post-run review, not raw sqlite queries.
 - **`WatchdogSec` in the shipped unit is 10800s (3h), task-boundary
   granularity, not task-internal** (Phase 9 decision 7/8) — a single
   wedged `IMPLEMENTING`/`VALIDATING` attempt is only caught at the *next*

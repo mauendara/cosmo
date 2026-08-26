@@ -1868,16 +1868,19 @@ matching the handoff's own framing.
   simulated low-disk condition aborts the run before any task starts"
   without actually filling a real disk, which no test should do.
 
-### Fast-follow, same session: two known bugs fixed before Phase 10
+### Fast-follow, same session: three gaps fixed before Phase 10
 
 Reviewing this phase's own "things that will matter later" against the
-plan's Phase 10 scope ("run unattended overnight") surfaced that two of
-them were not really Phase 10's job at all -- they were already-diagnosed
-bugs (found and reproduced by hand in Phase 6 and Phase 7, and restated
-without being fixed in both Phase 8's and this phase's own sections) that
-would have derailed an overnight acceptance run on disk exhaustion rather
-than let it test anything new. Fixed here, immediately after Phase 9's own
-commit, rather than carried into Phase 10 as a "finding":
+plan's Phase 10 scope ("run unattended overnight," "reconstruct every
+decision without reading a raw log") surfaced that three of them were not
+really Phase 10's job at all -- two were already-diagnosed bugs (found and
+reproduced by hand in Phase 6 and Phase 7, restated without being fixed in
+both Phase 8's and this phase's own sections) that would have derailed an
+overnight acceptance run on disk exhaustion rather than let it test
+anything new; the third was a real gap in this very phase's own
+observability tooling, found by actually trying to use it (decision 11).
+Fixed here, immediately after Phase 9's own commit, rather than carried
+into Phase 10 as a "finding":
 
 **9. `git.worktree.remove_worktree` now falls back to a throwaway root
 container when `shutil.rmtree` can't finish the job.** The root cause
@@ -1917,6 +1920,34 @@ for inspection, unchanged. Covered by a new integration test
 (`test_run_queue_sweeps_a_stale_worktree_left_by_a_crashed_prior_process`)
 that seeds an orphan directory under `work_dir` with no matching task at
 all and confirms `run_queue` prunes it before its own first task runs.
+
+**11. `cosmo events tail` gains `--payload`/`--type`, and a new `cosmo
+queue failures <task-id>` command was added -- found missing by actually
+trying to diagnose a real failed task through the CLI alone, not by
+inspection.** Running a real `run_queue` invocation against a scripted
+gate failure and then trying to answer "why did this fail" using only
+`cosmo report`/`cosmo queue show`/`cosmo events tail` (the tools this
+phase itself shipped) surfaced that `events tail` never printed a
+payload at all, and that `task.validation_result`'s own payload
+(`gate.validate._stage_payload`) carries failing *test names* but never
+`StageResult.error_summary`/`.error_detail` (the actual assertion/stack
+text, spec 9.3) -- that detail exists only in `task_failures`, which had
+no CLI reader at all (`list_task_failures`, spec 8, previously only
+consumed internally by the circuit breaker's own weight calculation).
+Concretely: reconstructing *why* `willfail` blocked required opening the
+sqlite file by hand and reading `task_failures.error_detail` directly --
+exactly what Phase 10's own exit criterion ("reconstruct every decision
+without reading a raw log") says shouldn't be necessary. Fixed with two
+small, additive CLI changes, not a new event type or schema change:
+`events tail --payload` prints each row's JSON body beneath the table;
+`events tail --type <event_type>` filters to one type (useful paired with
+`--payload`); `cosmo queue failures <task-id>` renders `task_failures`'
+full per-attempt history (type, stage, summary, detail, files touched,
+next_action) straight from the table `validate_task` already writes.
+Verified against the same real `willfail` run used to find the gap:
+`cosmo queue failures willfail` reproduced the exact `error_detail` text
+(`OrderControllerTest.testCreate: AssertionError: expected 200 got 500`)
+across all three recorded attempts.
 
 ### Things that will matter later
 

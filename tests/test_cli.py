@@ -10,7 +10,8 @@ from typer.testing import CliRunner
 from cosmo import __version__
 from cosmo.cli.main import app
 from cosmo.config import load_config
-from cosmo.store import find_project_by_path
+from cosmo.store import StoreWriter, find_project_by_path
+from cosmo.store.enums import FailureStage, FailureType, NextAction
 
 runner = CliRunner()
 
@@ -169,6 +170,66 @@ def test_events_tail_shows_events_emitted_by_queue_commands() -> None:
     assert result.exit_code == 0
     assert "task.state_changed" in result.stdout
     assert "task.blocked" in result.stdout
+
+
+def test_events_tail_payload_flag_prints_the_json_body() -> None:
+    """Without --payload the table alone can't tell you *why* something
+    happened -- see docs/v3-implementation-state.md's Phase 9 fast-follow
+    section for the real invocation that found this gap."""
+    runner.invoke(app, ["queue", "add", "p1", "--task-id", "t1"])
+    runner.invoke(app, ["queue", "block", "t1", "--reason", "cost"])
+
+    bare = runner.invoke(app, ["events", "tail", "--task", "t1"])
+    assert '"blocked_reason"' not in bare.stdout
+
+    with_payload = runner.invoke(app, ["events", "tail", "--task", "t1", "--payload"])
+    assert with_payload.exit_code == 0
+    assert '"blocked_reason": "cost"' in with_payload.stdout
+
+
+def test_events_tail_type_filter() -> None:
+    runner.invoke(app, ["queue", "add", "p1", "--task-id", "t1"])
+    runner.invoke(app, ["queue", "block", "t1", "--reason", "cost"])
+
+    result = runner.invoke(app, ["events", "tail", "--type", "task.blocked"])
+    assert result.exit_code == 0
+    assert "task.blocked" in result.stdout
+    assert "task.state_changed" not in result.stdout
+
+
+def test_queue_failures_renders_the_task_failures_history() -> None:
+    runner.invoke(app, ["queue", "add", "p1", "--task-id", "t1"])
+    writer = StoreWriter(_db_path())
+    try:
+        writer.record_task_failure(
+            task_id="t1",
+            run_id=None,
+            attempt_number=0,
+            failure_type=FailureType.CODE_ERROR,
+            failure_stage=FailureStage.UNIT_TESTS,
+            error_summary="1 unit test failed",
+            error_detail="OrderControllerTest.testCreate: AssertionError: expected 200 got 500",
+            files_touched=["OrderController.java"],
+            will_retry=True,
+            next_action=NextAction.RETRY,
+        )
+    finally:
+        writer.close()
+
+    result = runner.invoke(app, ["queue", "failures", "t1"])
+    assert result.exit_code == 0
+    assert "attempt 0" in result.stdout
+    assert "code_error" in result.stdout and "unit_tests" in result.stdout
+    assert "AssertionError: expected 200 got 500" in result.stdout
+    assert "OrderController.java" in result.stdout
+    assert "retry" in result.stdout
+
+
+def test_queue_failures_on_a_task_with_no_recorded_failures_says_so() -> None:
+    runner.invoke(app, ["queue", "add", "p1", "--task-id", "t1"])
+    result = runner.invoke(app, ["queue", "failures", "t1"])
+    assert result.exit_code == 0
+    assert "no recorded failures" in result.stdout.lower()
 
 
 def test_project_register_then_list(tmp_path: Path) -> None:

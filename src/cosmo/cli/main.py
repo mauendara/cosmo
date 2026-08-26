@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import json
 import sqlite3
 import subprocess
 import threading
@@ -50,6 +51,7 @@ from cosmo.store.reader import (
     latest_run_id,
     list_events,
     list_projects,
+    list_task_failures,
     list_tasks,
 )
 from cosmo.task import TaskContext, run_task
@@ -832,6 +834,41 @@ def queue_show(task_id: str, config: ConfigOption = None) -> None:
         console.print(f"progress: {progress.completed}/{progress.total} ({label})")
 
 
+@queue_app.command("failures")
+def queue_failures(
+    task_id: str,
+    run: Annotated[str | None, typer.Option("--run", help="Narrow to one run_id.")] = None,
+    config: ConfigOption = None,
+) -> None:
+    """The per-attempt `task_failures` history (spec 8) -- `error_detail`
+    (the actual assertion/stack text a gate failure carries, spec 9.3) has
+    no other CLI surface at all; `cosmo events tail`'s own event payloads
+    never include it (`gate.validate.validate_task`'s `task.validation_
+    result` event carries failing *test names*, not their assertion
+    text). Without this, diagnosing a `BLOCKED` task after the fact means
+    opening the sqlite file by hand."""
+    cfg = _load(config)
+    failures = list_task_failures(cfg.paths.db_path, task_id, run_id=run)
+    if not failures:
+        console.print(f"[dim]no recorded failures for {task_id!r}[/dim]")
+        return
+
+    for f in failures:
+        console.print(
+            f"\n[bold]attempt {f.attempt_number}[/bold] "
+            f"[dim]{f.timestamp}[/dim]  run={f.run_id or '-'}"
+        )
+        console.print(f"  type:    {f.failure_type} @ {f.failure_stage}")
+        console.print(f"  summary: {f.error_summary}")
+        if f.error_detail:
+            console.print("  detail:")
+            for line in f.error_detail.splitlines():
+                console.print(f"    {line}")
+        if f.files_touched:
+            console.print(f"  files:   {', '.join(f.files_touched)}")
+        console.print(f"  next:    {f.next_action} (will_retry={f.will_retry})")
+
+
 @queue_app.command("retry")
 def queue_retry(task_id: str, config: ConfigOption = None) -> None:
     cfg = _load(config)
@@ -890,6 +927,18 @@ def events_tail(
     run: Annotated[str | None, typer.Option("--run", help="Filter by run_id.")] = None,
     task: Annotated[str | None, typer.Option("--task", help="Filter by task_id.")] = None,
     severity: Annotated[str | None, typer.Option("--severity", help="Filter by severity.")] = None,
+    event_type: Annotated[
+        str | None, typer.Option("--type", help="Filter by event_type, e.g. task.blocked.")
+    ] = None,
+    payload: Annotated[
+        bool,
+        typer.Option(
+            "--payload",
+            help="Print each event's full JSON payload beneath its row -- the "
+            "detail (error text, failing test names, blocked reasons, cost "
+            "figures) the table columns alone don't carry.",
+        ),
+    ] = False,
     limit: Annotated[int, typer.Option(help="Most recent N events.")] = 50,
     config: ConfigOption = None,
 ) -> None:
@@ -897,7 +946,14 @@ def events_tail(
     table = Table(title="events", title_justify="left")
     for col in ("seq", "timestamp", "severity", "event_type", "run_id", "task_id"):
         table.add_column(col)
-    rows = list_events(cfg.paths.db_path, run_id=run, task_id=task, severity=severity, limit=limit)
+    rows = list_events(
+        cfg.paths.db_path,
+        run_id=run,
+        task_id=task,
+        severity=severity,
+        event_type=event_type,
+        limit=limit,
+    )
     for e in rows:
         table.add_row(
             str(e.sequence),
@@ -908,6 +964,11 @@ def events_tail(
             e.task_id or "-",
         )
     console.print(table)
+
+    if payload:
+        for e in rows:
+            console.print(f"\n[bold]#{e.sequence} {e.event_type}[/bold]")
+            console.print(json.dumps(e.payload, indent=2, default=str))
 
 
 @app.command("report")
