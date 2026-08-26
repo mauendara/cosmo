@@ -419,3 +419,46 @@ def test_a_task_blocked_in_one_run_and_retried_in_a_later_run_gets_a_fresh_workt
     done = get_task(cfg.paths.db_path, "solo")
     assert done is not None
     assert done.status == "done"
+
+
+def test_run_queue_sweeps_a_stale_worktree_left_by_a_crashed_prior_process(
+    tmp_path: Path,
+) -> None:
+    """Spec 3.2's startup sweep (`git.worktree.sweep_stale_worktrees`), now
+    wired into `run_queue` itself -- a worktree directory sitting under
+    `work_dir` with no matching `BLOCKED` task (e.g. left by a process that
+    crashed mid-attempt, or a systemd restart) gets pruned before this run's
+    own first task even starts. A worktree belonging to a currently
+    `BLOCKED` task is retained, same as `sweep_stale_worktrees` always did
+    -- this test only wires the call, it doesn't re-test the sweep's own
+    retain/prune logic (see test_git_worktree.py for that)."""
+    cfg = _fast_config(tmp_path)
+    repo = _repo_on_develop(tmp_path)
+
+    # A directory shaped like a leftover worktree from an earlier,
+    # unrelated run -- no task in the queue references it at all.
+    stale = cfg.paths.work_dir / "dead-run" / "orphan-task"
+    stale.mkdir(parents=True)
+    (stale / "leftover.txt").write_text("crash residue\n")
+
+    writer = StoreWriter(cfg.paths.db_path)
+    writer.queue_add(task_id="a", spec_path="openspec/changes/a", max_attempts=2)
+    emitter = EventEmitter(writer)
+    adapter = FakeHarnessAdapter(cfg, script=ScriptedCall(outcome=FakeOutcome.SUCCESS))
+    gate = FakeGate(ScriptedGateResult(passed=True))
+
+    try:
+        run_queue(
+            config=cfg,
+            writer=writer,
+            emitter=emitter,
+            adapter=adapter,
+            repo_path=repo,
+            base_branch="develop",
+            harness_name="claude",
+            gate_runner=_gate_runner(gate),
+        )
+    finally:
+        writer.close()
+
+    assert not stale.exists()

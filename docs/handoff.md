@@ -104,13 +104,15 @@ place and leave `~/.local/bin/cosmo` dangling.
 
 **From Phase 9, worth knowing before an overnight run:**
 
-- **`git.worktree.sweep_stale_worktrees` is still never called from
-  anywhere** (flagged in Phase 8's state doc, restated in Phase 9's — still
-  true). A multi-task overnight run will leave every `DONE` task's worktree
-  on disk indefinitely; only a `BLOCKED` task's worktree is *supposed* to
-  survive (spec 3.2). This will very likely bite a real overnight run on
-  disk space alone — decide whether to wire the sweep in before or as part
-  of Phase 10's own run, not discover it as the run's own failure mode.
+- **Fixed as a fast-follow right after Phase 9's own commit** (see the
+  state doc's "Fast-follow, same session" subsection under Phase 9), so
+  don't rediscover these as if they were still open: `git.worktree.
+  sweep_stale_worktrees` is now wired into `run.loop.run_queue`'s startup
+  section, and `git.worktree.remove_worktree` now falls back to a
+  throwaway root container when a Docker-gate-container-written root-owned
+  file blocks `shutil.rmtree` (the Phase 6/7 finding that was worked
+  around by hand twice and never fixed until now). Both were real,
+  already-diagnosed bugs, not new Phase 10 findings.
 - **`WatchdogSec` in the shipped unit is 10800s (3h), task-boundary
   granularity, not task-internal** (Phase 9 decision 7/8) — a single
   wedged `IMPLEMENTING`/`VALIDATING` attempt is only caught at the *next*

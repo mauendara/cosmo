@@ -1868,16 +1868,57 @@ matching the handoff's own framing.
   simulated low-disk condition aborts the run before any task starts"
   without actually filling a real disk, which no test should do.
 
-### Things that will matter later
+### Fast-follow, same session: two known bugs fixed before Phase 10
 
-**`git.worktree.sweep_stale_worktrees` (built in an earlier phase) is still
-never called from anywhere**, restated from Phase 8's own "things that
-will matter later" -- still true, still not this phase's fix (decision 4
-explains why the Playwright-artifact half of spec 9.5 didn't end up needing
-it after all, but a `DONE` task's worktree itself, and everything else
-under it, still leaks on disk with no sweep wired in). Phase 10's own
-"unattended overnight" acceptance run is likely to surface this for real if
-it isn't fixed first.
+Reviewing this phase's own "things that will matter later" against the
+plan's Phase 10 scope ("run unattended overnight") surfaced that two of
+them were not really Phase 10's job at all -- they were already-diagnosed
+bugs (found and reproduced by hand in Phase 6 and Phase 7, and restated
+without being fixed in both Phase 8's and this phase's own sections) that
+would have derailed an overnight acceptance run on disk exhaustion rather
+than let it test anything new. Fixed here, immediately after Phase 9's own
+commit, rather than carried into Phase 10 as a "finding":
+
+**9. `git.worktree.remove_worktree` now falls back to a throwaway root
+container when `shutil.rmtree` can't finish the job.** The root cause
+named in Phase 6/7's own state-doc sections -- a gate container writes
+build output (Maven's `backend/target/`, most commonly) as root inside the
+container, which an unprivileged host-side `shutil.rmtree` can never
+unlink -- was worked around by hand both times (a throwaway `alpine`
+container) and never taught to the code. `remove_worktree` gains a
+`docker_bin: str = "docker"` parameter (same injectable-default convention
+as `gate.docker_runner`/`proc.orphans`) and, only if the directory is
+still present after the existing `git worktree remove --force` /
+`shutil.rmtree(ignore_errors=True)` attempts, bind-mounts the parent
+directory into a disposable `alpine:3.21` container and `rm -rf`s the one
+entry as root. Best-effort, same posture as the `shutil.rmtree` fallback
+it extends -- a leftover directory is a disk-space problem to flag, never
+a reason to fail task teardown. Verified two ways: a fast unit test with a
+recording fake `docker` script asserting the right mount/argv
+(`test_remove_worktree_invokes_docker_with_the_parent_mount_and_entry_
+name`), and a real, opt-in (`COSMO_GATE_DOCKER_E2E=1`) test that chmods a
+subdirectory to `0o000` (a fast, non-root-requiring stand-in for "the host
+user genuinely cannot delete this") and confirms a *real* disposable
+container actually removes it -- run for real this session, not just
+asserted possible.
+
+**10. `git.worktree.sweep_stale_worktrees` is now called from `run.loop.
+run_queue`**, once per invocation, right after the log-retention call and
+before `run_create` -- the same "no `run_id` needed, closest thing to a
+periodic sweep without a separate cron/timer" placement reasoning as
+`apply_log_retention` right above it. Since a `DONE` task's worktree is
+already removed inline by `git.merge.merge_task` on the normal happy
+path, this mainly recovers two cases spec 3.2 always named but nothing
+ever exercised: a task that crashed mid-attempt (no terminal
+`remove_worktree` call ever happened for it) and a worktree orphaned by a
+killed/restarted process (Phase 9's own systemd-restart-as-fresh-run
+design, decision 5 above). A `BLOCKED` task's worktree is still retained
+for inspection, unchanged. Covered by a new integration test
+(`test_run_queue_sweeps_a_stale_worktree_left_by_a_crashed_prior_process`)
+that seeds an orphan directory under `work_dir` with no matching task at
+all and confirms `run_queue` prunes it before its own first task runs.
+
+### Things that will matter later
 
 **`WatchdogSec` granularity (decision 7) is task-boundary, not
 task-internal.** Tightening it means piggybacking `watchdog.notify` on

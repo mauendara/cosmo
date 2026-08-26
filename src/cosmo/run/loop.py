@@ -29,7 +29,12 @@ from cosmo.events.emitter import EventEmitter
 from cosmo.events.envelope import EventType
 from cosmo.gate.runner import run_validation_gate
 from cosmo.gate.validate import GateRunner
-from cosmo.git.worktree import WorktreeInfo, create_worktree, remove_worktree
+from cosmo.git.worktree import (
+    WorktreeInfo,
+    create_worktree,
+    remove_worktree,
+    sweep_stale_worktrees,
+)
 from cosmo.harness.base import HarnessAdapter, HarnessResult
 from cosmo.retention import apply_log_retention
 from cosmo.run.breaker import CircuitBreaker
@@ -84,6 +89,21 @@ def run_queue(
     # cycle (see docs/handoff.md's Phase 8->9 note), so this is the closest
     # thing to a periodic sweep without a separate cron/timer.
     apply_log_retention(config)
+
+    # Spec 3.2's own "a startup sweep prunes worktrees belonging to
+    # completed runs" -- built in Phase 5 (`git.worktree.sweep_
+    # stale_worktrees`) but never actually called from anywhere until now
+    # (flagged as a real gap in both Phase 8's and Phase 9's own state-doc
+    # sections). Nothing is "running" at process start by definition, so
+    # every worktree currently on disk belongs to a run that already ended
+    # -- a `DONE` task's own worktree is normally removed inline by `git.
+    # merge.merge_task` already, so this mainly recovers a task that
+    # crashed mid-attempt (never reached a terminal `remove_worktree` call
+    # at all) or one left behind by a killed/restarted process (the same
+    # systemd-restart-as-fresh-run scenario the log retention comment
+    # above describes). A `BLOCKED` task's worktree is retained for
+    # inspection (spec 3.2), same as always.
+    sweep_stale_worktrees(repo_path=repo_path, work_dir=config.paths.work_dir, db_path=db_path)
 
     writer.run_create(
         run_id=run_id,

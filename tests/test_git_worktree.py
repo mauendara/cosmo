@@ -10,6 +10,9 @@ may not either.
 
 from __future__ import annotations
 
+import os
+import shutil
+import stat
 import subprocess
 from pathlib import Path
 
@@ -27,6 +30,7 @@ from cosmo.store.enums import BlockedReason
 from cosmo.store.reader import get_task
 
 AUTHOR = ("Test", "test@example.com")
+FAKE_DOCKER = Path(__file__).resolve().parent / "fixtures" / "fake_docker.sh"
 
 
 def _git(repo: Path, *args: str) -> None:
@@ -205,3 +209,77 @@ def test_sweep_on_an_empty_or_missing_work_dir_is_a_noop(tmp_path: Path) -> None
     )
     assert outcome.removed == []
     assert outcome.retained == []
+
+
+def _worktree_with_an_unremovable_subdirectory(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """A `0o000` subdirectory blocks `shutil.rmtree`'s own directory walk
+    (`PermissionError` on `listdir`, swallowed by `ignore_errors=True`) the
+    same way a Docker-gate-container-written root-owned `backend/target/`
+    does to an unprivileged host user -- a real, reproducible stand-in for
+    that failure mode that needs neither root nor a real gate run to set
+    up. Returns (repo, worktree_path, the locked subdirectory) so a test
+    can restore its permissions for cleanup even if the fallback under
+    test doesn't actually remove it (the fake-docker case)."""
+    repo = _repo_on_develop(tmp_path)
+    db_path = tmp_path / "cosmo.db"
+    writer = StoreWriter(db_path)
+    writer.queue_add(task_id="add-foo", spec_path="p", max_attempts=2)
+    emitter = EventEmitter(writer)
+    info = create_worktree(
+        repo_path=repo,
+        work_dir=tmp_path / "work",
+        run_id="run-1",
+        task_id="add-foo",
+        spec_id="add-foo",
+        base_branch="develop",
+        harness="claude",
+        writer=writer,
+        emitter=emitter,
+    )
+    writer.close()
+
+    locked = info.path / "backend" / "target"
+    locked.mkdir(parents=True)
+    (locked / "leftover.class").write_bytes(b"\x00")
+    os.chmod(locked, 0o000)
+    return repo, info.path, locked
+
+
+def test_remove_worktree_invokes_docker_with_the_parent_mount_and_entry_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo, worktree_path, locked = _worktree_with_an_unremovable_subdirectory(tmp_path)
+    log = tmp_path / "docker.log"
+    monkeypatch.setenv("FAKE_DOCKER_LOG", str(log))
+    try:
+        remove_worktree(
+            repo_path=repo,
+            worktree_path=worktree_path,
+            branch="task/add-foo",
+            docker_bin=str(FAKE_DOCKER),
+        )
+        assert worktree_path.exists()  # fake docker never really deletes anything
+        invocation = log.read_text()
+        assert "run" in invocation and "--rm" in invocation
+        assert f"{worktree_path.parent}:/cosmo-cleanup" in invocation
+        assert f"/cosmo-cleanup/{worktree_path.name}" in invocation
+    finally:
+        os.chmod(locked, stat.S_IRWXU)
+
+
+@pytest.mark.skipif(
+    shutil.which("docker") is None or os.environ.get("COSMO_GATE_DOCKER_E2E") != "1",
+    reason="real root-container cleanup against real docker -- opt in with COSMO_GATE_DOCKER_E2E=1",
+)
+def test_remove_worktree_really_deletes_an_unremovable_directory_via_real_docker(
+    tmp_path: Path,
+) -> None:
+    """The real half of the fake-docker test above: an actual disposable
+    container, run as root, really does remove what the unprivileged host
+    user cannot -- the same mechanism (not just the same argv) as the real
+    Phase 6/7 finding this fixes (docs/v3-implementation-state.md)."""
+    repo, worktree_path, _locked = _worktree_with_an_unremovable_subdirectory(tmp_path)
+
+    remove_worktree(repo_path=repo, worktree_path=worktree_path, branch="task/add-foo")
+
+    assert not worktree_path.exists()

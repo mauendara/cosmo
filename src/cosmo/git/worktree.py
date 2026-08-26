@@ -13,6 +13,7 @@ Phase 4's own handoff flagged as a seam.
 
 from __future__ import annotations
 
+import contextlib
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -89,7 +90,12 @@ def create_worktree(
     return WorktreeInfo(task_id=task_id, branch=branch, path=worktree_path)
 
 
-def remove_worktree(*, repo_path: Path, worktree_path: Path, branch: str | None = None) -> None:
+_CLEANUP_IMAGE = "alpine:3.21"
+
+
+def remove_worktree(
+    *, repo_path: Path, worktree_path: Path, branch: str | None = None, docker_bin: str = "docker"
+) -> None:
     """`git worktree remove --force`, then delete the task branch (spec 3.2:
     `DONE` removes the worktree and deletes the branch; pass `branch=None` to
     skip the delete, e.g. when the branch name is unknown at sweep time).
@@ -97,14 +103,50 @@ def remove_worktree(*, repo_path: Path, worktree_path: Path, branch: str | None 
     Falls back to `worktree prune` plus a manual `shutil.rmtree` when git no
     longer recognizes the directory (e.g. it was already partially removed
     by hand) -- a half-corrupted worktree must not be able to jam teardown.
+
+    If the directory is *still* there after both of those (confirmed by
+    hand, twice -- Phase 6 and Phase 7's own state-doc sections: a gate
+    container writes build output, e.g. Maven's `backend/target/`, as root
+    inside the container, which an unprivileged `shutil.rmtree` can never
+    unlink), falls back once more to the same throwaway root container
+    used by hand both times: bind-mount the parent directory and `rm -rf`
+    the one entry, as root, inside a disposable Alpine container. Best-
+    effort like the `shutil.rmtree` fallback above it -- a leftover
+    directory is a disk-space problem to flag, never a reason to fail
+    task teardown outright.
     """
     result = _run_git(repo_path, "worktree", "remove", "--force", str(worktree_path))
     if result.returncode != 0:
         _run_git(repo_path, "worktree", "prune")
         if worktree_path.exists():
             shutil.rmtree(worktree_path, ignore_errors=True)
+    if worktree_path.exists():
+        _force_remove_root_owned(worktree_path, docker_bin=docker_bin)
+        _run_git(repo_path, "worktree", "prune")
     if branch is not None:
         _run_git(repo_path, "branch", "-D", branch)
+
+
+def _force_remove_root_owned(path: Path, *, docker_bin: str) -> None:
+    # No `docker` on PATH, or it hung -- best-effort, same posture as the
+    # `shutil.rmtree(ignore_errors=True)` fallback above.
+    with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+        subprocess.run(
+            [
+                docker_bin,
+                "run",
+                "--rm",
+                "-v",
+                f"{path.parent}:/cosmo-cleanup",
+                _CLEANUP_IMAGE,
+                "rm",
+                "-rf",
+                f"/cosmo-cleanup/{path.name}",
+            ],
+            capture_output=True,
+            timeout=60.0,
+            check=False,
+        )
 
 
 def _worktree_branches(repo_path: Path) -> dict[Path, str]:
