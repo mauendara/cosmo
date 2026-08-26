@@ -1,9 +1,16 @@
 # Handoff — continue at Phase 10
 
-You are picking up Cosmo mid-build. Phases 0-9 are complete. Your job is
-Phase 10: acceptance — a real target repo, 5-10 genuine OpenSpec changes
-with real `depends_on` edges, run unattended overnight under systemd with
-production config, then a post-run review against the spec's own claims.
+You are picking up Cosmo mid-build. **Phases 0-9 are complete, and Phase
+10 is the only phase left in the plan.** That includes two real bugs and
+one observability gap found and fixed *after* Phase 9's own commit, in the
+same session — see `v3-implementation-state.md`'s "Fast-follow, same
+session" subsection under Phase 9 — so nothing was carried forward into
+Phase 10 as leftover implementation work. Your job is Phase 10 itself:
+acceptance — a real target repo, 5-10 genuine OpenSpec changes with real
+`depends_on` edges, run unattended overnight under systemd with production
+config, then a post-run review against the spec's own claims. This is not
+a code-writing phase in the sense 0-9 were; treat any code change it does
+produce as a real finding from the run, not a backlog item to clear first.
 
 ## Read these first, in this order
 
@@ -84,15 +91,24 @@ installing the unit; it documents the exact `Restart=`/
 `RestartPreventExitStatus=` reasoning and how it was verified for real in
 Phase 9 (throwaway `systemctl --user` units, not just read the docs).
 
-**Two real environment gotchas from Phase 6, reconfirmed since** — read
-Phase 6's state-doc section for the full diagnosis before you touch
-anything Docker- or npm-related: **`npm install` can hang indefinitely on
-this host if a previous run was killed mid-install** (fix: verified-clean
-`rm -rf node_modules package-lock.json` first, not waiting longer), and
-**Docker containers write bind-mounted build artifacts as root**, which
-blocks a later unprivileged `rm -rf` — worked around by hand with a
-throwaway `alpine` container. **This is still unfixed** and will bite you
-again if you run any real-Docker test repeatedly.
+**One real environment gotcha from Phase 6 remains, one is now fixed** —
+read Phase 6's state-doc section for the full diagnosis before you touch
+anything Docker- or npm-related. Still true: **`npm install` can hang
+indefinitely on this host if a previous run was killed mid-install** (fix:
+verified-clean `rm -rf node_modules package-lock.json` first, not waiting
+longer). Fixed by the Phase 9 fast-follow: **Docker containers write
+bind-mounted build artifacts as root**, which used to block a later
+unprivileged `rm -rf` and was worked around by hand with a throwaway
+`alpine` container every time — `git.worktree.remove_worktree` now does
+that itself (see the state doc's Phase 9 "Fast-follow" decision 9).
+Re-verified this session by re-running `test_task_fixture_e2e.py` for real
+(`COSMO_GATE_DOCKER_E2E=1`) — the exact test whose teardown threw a real
+`PermissionError` on this in Phase 7 (state doc decision 11) now passes
+clean, no warning, in ~3 minutes. This only covers cleanup that goes
+through `create_worktree`/`remove_worktree` (the real worktree lifecycle,
+which is everything `cosmo run` itself does); an ad-hoc scratch repo you
+build by hand outside that lifecycle for one-off debugging still won't get
+this fallback for free.
 
 One more: **this session's shell may have `XDG_DATA_HOME=/tmp/cosmo-test/data`
 set** (sandboxing `cosmo`'s own runtime state away from the real home

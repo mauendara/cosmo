@@ -12,8 +12,18 @@ rediscover.
 |---|---|
 | Last updated | 2026-08-25 |
 | Working branch | `develop` |
-| Head commit | Phase 8 (`388fb42`) at session start; Phase 9 committed this session |
+| Head commit | `4856fca` — Phase 9 (`26607bf`) plus two same-session fast-follow fixes (`2e76b0c`, `4856fca`) |
 | Spec | [v3-cosmo-autonomous-agent-spec.md](v3-cosmo-autonomous-agent-spec.md) |
+
+**Everything in the plan except Phase 10 is implemented.** Phases 0-9 are
+complete, and the two real, already-diagnosed bugs plus the one
+observability gap found while reviewing Phase 9 against Phase 10's own
+scope (see "Fast-follow, same session" under Phase 9 below) are fixed, not
+carried forward as open items. What remains is Phase 10 itself: a real
+target repo, a real overnight run, and the two genuinely data-driven items
+that can only be resolved by that run (Open Item 2's timeout retuning, and
+confirming or correcting the quota heuristic's guessed config values) --
+not more code to write ahead of it.
 
 ## Phase status
 
@@ -28,8 +38,8 @@ rediscover.
 | 6 — Validation gate | **Complete** |
 | 7 — Task state machine | **Complete** |
 | 8 — Run loop, DAG, circuit breaker, quota | **Complete** |
-| 9 — Observability, logs, deployment | **Complete** |
-| 10 — Acceptance run | Not started |
+| 9 — Observability, logs, deployment | **Complete** (+ 2 fast-follow fixes, same session) |
+| 10 — Acceptance run | **Not started — the only remaining phase** |
 
 ---
 
@@ -1903,7 +1913,15 @@ name`), and a real, opt-in (`COSMO_GATE_DOCKER_E2E=1`) test that chmods a
 subdirectory to `0o000` (a fast, non-root-requiring stand-in for "the host
 user genuinely cannot delete this") and confirms a *real* disposable
 container actually removes it -- run for real this session, not just
-asserted possible.
+asserted possible. Re-confirmed a third way afterward: `test_task_
+fixture_e2e.py` -- the exact opt-in real-Docker test whose own pytest
+teardown threw a genuine `PermissionError` on this in Phase 7 (decision
+11 there) -- was re-run for real (`COSMO_GATE_DOCKER_E2E=1`) after this
+fix landed and now passes clean, no warning, in ~3 minutes. This only
+covers cleanup reached through `create_worktree`/`remove_worktree` (the
+real worktree lifecycle `cosmo run` itself always uses); an ad-hoc
+scratch repo built by hand outside that lifecycle gets no benefit from
+this fix.
 
 **10. `git.worktree.sweep_stale_worktrees` is now called from `run.loop.
 run_queue`**, once per invocation, right after the log-retention call and
