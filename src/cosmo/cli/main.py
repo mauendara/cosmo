@@ -19,11 +19,14 @@ from rich.table import Table
 
 from cosmo import __version__
 from cosmo.bootstrap import (
+    GitIdentity,
     NotAGitRepoError,
     OpenSpecInitError,
     TemplatesRootNotFoundError,
     list_templates,
+    read_configured_identity,
     run_init,
+    set_local_identity,
 )
 from cosmo.checks import CheckResult, CheckStatus
 from cosmo.config import DEFAULTS_PATH, CosmoConfig, load_config, user_config_path
@@ -634,6 +637,17 @@ def init(
         bool,
         typer.Option(help="Overwrite docs/ files already present in the target repo (spec 10.4)."),
     ] = False,
+    git_author_name: Annotated[
+        str | None,
+        typer.Option(
+            "--git-author-name",
+            help="Git identity to configure locally in the target repo, paired with "
+            "--git-author-email. Given together, skips the interactive prompt entirely.",
+        ),
+    ] = None,
+    git_author_email: Annotated[
+        str | None, typer.Option("--git-author-email", help="See --git-author-name.")
+    ] = None,
     config: ConfigOption = None,
 ) -> None:
     """Bootstrap a target repo: openspec/, docs/, .agent/<harness>/, root symlinks (spec 10.4)."""
@@ -692,6 +706,49 @@ def init(
         if result.already_registered
         else f"[green]registered[/green] project {result.project_id}"
     )
+    _ensure_git_identity(result.target, cfg, git_author_name, git_author_email)
+
+
+def _ensure_git_identity(
+    target: Path,
+    cfg: CosmoConfig,
+    override_name: str | None,
+    override_email: str | None,
+) -> None:
+    """Spec 3.4 extended: guarantees the target repo has *some* local git
+    identity before the implementer's own ad hoc commits can rely on one --
+    see `bootstrap.git_identity` for why. Interactive by design (`cosmo
+    init` is a human-run command, unlike the headless harness sessions this
+    identity ultimately serves) -- pass both --git-author-name/
+    --git-author-email to skip the prompt for scripted/CI use.
+    """
+    if override_name and override_email:
+        set_local_identity(target, GitIdentity(name=override_name, email=override_email))
+        console.print(f"git identity: [green]set[/green] {override_name} <{override_email}>")
+        return
+
+    existing = read_configured_identity(target)
+    if existing is None:
+        default = GitIdentity(name=cfg.git.commit_author_name, email=cfg.git.commit_author_email)
+        set_local_identity(target, default)
+        console.print(
+            f"git identity: [green]set[/green] {default.name} <{default.email}> (config default)"
+        )
+        return
+
+    console.print(
+        f"[yellow]this repo already has a git identity configured: "
+        f"{existing.name} <{existing.email}>[/yellow]"
+    )
+    if not typer.confirm(
+        "Define a separate identity for Cosmo to use in this repo instead?", default=False
+    ):
+        console.print("git identity: [dim]left as-is[/dim]")
+        return
+    name = typer.prompt("Git author name")
+    email = typer.prompt("Git author email")
+    set_local_identity(target, GitIdentity(name=name, email=email))
+    console.print(f"git identity: [green]set[/green] {name} <{email}>")
 
 
 @templates_app.command("list")

@@ -194,12 +194,23 @@ def _e2e_stage(
     docker_bin: str,
     db_path: Path | None,
 ) -> tuple[StageResult, list[str], list[str]]:
-    """Spec 1.2's final serial stage. Starts backend and frontend as
-    long-lived containers on a private network (so Playwright reaches them
-    by container hostname, matching how the target repo will actually be
-    deployed -- no reliance on host networking), runs the pinned Playwright
-    image against them, then applies spec 6.4's confirm-by-rerun to any
-    non-quarantined failure before calling it a genuine `code_error`.
+    """Spec 1.2's final serial stage. Starts frontend (and, if the repo has
+    one, backend) as long-lived containers on a private network (so
+    Playwright reaches them by container hostname, matching how the target
+    repo will actually be deployed -- no reliance on host networking), runs
+    the pinned Playwright image against them, then applies spec 6.4's
+    confirm-by-rerun to any non-quarantined failure before calling it a
+    genuine `code_error`.
+
+    A missing `backend_dir` does not skip this stage -- only a missing
+    `frontend_dir` does. A backend-less repo (e.g. a frontend-only template
+    with no server component) still gets real e2e coverage: the backend
+    container, its health check, and `VITE_BACKEND_URL` are all skipped, and
+    Playwright runs against the frontend alone. Skipping e2e outright
+    whenever no backend exists would make it silently always "pass" with no
+    tests run for any backend-less project -- indistinguishable from a repo
+    that genuinely has no e2e suite, which defeats spec 1.2's own guarantee
+    that the gate is the only source of truth about correctness.
 
     Returns `(stage_result, flaky_detected, quarantined_skipped)` -- the two
     lists spec 9.2 requires at the top level of `task.validation_result`,
@@ -208,7 +219,8 @@ def _e2e_stage(
     start = time.monotonic()
     backend_dir = worktree_path / gate.backend_dir
     frontend_dir = worktree_path / gate.frontend_dir
-    if not backend_dir.is_dir() or not frontend_dir.is_dir():
+    has_backend = backend_dir.is_dir()
+    if not frontend_dir.is_dir():
         return (
             StageResult(
                 stage=FailureStage.E2E_TESTS,
@@ -228,41 +240,44 @@ def _e2e_stage(
 
     docker_runner.create_network(network, docker_bin=docker_bin)
     try:
-        docker_runner.run_detached_service(
-            name=backend_name,
-            image=gate.backend_image,
-            workdir_mount=backend_dir,
-            container_workdir=_BACKEND_CONTAINER_DIR,
-            command=["mvn", "-B", "-q", "spring-boot:run"],
-            gate=gate,
-            run_id=run_id,
-            task_id=task_id,
-            network=network,
-            docker_bin=docker_bin,
-            publish_container_port=_BACKEND_PORT,
-        )
-        backend_host_port = docker_runner.published_port(
-            backend_name, _BACKEND_PORT, docker_bin=docker_bin
-        )
-        backend_ready = backend_host_port is not None and docker_runner.wait_for_http(
-            f"http://localhost:{backend_host_port}/api/hello", timeout_seconds=_HEALTH_TIMEOUT
-        )
-        if not backend_ready:
-            return (
-                StageResult(
-                    stage=FailureStage.E2E_TESTS,
-                    passed=False,
-                    duration_seconds=time.monotonic() - start,
-                    counts=None,
-                    error_summary="backend container never became healthy for e2e",
-                    error_detail=docker_runner.service_logs(backend_name, docker_bin=docker_bin)[
-                        -4000:
-                    ],
-                    timed_out=True,
-                ),
-                [],
-                [],
+        frontend_build_env: dict[str, str] = {}
+        if has_backend:
+            docker_runner.run_detached_service(
+                name=backend_name,
+                image=gate.backend_image,
+                workdir_mount=backend_dir,
+                container_workdir=_BACKEND_CONTAINER_DIR,
+                command=["mvn", "-B", "-q", "spring-boot:run"],
+                gate=gate,
+                run_id=run_id,
+                task_id=task_id,
+                network=network,
+                docker_bin=docker_bin,
+                publish_container_port=_BACKEND_PORT,
             )
+            backend_host_port = docker_runner.published_port(
+                backend_name, _BACKEND_PORT, docker_bin=docker_bin
+            )
+            backend_ready = backend_host_port is not None and docker_runner.wait_for_http(
+                f"http://localhost:{backend_host_port}/api/hello", timeout_seconds=_HEALTH_TIMEOUT
+            )
+            if not backend_ready:
+                return (
+                    StageResult(
+                        stage=FailureStage.E2E_TESTS,
+                        passed=False,
+                        duration_seconds=time.monotonic() - start,
+                        counts=None,
+                        error_summary="backend container never became healthy for e2e",
+                        error_detail=docker_runner.service_logs(
+                            backend_name, docker_bin=docker_bin
+                        )[-4000:],
+                        timed_out=True,
+                    ),
+                    [],
+                    [],
+                )
+            frontend_build_env["VITE_BACKEND_URL"] = f"http://{backend_name}:{_BACKEND_PORT}"
 
         build_run = docker_runner.run_container(
             image=gate.frontend_image,
@@ -273,7 +288,7 @@ def _e2e_stage(
             run_id=run_id,
             task_id=task_id,
             docker_bin=docker_bin,
-            extra_env={"VITE_BACKEND_URL": f"http://{backend_name}:{_BACKEND_PORT}"},
+            extra_env=frontend_build_env,
         )
         if build_run.exit_code != 0 or build_run.timed_out:
             return (

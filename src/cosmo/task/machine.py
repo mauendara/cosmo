@@ -782,7 +782,16 @@ def _do_committing(
 
 
 def _git_commit_decisions_log(worktree_path: Path, config: CosmoConfig) -> None:
-    name, email = config.git.commit_author_name, config.git.commit_author_email
+    # unified_identity: no `-c` override, inherit the repo's own local git
+    # config -- same posture as `_do_merging`'s `author` below.
+    identity_flags: list[str] = []
+    if not config.git.unified_identity:
+        identity_flags = [
+            "-c",
+            f"user.name={config.git.commit_author_name}",
+            "-c",
+            f"user.email={config.git.commit_author_email}",
+        ]
     try:
         subprocess.run(
             ["git", "-C", str(worktree_path), "add", "docs/decisions-log.md"],
@@ -796,10 +805,7 @@ def _git_commit_decisions_log(worktree_path: Path, config: CosmoConfig) -> None:
                 "git",
                 "-C",
                 str(worktree_path),
-                "-c",
-                f"user.name={name}",
-                "-c",
-                f"user.email={email}",
+                *identity_flags,
                 "commit",
                 "-m",
                 "cosmo: record decision log entry",
@@ -838,7 +844,11 @@ def _do_merging(
             db_path=config.paths.db_path,
         ).passed
 
-    author = (config.git.commit_author_name, config.git.commit_author_email)
+    author = (
+        None
+        if config.git.unified_identity
+        else (config.git.commit_author_name, config.git.commit_author_email)
+    )
     try:
         merge_result = merge_task(
             repo_path=repo_path,

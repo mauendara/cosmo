@@ -10,6 +10,16 @@ that v4 exists, real `cosmo spec add`/`cosmo spec queue` fan-outs — your
 call, see "A real decision this session left open" below), run unattended
 overnight under systemd, post-run review against the spec's own claims.
 
+**One session of genuine prep happened ahead of Phase 10 itself** (not the
+acceptance run — Phase 10 proper is still not started): a new project
+template (`templates/projects/vite-react-local/`), a real gate bug it
+surfaced and fixed, a project-agnostic guardrail widening, an agent-template
+polish pass, a Claude Code attribution setting, and a `cosmo init` git-identity
+step. None of this is Phase 10 scope creep — read the state doc's "Phase 10
+prep" section (right after "v4 workflow changes — Complete") in full before
+doing anything; it's short, and several of its decisions (especially the git
+identity one) change what "Get oriented" below used to say.
+
 ## Read these first, in this order
 
 | Document | What it is | How to treat it |
@@ -22,6 +32,13 @@ overnight under systemd, post-run review against the spec's own claims.
 `v1-*` and `v2-*` in this folder are earlier spec drafts. v3 is a superset of
 both. Do not implement from them.
 
+Two more files in this folder are historical, already fully consumed —
+don't re-read them looking for open work: [simple-template-handoff.md](simple-template-handoff.md)
+scoped the `vite-react-local` template, now built (see the state doc's
+"Phase 10 prep"); `old-agents-skills/` is the user's pre-Cosmo Claude Code
+skill/agent files, mined once for ideas that fit Cosmo's headless model
+(see the same state-doc section for what was kept vs. discarded).
+
 ## Where things are
 
 ```
@@ -29,17 +46,24 @@ both. Do not implement from them.
 ├── docs/                       # the four documents above
 ├── deploy/                     # Phase 9: cosmo-run.service, README (install notes, WSL2 caveat)
 ├── templates/                  # harness + project templates (source of truth)
-│   └── harness/claude/
-│       ├── skills/spec-enrichment/SKILL.md   # v4: cosmo spec add's own harness call
-│       └── agents/reviewer.md                # v4: REVIEWING's fresh-session reviewer
+│   ├── harness/claude/
+│   │   ├── CLAUDE.md                         # 10 prep: polished, attribution.commit note added
+│   │   ├── settings.json                     # 10 prep: attribution.commit="" -- no Claude co-author trailer
+│   │   ├── agents/{implementer,reviewer}.md  # v4 + 10 prep: reviewer.md gains tools: (no Edit) + technique bullets
+│   │   ├── hooks/test_path_guard.py          # 10 prep: PROTECTED_PATTERNS gains .tsx/.jsx
+│   │   └── skills/spec-enrichment/SKILL.md   # v4 + 10 prep: cosmo spec add's own harness call
+│   └── projects/
+│       ├── _blank/, java-spring-react/       # pre-existing
+│       └── vite-react-local/                 # 10 prep: new -- frontend-only, localStorage, no backend
 ├── src/cosmo/
-│   ├── checks.py, doctor.py, config/, harness/, bootstrap/
+│   ├── checks.py, doctor.py, config/, harness/
+│   ├── bootstrap/git_identity.py # 10 prep: new -- cosmo init's target-repo git identity step
 │   ├── watchdog.py               # Phase 9: sd_notify, hand-rolled, no dependency
 │   ├── retention.py              # Phase 9: paths.log_dir rotation (7d done / 30d blocked)
-│   ├── git/                      # Phase 5: worktree lifecycle, merge ladder -- v4 touched none of this
-│   ├── gate/                     # Phase 6: the Docker validation gate
+│   ├── git/merge.py              # Phase 5: worktree lifecycle, merge ladder -- 10 prep: author: tuple|None
+│   ├── gate/runner.py            # Phase 6: the Docker validation gate -- 10 prep: e2e no longer needs backend_dir
 │   ├── task/                     # Phase 7: the per-task state machine
-│   │   ├── machine.py               # v4: _do_reviewing/_do_finishing added, REVIEWING/FINISHING wired in
+│   │   ├── machine.py               # v4: _do_reviewing/_do_finishing; 10 prep: unified_identity branch
 │   │   └── review.py                # v4: new -- the .cosmo/review-result.json verdict-file contract
 │   ├── spec/                     # v4: new -- *-task.md frontmatter parsing (taskfile.py)
 │   ├── knowledge/                # Phase 7: spec 11's COMMITTING-step guardrails
@@ -51,8 +75,9 @@ both. Do not implement from them.
 │   │   └── enums.py                 # v4: TaskStatus.REVIEWING/FINISHING, FailureStage.ADVERSARIAL_REVIEW
 │   ├── events/                   # envelope + EventEmitter + emit_state_changed
 │   ├── proc/                     # ManagedProcess, WallClockTimer/StallTimer/LivenessTimers, orphan sweep
-│   └── cli/main.py               # `cosmo` command -- v4 added `cosmo spec add`/`cosmo spec queue`
-├── tests/                       # 367 passing + 8 opt-in real-Docker/real-openspec
+│   └── cli/main.py               # `cosmo` command -- v4 added `cosmo spec add`/`cosmo spec queue`;
+│                                    10 prep added the git-identity step to `init`
+├── tests/                       # 387 passing + 8 opt-in real-Docker/real-openspec
 │   └── fixtures/gate_repo/        # real Spring Boot + Vite/React fixture, reusable for your own tests too
 └── check.sh                     # ruff + format + mypy --strict + pytest
 ```
@@ -83,11 +108,21 @@ with the user before assuming an approach, especially since `review.
 enabled=true` by default means every task in the run will hit a real
 reviewer session regardless of which front door queued it.
 
+A ready-made source for the target repo's units of work, if you want one
+that doesn't require inventing scope from scratch: [simple-template-handoff.md](simple-template-handoff.md)'s
+Part 2 lists six small greenfield app ideas (todo list, habit tracker,
+Pomodoro timer, Memory game, Snake/2048, expense tracker), each scoped to a
+small task count and designed to isolate Cosmo's own loop behavior from
+stack complexity. They all target the now-built `vite-react-local` template
+-- `cosmo init <target> --project-template vite-react-local` is real and
+verified this session. Using them isn't mandatory, but they're there if
+useful.
+
 ## Get oriented (2 minutes)
 
 ```bash
 cd /home/dev/delta/cosmo
-git log --oneline           # v4 workflow changes should be committed at HEAD
+git log --oneline           # v4 workflow changes + this session's Phase 10 prep should be at HEAD
 git branch --show-current   # should say develop
 ./check.sh                  # must be green before you change anything
 cosmo doctor                # core checks + harness checks in two tables
@@ -97,13 +132,19 @@ cosmo doctor                # core checks + harness checks in two tables
 prior phase broke, don't chase it): `cosmo doctor` may show `disk space:
 FAIL` — this WSL2 box runs close to the 10 GB floor at the *test* data path
 it checks (`/tmp` is a small tmpfs on this box); the real filesystem has
-hundreds of GB free. This box has no *global* git identity either — only
-this repo's own local config has one — so any test fixture your own work
-adds that calls `git commit` needs `-c user.name=...`/`-c
-user.email=...` passed explicitly. `gitleaks` is on PATH, `docker` works,
-and so is the real `openspec` CLI (confirmed for real this session —
-`openspec new change`/`openspec archive --yes` both work against a scratch
-repo, see the state doc's v4 "Real invocations" subsection).
+hundreds of GB free. This box still has no *global* git identity (only this
+repo's own local config has one), and that's now less of a trap than it
+used to be: `cosmo init` against your real target repo seeds one
+automatically (`bootstrap.git_identity`, "Phase 10 prep" in the state doc —
+`Cosmo <cosmo@entropiainversa.com>` by default, or it'll prompt if the
+target already has an identity). It's still true for a *test fixture* your
+own work adds directly (not through `cosmo init`) — any such fixture that
+calls `git commit` still needs `-c user.name=...`/`-c user.email=...`
+passed explicitly, same as every existing test in this repo does. `gitleaks`
+is on PATH, `docker` works, and so is the real `openspec` CLI (confirmed for
+real this session — `openspec new change`/`openspec archive --yes` both work
+against a scratch repo, see the state doc's v4 "Real invocations"
+subsection).
 
 **This host's WSL2 genuinely has systemd enabled** (`/etc/wsl.conf`'s
 `[boot] systemd=true`, confirmed for real in Phase 9 — `ps -p 1 -o comm=`
@@ -233,7 +274,8 @@ Per the plan's own "Acceptance: unattended overnight run" section:
 2. Update `v3-implementation-state.md`: mark Phase 10 complete, record the
    overnight run's real findings (not a summary of what was *supposed* to
    happen — what actually did), and append any new spec deviation to the
-   cumulative table (next number is 34).
+   cumulative table (next number is 39 — this session's prep work used
+   34-38).
 3. Commit to `develop` with a message explaining *why*, in the style of
    the Phase 0-9/v4 commits.
 4. This is the last phase in the original plan — there is likely no further

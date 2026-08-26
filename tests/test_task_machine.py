@@ -23,7 +23,7 @@ from cosmo.harness.fake import FakeHarnessAdapter, FakeOutcome, ScriptedCall
 from cosmo.store import StoreWriter
 from cosmo.store.enums import FailureStage, FailureType, TaskStatus
 from cosmo.store.reader import get_task, list_events
-from cosmo.task.machine import run_task
+from cosmo.task.machine import _git_commit_decisions_log, run_task
 from cosmo.task.types import TaskContext
 
 NO_USER_CONFIG = Path("/nonexistent/config.toml")
@@ -267,3 +267,54 @@ def test_validating_environment_error_does_not_consume_an_attempt(tmp_path: Path
         assert task.attempt_count == 1
     finally:
         writer.close()
+
+
+def _repo_with_local_identity(tmp_path: Path) -> Path:
+    repo = tmp_path / "decisions-log-repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "--local", "user.name", "Local Dev"],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "--local", "user.email", "local@example.com"],
+        check=True,
+        capture_output=True,
+    )
+    (repo / "docs").mkdir()
+    (repo / "docs" / "decisions-log.md").write_text("# Decisions\n")
+    return repo
+
+
+def _decisions_log_commit_author(repo: Path) -> str:
+    log = subprocess.run(
+        ["git", "-C", str(repo), "log", "-1", "--format=%an <%ae>"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return log.stdout.strip()
+
+
+def test_git_commit_decisions_log_uses_cosmo_identity_by_default(tmp_path: Path) -> None:
+    repo = _repo_with_local_identity(tmp_path)
+    cfg = _fast_config(tmp_path)
+
+    _git_commit_decisions_log(repo, cfg)
+
+    assert (
+        _decisions_log_commit_author(repo)
+        == f"{cfg.git.commit_author_name} <{cfg.git.commit_author_email}>"
+    )
+
+
+def test_git_commit_decisions_log_uses_local_identity_when_unified(tmp_path: Path) -> None:
+    repo = _repo_with_local_identity(tmp_path)
+    cfg = _fast_config(tmp_path)
+    cfg = cfg.model_copy(update={"git": cfg.git.model_copy(update={"unified_identity": True})})
+
+    _git_commit_decisions_log(repo, cfg)
+
+    assert _decisions_log_commit_author(repo) == "Local Dev <local@example.com>"

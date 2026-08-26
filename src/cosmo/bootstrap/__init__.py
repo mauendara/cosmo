@@ -18,6 +18,7 @@ from cosmo.bootstrap.discover import (
     templates_root,
 )
 from cosmo.bootstrap.docs import DocsCopyResult, copy_project_docs
+from cosmo.bootstrap.git_identity import GitIdentity, read_configured_identity, set_local_identity
 from cosmo.bootstrap.hashing import compute_template_version
 from cosmo.bootstrap.init import InitResult, NotAGitRepoError, run_init
 from cosmo.bootstrap.openspec import (
@@ -30,6 +31,7 @@ from cosmo.bootstrap.symlinks import SymlinkResult, create_root_symlinks
 
 __all__ = [
     "DocsCopyResult",
+    "GitIdentity",
     "InitResult",
     "NotAGitRepoError",
     "OpenSpecInitError",
@@ -46,7 +48,9 @@ __all__ = [
     "harness_template_dir",
     "list_templates",
     "project_template_dir",
+    "read_configured_identity",
     "run_init",
+    "set_local_identity",
     "sync_harness_assets",
     "templates_root",
 ]

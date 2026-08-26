@@ -208,12 +208,26 @@ class LogRetentionConfig(_Strict):
 class GitConfig(_Strict):
     base_branch: str = Field(min_length=1)
     # Identity for commits Cosmo creates itself (merge commits, rebase
-    # replays) -- spec 3.4's merge ladder needs one regardless of whether
-    # this host has a global git identity configured (it may not; Phase 5
-    # found this by hand). Passed as `-c user.name=...` per invocation, never
-    # written to global git config.
+    # replays, the COMMITTING step's decisions-log entry) -- spec 3.4's merge
+    # ladder needs one regardless of whether this host has a global git
+    # identity configured (it may not; Phase 5 found this by hand). Passed as
+    # `-c user.name=...`/`-c user.email=...` per invocation, never written to
+    # global git config. Also `cosmo init`'s default for the target repo's
+    # own *local* git config when no identity (local or global) already
+    # exists there -- see `bootstrap.git_identity` -- so the implementer's
+    # own ad hoc commits during IMPLEMENTING never fail for lack of one
+    # either.
     commit_author_name: str = Field(min_length=1)
     commit_author_email: str = Field(min_length=1)
+    # When True, Cosmo's own bookkeeping commits (merge ladder, decisions-log)
+    # are made with no `-c user.name=...`/`-c user.email=...` override at
+    # all, so they inherit whatever git identity is configured locally in the
+    # target repo -- the same one the implementer's own commits already use.
+    # One identity for every commit in the repo, not two. When False
+    # (default), Cosmo's own commits keep using commit_author_name/
+    # commit_author_email as a distinct, visibly synthetic identity, separate
+    # from whoever/whatever authors the actual application-code commits.
+    unified_identity: bool
 
 
 class PathsConfig(_Strict):

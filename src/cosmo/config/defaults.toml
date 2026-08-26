@@ -138,6 +138,13 @@ blocked_days = 30
 # and out of scope. Unrelated to Cosmo's own repo branch.
 base_branch = "develop"
 # Spec 3.4: identity for merge/rebase commits Cosmo creates itself. Not a
-# real person -- these commits are machine-authored integration steps.
+# real person -- these commits are machine-authored integration steps. Also
+# `cosmo init`'s default local git identity for a target repo that has none
+# configured at all yet (see bootstrap.git_identity).
 commit_author_name = "Cosmo"
-commit_author_email = "cosmo@localhost"
+commit_author_email = "cosmo@entropiainversa.com"
+# False: Cosmo's own commits use commit_author_name/email above, distinct
+# from the target repo's own git identity. True: Cosmo's own commits use no
+# explicit identity override at all and inherit the repo's local git config
+# instead -- one identity for every commit, not two.
+unified_identity = false

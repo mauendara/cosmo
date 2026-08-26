@@ -50,12 +50,19 @@ class MergeOutcome:
 
 
 def _git(
-    cwd: Path, *args: str, author: tuple[str, str], timeout: float = 300.0
+    cwd: Path, *args: str, author: tuple[str, str] | None, timeout: float = 300.0
 ) -> subprocess.CompletedProcess[str]:
-    name, email = author
+    # `author=None` means unified_identity: no `-c` override at all, so this
+    # invocation inherits whatever git identity is configured locally in
+    # `cwd` (the same one the implementer's own ad hoc commits already use)
+    # instead of Cosmo's own distinct commit_author_name/email.
+    identity_flags = []
+    if author is not None:
+        name, email = author
+        identity_flags = ["-c", f"user.name={name}", "-c", f"user.email={email}"]
     try:
         return subprocess.run(
-            ["git", "-C", str(cwd), "-c", f"user.name={name}", "-c", f"user.email={email}", *args],
+            ["git", "-C", str(cwd), *identity_flags, *args],
             capture_output=True,
             text=True,
             timeout=timeout,
@@ -65,7 +72,7 @@ def _git(
         raise MergeCommandError(f"could not run git {' '.join(args)}: {exc}") from exc
 
 
-def _assert_ready(repo_path: Path, base_branch: str, author: tuple[str, str]) -> None:
+def _assert_ready(repo_path: Path, base_branch: str, author: tuple[str, str] | None) -> None:
     """Spec 3.4 assumes `repo_path` is sitting cleanly on `base_branch`
     before any of this runs; a violated precondition should fail loudly
     rather than merge into the wrong branch or clobber uncommitted state."""
@@ -87,7 +94,7 @@ def attempt_merge_ladder(
     branch: str,
     base_branch: str,
     gate_rerun: GateRerun,
-    author: tuple[str, str],
+    author: tuple[str, str] | None,
 ) -> MergeOutcome:
     """Pure git mechanics -- no `StoreWriter`/`EventEmitter` here, mirroring
     `proc.orphans.sweep()` (mechanics) vs `proc.reap.cancel_and_reap()` (ties
@@ -147,7 +154,7 @@ def merge_task(
     writer: StoreWriter,
     emitter: EventEmitter,
     gate_rerun: GateRerun,
-    author: tuple[str, str],
+    author: tuple[str, str] | None,
 ) -> MergeResult:
     """Ties `attempt_merge_ladder` to persisted state and events: `DONE`
     removes the worktree and deletes the branch (spec 3.2); `BLOCKED`

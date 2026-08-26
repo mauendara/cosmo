@@ -2,11 +2,20 @@
 """PreToolUse guard: blocks edits under protected test paths (spec 2.5, 6.1
 layer 1). Bypassed only when the task's queue row has `allow_test_edits: true`.
 
-Matched on `Edit`/`Write` via settings.json. Protected patterns (spec 2.5):
+Matched on `Edit`/`Write` via settings.json. Protected patterns (spec 2.5's
+literal list, plus `.tsx`/`.jsx` -- found writing the `vite-react-local`
+project template: a React test file that renders JSX must itself be `.tsx`,
+so `**/*.test.ts` alone leaves every component test in a TS+JSX project
+unprotected. This is a project-agnostic widening, not something specific to
+one template -- any TS/JS + JSX codebase hits the same gap):
   - src/test/**       (repo-root anchored)
   - e2e/**            (repo-root anchored)
   - **/*.spec.ts      (anywhere)
   - **/*.test.ts      (anywhere)
+  - **/*.spec.tsx     (anywhere)
+  - **/*.test.tsx     (anywhere)
+  - **/*.spec.jsx     (anywhere)
+  - **/*.test.jsx     (anywhere)
 """
 
 from __future__ import annotations
@@ -30,7 +39,16 @@ GUARDED_TOOLS = frozenset({"Edit", "Write", "NotebookEdit"})
 # fnmatch's `*` already matches path separators (it has no concept of path
 # segments), so `**` behaves the same as a single `*` here -- sufficient for
 # these four literal patterns without pulling in a globbing library.
-PROTECTED_PATTERNS = ("src/test/**", "e2e/**", "**/*.spec.ts", "**/*.test.ts")
+PROTECTED_PATTERNS = (
+    "src/test/**",
+    "e2e/**",
+    "**/*.spec.ts",
+    "**/*.test.ts",
+    "**/*.spec.tsx",
+    "**/*.test.tsx",
+    "**/*.spec.jsx",
+    "**/*.test.jsx",
+)
 
 
 def _is_protected(rel_path: str) -> str | None:

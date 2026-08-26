@@ -10,9 +10,9 @@ rediscover.
 
 | | |
 |---|---|
-| Last updated | 2026-08-25 |
+| Last updated | 2026-08-26 |
 | Working branch | `develop` |
-| Head commit | `4856fca` — Phase 9 (`26607bf`) plus two same-session fast-follow fixes (`2e76b0c`, `4856fca`) |
+| Head commit | `871092f` plus this session's Phase 10 prep work (template + two small fixes below), uncommitted as of this entry |
 | Spec | [v3-cosmo-autonomous-agent-spec.md](v3-cosmo-autonomous-agent-spec.md) |
 
 **Everything in the plan except Phase 10 is implemented.** Phases 0-9 are
@@ -22,8 +22,12 @@ scope (see "Fast-follow, same session" under Phase 9 below) are fixed, not
 carried forward as open items. What remains is Phase 10 itself: a real
 target repo, a real overnight run, and the two genuinely data-driven items
 that can only be resolved by that run (Open Item 2's timeout retuning, and
-confirming or correcting the quota heuristic's guessed config values) --
-not more code to write ahead of it.
+confirming or correcting the quota heuristic's guessed config values). One
+session of genuine prep happened ahead of it (see "Phase 10 prep" below) --
+a new project template plus two small real bugs it surfaced, in the same
+"check by hand before trusting a green" spirit every prior phase followed --
+but this is not new phase scope, and Phase 10 itself still needs nothing
+more written ahead of the actual overnight run.
 
 ## Phase status
 
@@ -39,7 +43,7 @@ not more code to write ahead of it.
 | 7 — Task state machine | **Complete** |
 | 8 — Run loop, DAG, circuit breaker, quota | **Complete** |
 | 9 — Observability, logs, deployment | **Complete** (+ 2 fast-follow fixes, same session) |
-| 10 — Acceptance run | **Not started — the only remaining phase** |
+| 10 — Acceptance run | **Not started** — prep done ahead of it this session: `vite-react-local` template, gate e2e backend-optional fix, guardrail `.tsx`/`.jsx` widening (see "Phase 10 prep" below) |
 
 ---
 
@@ -2228,6 +2232,133 @@ defaults** -- no real review-call duration data exists yet to size
 
 Kept here so a future spec revision can absorb them in one pass.
 
+## Phase 10 prep — template + two real fixes — Complete
+
+Not one of the plan's numbered phases, and not the acceptance run itself --
+requested ahead of Phase 10 to have a real, deliberately simple target repo
+(and a polished, project-agnostic harness) ready before queuing real work
+into it. See [simple-template-handoff.md](simple-template-handoff.md) for
+the original scoping of the template half. `./check.sh`: 374 tests, 8
+skipped (unchanged real-Docker/real-openspec opt-ins).
+
+A same-session follow-up pulled from `docs/old-agents-skills/` -- three
+Claude Code skill/agent files from the user's pre-Cosmo workflow
+(`old-enrich-skill.md`, `old-adversarial-review-skill.md`,
+`old-frontend-agent.md`), kept around only as source material for this pass,
+not wired into anything. Mapped each to its real Cosmo equivalent and pulled
+over only what still applies there, discarding what's interactive
+(clarifying questions, "ask the user before writing the file back") or
+otherwise contradicts Cosmo's headless posture, and discarding
+`old-frontend-agent.md`'s stack specifics entirely (Mantine/Zustand/
+TanStack/react-router -- a different, unrelated app's stack, not this
+template's). What survived: a concrete "what counts as enriched" checklist
+in `spec-enrichment/SKILL.md`; four concrete adversarial-technique bullets
+plus a risk-calibration line in `reviewer.md` (kept strictly within the
+existing binary approve/reject verdict -- the old skill's severity tiers and
+PASS/PASS WITH GAPS/FAIL verdict don't fit `task.review`'s two-state
+contract, so those were left out); and three small additions to
+`vite-react-local`'s own docs (`vitest-axe` for automated a11y checks, a
+no-premature-memoization rule, "flag over-engineering as readily as
+under-engineering" in the review checklist). Project templates have no
+mechanism to ship their own agent file today (only `docs/` is copied by
+`copy_project_docs`; `sync_harness_assets` copies the harness's `agents/`
+wholesale, independent of project template) -- inventing one to host a
+literal `frontend-developer` subagent would have been new scope nobody
+asked for, so the frontend agent's substance went into docs instead, not a
+new agent file.
+
+A second same-session follow-up: `templates/harness/claude/settings.json`
+now sets `"attribution": {"commit": ""}`, so the harness's own commits carry
+no `Co-Authored-By: Claude` trailer. `attribution.commit` (an empty string
+hides it) is the current key; the deprecated `includeCoAuthoredBy` boolean
+still works but is documented as superseded. Confirmed against the actual
+installed `claude` binary's embedded JSON-schema strings (`strings` on
+`~/.local/share/claude/versions/2.1.207`), not just the docs site, after an
+initial doc-site answer suggested the wrong sentinel value (`"hide"` instead
+of `""`) -- verified for real rather than trusted on the first answer, same
+discipline this project has followed since Phase 0. Verified end-to-end via
+a real `cosmo init` that the synced `.agent/claude/settings.json` in a
+scratch target repo carries the key.
+
+A third same-session follow-up, prompted by "where/when is the git author
+name/email configured, and could `cosmo init` do this": it could, and now
+does. Worktree creation (Phase 5) never sets a local git identity, and a
+fresh host with no global `~/.gitconfig` (the same gotcha behind deviation
+11) would make the *implementer's* own ad hoc `git commit` during
+IMPLEMENTING fail outright, since none of Cosmo's own `-c user.name=...`
+machinery covers a commit the harness session writes itself. `cosmo init`
+now has a new step (`bootstrap.git_identity`, called from `cli.main.init`
+after the existing steps succeed): if the target repo already has an
+effective git identity (local or global -- `git config --get` resolves
+that same order on its own), warn and ask whether to define a separate one
+for Cosmo to use here, prompting for name/email only if the user says yes;
+if none exists at all, silently seed the target repo's *local* git config
+from `config.git.commit_author_name`/`commit_author_email`, no prompt
+needed since nothing conflicts. `--git-author-name`/`--git-author-email`
+skip the interactive path entirely for scripted use. `GitConfig.
+commit_author_email`'s default also changed from the placeholder
+`cosmo@localhost` to `cosmo@entropiainversa.com` per this session's
+direction. New `GitConfig.unified_identity` (default `False`) toggles
+whether Cosmo's own bookkeeping commits (merge ladder, decisions-log) keep
+using `commit_author_name`/`commit_author_email` as a distinct synthetic
+identity (default) or drop their `-c user.name=...`/`-c user.email=...`
+override entirely and inherit whatever's configured locally -- the same
+identity the implementer's own commits already use, i.e. one identity for
+every commit in the repo instead of two.
+
+### What exists
+
+| Path | Contents |
+|---|---|
+| `templates/projects/vite-react-local/docs/` | New project template: frontend-only Vite+React+TS+Tailwind, `localStorage` persistence, no backend, no Docker for the app itself. 7 files: `frontend/architecture.md`, `frontend/state-management.md`, `frontend/styling.md`, `persistence.md`, `data-model.md`, `testing.md`, `base-standards.md` |
+| `src/cosmo/gate/runner.py` (`_e2e_stage`) | Fixed: a missing `backend_dir` no longer skips the e2e stage outright -- only a missing `frontend_dir` does. See deviation 34 |
+| `templates/harness/claude/hooks/test_path_guard.py` | `PROTECTED_PATTERNS` widened: `**/*.spec.tsx`, `**/*.test.tsx`, `**/*.spec.jsx`, `**/*.test.jsx` added alongside the existing `.ts` patterns. See deviation 35 |
+| `templates/harness/claude/agents/reviewer.md` | `tools: Read, Grep, Glob, Bash, Write` added to the frontmatter (no `Edit`) -- makes "the reviewer does not fix what it's reviewing" structural, not just an instruction, wherever this subagent definition is actually honored |
+| `templates/harness/claude/CLAUDE.md` | Guardrail table row updated for the widened test-path patterns; the "Project knowledge" section's `docs/` file list reworded from a fixed enumeration (`docs/backend/`, `docs/frontend/`, ...) to "varies by template, skim what's actually there" -- it was quietly describing `java-spring-react`'s own shape, which the new frontend-only template breaks |
+| `tests/test_gate_runner_e2e_backend_optional.py` | New -- exercises `_e2e_stage` directly against `fake_gate_docker.sh` plus a real local `http.server` standing in for the container health check (`wait_for_http` makes a real HTTP call regardless of what `docker` binary is configured), covering: frontend-only runs e2e for real, a repo with both dirs still starts backend as before, a repo with no `frontend/` still skips entirely |
+| `tests/test_hooks_test_path_guard.py` | New case: a `.test.tsx` write is denied |
+| `src/cosmo/bootstrap/git_identity.py` | New -- `GitIdentity`, `read_configured_identity`, `set_local_identity`: pure subprocess mechanics against a target repo's own local git config |
+| `src/cosmo/cli/main.py` (`init`, `_ensure_git_identity`) | New `--git-author-name`/`--git-author-email` options; the warn/confirm/prompt flow, run after `run_init` succeeds |
+| `src/cosmo/config/model.py`, `defaults.toml` | `GitConfig.unified_identity` (bool, default `False`); `commit_author_email` default changed to `cosmo@entropiainversa.com` |
+| `src/cosmo/git/merge.py` | `author: tuple[str, str] \| None` throughout (`_git`/`_assert_ready`/`attempt_merge_ladder`/`merge_task`) -- `None` omits the `-c user.name=...`/`-c user.email=...` override entirely |
+| `src/cosmo/task/machine.py` | `_do_merging` and `_git_commit_decisions_log` both branch on `config.git.unified_identity` to decide `None` vs. the explicit tuple |
+| `tests/test_bootstrap_git_identity.py`, `tests/test_cli_init.py`, `tests/test_git_merge.py`, `tests/test_task_machine.py` | New/extended coverage for all of the above, including the pre-existing `test_rerunning_init_...` test which now needs `input="n\n"` since a second `cosmo init` against the same repo hits the new prompt |
+
+### Decisions made during this work
+
+**The gate's e2e stage silently no-op'd for every backend-less repo -- found
+writing this template, not by running anything overnight.** `_build_stage`/
+`_unit_stage` already handled a missing `backend_dir` or `frontend_dir`
+independently (each side checked and run separately), but `_e2e_stage`
+required *both* to exist or returned `passed: true` with no tests run at
+all. A frontend-only project's Playwright suite would never have executed
+through the gate -- indistinguishable from a project with no e2e suite,
+which defeats spec 1.2's own "the gate is the only source of truth"
+guarantee this whole harness is built around (see `CLAUDE.md`'s "one rule
+that matters most"). Confirmed the user wanted this fixed now rather than
+left as a documented limitation, since shipping `testing.md`'s "Playwright
+is gate-enforced" claim while knowing it was false for this exact template
+was worse than the smaller, well-scoped fix. Fixed by making only
+`frontend_dir` the skip condition; the backend container, its health check,
+and `VITE_BACKEND_URL` are all conditional on `backend_dir` existing.
+Verified via the fake-docker + real-local-`http.server` technique already
+established in `test_gate_docker_runner.py`'s
+`test_wait_for_http_succeeds_against_a_real_local_server`, not a real Docker
+run (no fixture Vite/React repo without a backend existed to run one
+against; the real-Docker opt-in fixture repo remains the Java+Spring one).
+
+**The test-path guard's literal `.spec.ts`/`.test.ts` patterns (spec 2.5's
+own wording) leave every React component test unprotected in a TS+JSX
+codebase.** A test file that renders JSX must itself be `.tsx`, not `.ts` --
+`Widget.test.tsx` next to `Widget.tsx` is the normal React Testing Library
+shape, and none of spec 2.5's four literal patterns match it. This is a
+project-agnostic gap (any TypeScript+JSX project hits it, not only this
+template), which is why it's a hook fix rather than something worked around
+in the new template's own docs. Widened `PROTECTED_PATTERNS` to also cover
+`.tsx`/`.jsx` spec/test variants; `annotation_guard.py`'s skip-annotation
+patterns needed no change (they match on content, not file path, so they
+already applied inside a `.tsx` file same as any other).
+
 | # | Deviation | Spec ref | Phase | Rationale |
 |---|---|---|---|---|
 | 1 | `preflight()` added to the adapter interface | §2.2 | 0 | Adapters must declare their own preconditions; core cannot know them |
@@ -2263,3 +2394,8 @@ Kept here so a future spec revision can absorb them in one pass.
 | 31 | A rejected review and an unusable review call are bounded by two independent budgets (`attempt_count`/`will_retry` vs. a shared `validating_env_retries`), not one budget as the plan's one-line summary implied | v4 plan's `REVIEWING` section | v4 | Only a rejection is a genuine code-level judgment; a crash/timeout/malformed-verdict call is `environment_error`, which this module's own established discipline never lets consume the code-level retry budget |
 | 32 | `TimeoutConfig.reviewing_wall` added (`config.timeouts`, default 900s) | v4 plan's `REVIEWING` section (not named there) | v4 | Every other harness-invoking state already has a wall clock (`config over constants`); `adapter.review()` was otherwise the one unbounded harness call in the whole state machine |
 | 33 | `EventType.TASK_FINISHING_FAILED` added, not in spec 9.2's own enumerated list (predates `FINISHING`) | v4 plan's `FINISHING` section | v4 | `_do_finishing`'s best-effort archive failure needs a real, queryable warning event distinct from `task.blocked`/`task.failed` (FINISHING never blocks) |
+| 34 | `_e2e_stage` only skips e2e when `frontend_dir` is missing; a missing `backend_dir` now runs a frontend-only e2e path instead of skipping the whole stage | §1.2, §6.1 | 10 prep | A backend-less repo's e2e suite used to never run through the gate at all (`passed: true`, no tests) -- indistinguishable from having no e2e suite, found writing `vite-react-local`'s `testing.md` |
+| 35 | `test_path_guard.py`'s `PROTECTED_PATTERNS` gains `**/*.spec.tsx`, `**/*.test.tsx`, `**/*.spec.jsx`, `**/*.test.jsx` beyond spec 2.5's literal `.ts`-only list | §2.5 | 10 prep | Spec 2.5's literal patterns leave every React component test (`.test.tsx`) unprotected in any TS+JSX project, not only this one -- found writing `vite-react-local`'s `testing.md` |
+| 36 | `cosmo init` gains a git-identity step (`bootstrap.git_identity`, `cli.main._ensure_git_identity`): warns and asks before replacing an existing target-repo git identity, seeds `config.git.commit_author_name`/`commit_author_email` when none exists, `--git-author-name`/`--git-author-email` for scripted use | §3.4, §10.4 | 10 prep | Neither worktree creation (Phase 5) nor `cosmo init` (Phase 4) ever gave the implementer's own ad hoc commits a guaranteed identity; a fresh host with no global `~/.gitconfig` would make the first IMPLEMENTING commit fail outright |
+| 37 | `GitConfig.unified_identity` added (bool, default `False`) | §3.4 | 10 prep | User direction: support both "Cosmo's own bookkeeping commits use a distinct synthetic identity" (default) and "every commit in the repo uses one identity" as an explicit, durable config choice, not a one-off |
+| 38 | `git.merge`'s `author` parameter widened to `tuple[str, str] \| None` (`_git`, `_assert_ready`, `attempt_merge_ladder`, `merge_task`) | §3.4 | 10 prep | Mechanical requirement of deviation 37: `None` is how `unified_identity=True` tells `_git` to omit the `-c` override and inherit the repo's local git config instead |

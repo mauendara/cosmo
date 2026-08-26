@@ -97,6 +97,18 @@ def test_write_matching_spec_ts_anywhere_is_denied() -> None:
     assert decision["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
+def test_write_matching_test_tsx_anywhere_is_denied() -> None:
+    result = _run(
+        {
+            "tool_name": "Write",
+            "cwd": "/repo",
+            "tool_input": {"file_path": "/repo/src/components/Widget.test.tsx", "content": "x"},
+        }
+    )
+    decision = json.loads(result.stdout)
+    assert decision["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
 def test_e2e_path_is_denied() -> None:
     result = _run(
         {

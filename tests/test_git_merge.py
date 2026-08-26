@@ -27,6 +27,7 @@ import pytest
 
 from cosmo.events import EventEmitter
 from cosmo.git.merge import MergeCommandError, attempt_merge_ladder, merge_task
+from cosmo.git.merge import _git as _merge_git
 from cosmo.git.worktree import create_worktree
 from cosmo.store import StoreWriter
 from cosmo.store.enums import BlockedReason
@@ -287,6 +288,62 @@ def test_a_clean_merge_needs_no_rebase(tmp_path: Path) -> None:
     assert task_row.status == "done"
     assert task_row.worktree_path is None
     writer.close()
+
+
+def _repo_with_local_identity(tmp_path: Path, name: str, email: str) -> Path:
+    repo = tmp_path / "identity-repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "--local", "user.name", name],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "--local", "user.email", email],
+        check=True,
+        capture_output=True,
+    )
+    return repo
+
+
+def _commit_author(repo: Path) -> str:
+    log = subprocess.run(
+        ["git", "-C", str(repo), "log", "-1", "--format=%an <%ae>"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return log.stdout.strip()
+
+
+def test_author_none_inherits_the_repo_s_own_local_git_identity(tmp_path: Path) -> None:
+    """unified_identity (config.git.unified_identity=True, `task/machine.py`):
+    `author=None` must pass no `-c user.name=...`/`-c user.email=...`
+    override at all -- the resulting commit is authored by whatever git
+    resolves locally in that repo, not a `-c`-forced identity."""
+    repo = _repo_with_local_identity(tmp_path, "Local Dev", "local@example.com")
+
+    result = _merge_git(repo, "commit", "--allow-empty", "-m", "unified commit", author=None)
+
+    assert result.returncode == 0
+    assert _commit_author(repo) == "Local Dev <local@example.com>"
+
+
+def test_author_tuple_overrides_the_repo_s_local_identity(tmp_path: Path) -> None:
+    repo = _repo_with_local_identity(tmp_path, "Local Dev", "local@example.com")
+
+    result = _merge_git(
+        repo,
+        "commit",
+        "--allow-empty",
+        "-m",
+        "explicit commit",
+        author=("Cosmo Bot", "cosmo-bot@example.com"),
+    )
+
+    assert result.returncode == 0
+    assert _commit_author(repo) == "Cosmo Bot <cosmo-bot@example.com>"
 
 
 def test_precondition_violation_raises_rather_than_merging_the_wrong_state(

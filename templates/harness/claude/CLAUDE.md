@@ -51,7 +51,7 @@ will be silently discarded on the next sync):
 
 | Action | What happens | Why |
 |---|---|---|
-| Editing a file under `src/test/**`, `e2e/**`, or matching `**/*.spec.ts` / `**/*.test.ts` | Denied, unless this task was explicitly flagged `allow_test_edits` | The tests are the thing being measured. If a task genuinely requires touching tests, that should already be reflected in how the task was queued -- it is not something to work around from inside a session. |
+| Editing a file under `src/test/**`, `e2e/**`, or matching `**/*.spec.ts(x)` / `**/*.test.ts(x)` / `**/*.spec.jsx` / `**/*.test.jsx` | Denied, unless this task was explicitly flagged `allow_test_edits` | The tests are the thing being measured. If a task genuinely requires touching tests, that should already be reflected in how the task was queued -- it is not something to work around from inside a session. |
 | Introducing `@Disabled`, `@Ignore`, `test.skip`, `it.skip`, `describe.skip`, or `xit(...)` anywhere | Denied | Disabling a test to make a suite pass is the same failure mode as deleting it. If a test is failing, fix the code or fix the test's assertions -- don't silence it. |
 | `git commit --no-verify` | Denied | Bypasses local pre-commit secret scanning. |
 | `git push` (any form, including force variants) | Denied | Pushing is Cosmo's job, run after the validation gate passes, not yours. |
@@ -70,13 +70,25 @@ decides what happens next, not a workaround from inside this session.
 Committing itself (without `--no-verify`) is allowed and expected as part of
 finishing implementation work -- write a normal commit describing the change.
 Do not push. Do not merge. Cosmo owns both after the validation gate passes.
+Commits carry no `Co-Authored-By: Claude` trailer (`.claude/settings.json`
+sets `attribution.commit` to an empty string) -- an unattended loop writing
+every commit itself has no separate human co-author to credit, and Cosmo's
+own deterministic commits (the `COMMITTING` step's decisions-log entry,
+merge/rebase commits, spec 3.4) already carry no such trailer either. This
+is not something to work around by adding the trailer back by hand.
 
 ## Project knowledge
 
 `docs/` in this repository holds architecture and decision notes that are
-project-specific and persist across every task (see `docs/backend/`,
-`docs/frontend/`, `docs/data-model.md`, `docs/base-standards.md`,
-`docs/decisions-log.md` if present). If a task you complete establishes a
+project-specific and persist across every task. Its exact shape depends on
+the project template this repo was initialized from -- a backend-and-frontend
+stack has `docs/backend/` and `docs/frontend/`, a frontend-only one may only
+have `docs/frontend/` and a top-level `docs/persistence.md`, and so on. Skim
+whatever `docs/` actually contains before your first edit rather than
+assuming a fixed set of files; `docs/base-standards.md` and
+`docs/data-model.md` are the two names common across templates,
+`docs/decisions-log.md` exists only if a prior task already created one. If
+a task you complete establishes a
 constraint or decision future tasks need to know about, append 2-3 lines to
 the relevant file -- and if it contradicts something already written there,
 revise that line rather than stacking a contradiction beneath it. These files
