@@ -182,6 +182,15 @@ class DiskConfig(_Strict):
     min_free_gb: float = Field(gt=0.0)
 
 
+class LogRetentionConfig(_Strict):
+    """Spec 9.5: per-task `raw_log_path` rotation, keyed off the task's
+    terminal status -- a `DONE` task's harness logs are worth less, for
+    less time, than a `BLOCKED` one's (still under investigation)."""
+
+    done_days: int = Field(gt=0)
+    blocked_days: int = Field(gt=0)
+
+
 class GitConfig(_Strict):
     base_branch: str = Field(min_length=1)
     # Identity for commits Cosmo creates itself (merge commits, rebase
@@ -221,5 +230,6 @@ class CosmoConfig(_Strict):
     progress: ProgressConfig
     quota: QuotaConfig
     disk: DiskConfig
+    log_retention: LogRetentionConfig
     git: GitConfig
     paths: PathsConfig

@@ -24,12 +24,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from cosmo.config.model import CosmoConfig
+from cosmo.doctor import check_disk
 from cosmo.events.emitter import EventEmitter
 from cosmo.events.envelope import EventType
 from cosmo.gate.runner import run_validation_gate
 from cosmo.gate.validate import GateRunner
 from cosmo.git.worktree import WorktreeInfo, create_worktree, remove_worktree
 from cosmo.harness.base import HarnessAdapter, HarnessResult
+from cosmo.retention import apply_log_retention
 from cosmo.run.breaker import CircuitBreaker
 from cosmo.run.cost import check_run_cost, task_cost_ceiling_reached
 from cosmo.run.dag import DagCycleError, resolve_execution_order
@@ -48,6 +50,7 @@ from cosmo.store.reader import (
 from cosmo.store.writer import StoreWriter
 from cosmo.task.machine import run_task
 from cosmo.task.types import RunGuardAction, TaskContext
+from cosmo.watchdog import notify as watchdog_notify
 
 _NEAR_CAP_FRACTION = 0.8  # spec 11's cap enforcement is exact; this is a softer heads-up.
 
@@ -73,6 +76,14 @@ def run_queue(
     the 5-hour auto-resume path never actually sleeps for real."""
     db_path = config.paths.db_path
     run_id = uuid.uuid4().hex
+
+    # Spec 9.5, best-effort and run-id-independent -- prunes old
+    # `raw_log_path` files under `paths.log_dir` before this run even
+    # starts. Placed ahead of `run_create` deliberately: a systemd-managed
+    # loop (Phase 9) restarts `cosmo run` as a fresh process on every
+    # cycle (see docs/handoff.md's Phase 8->9 note), so this is the closest
+    # thing to a periodic sweep without a separate cron/timer.
+    apply_log_retention(config)
 
     writer.run_create(
         run_id=run_id,
@@ -106,8 +117,31 @@ def run_queue(
 
     final_status = RunStatus.RUNNING
     stop_reason: StopReason | None = None
+    disk_checked = False
 
     while True:
+        watchdog_notify(watchdog=True)
+
+        if not disk_checked:
+            # Spec 9.5: "a full disk fails every subsequent task in a way
+            # that reads as a code error" -- checked once, here rather than
+            # before `run_create` above, so the abort itself is a real,
+            # queryable `run.stopped`/`stop_reason=disk_low` row (spec 3.1's
+            # own "abort the run" framing), the same posture the DAG-cycle
+            # case below already takes for its own startup-time abort.
+            disk_checked = True
+            disk_check = check_disk(config)
+            if disk_check.blocking:
+                emitter.emit(
+                    event_type=EventType.RUN_STOPPED,
+                    severity=Severity.CRITICAL,
+                    run_id=run_id,
+                    payload={"reason": StopReason.DISK_LOW.value, "detail": disk_check.detail},
+                )
+                final_status, stop_reason = RunStatus.STOPPED, StopReason.DISK_LOW
+                break
+            watchdog_notify(ready=True)
+
         if monotonic() >= deadline_monotonic:
             final_status, stop_reason = RunStatus.STOPPED, StopReason.MAX_TIME
             break
@@ -210,6 +244,7 @@ def run_queue(
             )
             if pause_reason is not None:
                 writer.run_transition(run_id, RunStatus.PAUSED, pause_reason=pause_reason)
+                watchdog_notify(watchdog=True, status=f"paused: {pause_reason.value}")
                 emitter.emit(
                     event_type=EventType.RUN_PAUSED,
                     severity=Severity.WARNING,
@@ -260,6 +295,9 @@ def run_queue(
         # above -- a breaker trip requires manual intervention (spec 6.5),
         # so this loop simply ends rather than transitioning further.
         writer.run_transition(run_id, final_status, stop_reason=stop_reason)
+        watchdog_notify(
+            watchdog=True, status=f"stopped: {stop_reason.value if stop_reason else 'unknown'}"
+        )
         emitter.emit(
             event_type=EventType.RUN_STOPPED,
             severity=Severity.INFO,
@@ -319,6 +357,10 @@ def _handle_quota_pause_or_stop(
         return decision.stop_reason
 
     writer.run_transition(run_id, RunStatus.PAUSED, pause_reason=decision.pause_reason)
+    watchdog_notify(
+        watchdog=True,
+        status=f"paused: {decision.pause_reason.value if decision.pause_reason else 'quota'}",
+    )
     emitter.emit(
         event_type=EventType.RUN_PAUSED,
         severity=Severity.WARNING,
@@ -331,6 +373,7 @@ def _handle_quota_pause_or_stop(
     )
     sleep(decision.resume_delay_seconds)
     writer.run_transition(run_id, RunStatus.RUNNING)
+    watchdog_notify(watchdog=True, status="running")
     emitter.emit(
         event_type=EventType.RUN_RESUMED, severity=Severity.INFO, run_id=run_id, payload={}
     )

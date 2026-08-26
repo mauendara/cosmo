@@ -12,7 +12,7 @@ rediscover.
 |---|---|
 | Last updated | 2026-08-25 |
 | Working branch | `develop` |
-| Head commit | `3d472a9` — Phase 7 (Phase 8 not yet committed) |
+| Head commit | Phase 8 (`388fb42`) at session start; Phase 9 committed this session |
 | Spec | [v3-cosmo-autonomous-agent-spec.md](v3-cosmo-autonomous-agent-spec.md) |
 
 ## Phase status
@@ -28,7 +28,7 @@ rediscover.
 | 6 — Validation gate | **Complete** |
 | 7 — Task state machine | **Complete** |
 | 8 — Run loop, DAG, circuit breaker, quota | **Complete** |
-| 9 — Observability, logs, deployment | Not started |
+| 9 — Observability, logs, deployment | **Complete** |
 | 10 — Acceptance run | Not started |
 
 ---
@@ -1696,6 +1696,204 @@ multi-project run would need either a schema column or a per-task
 resolution step neither this phase nor Phase 7 built. Decided and
 documented per the handoff's own request: v1 assumes one project per run.
 
+## Phase 9 — Complete
+
+All exit criteria met, two of the three verified by a real invocation (the
+third is genuinely untestable in this environment -- see below), not just
+unit-test green. `./check.sh`: 334 tests, 7 skipped (unchanged real-Docker
+opt-ins), ~22s.
+
+### What exists
+
+| Path | Contents |
+|---|---|
+| `src/cosmo/watchdog.py` | `notify()` -- the `sd_notify` `AF_UNIX SOCK_DGRAM` protocol by hand, no dependency. Silent no-op unless `$NOTIFY_SOCKET` is set |
+| `src/cosmo/retention.py` | `apply_log_retention` -- prunes `paths.log_dir/harness/<task_id>/*.ndjson` by the task's *current* status (`done`/`blocked`) and `config.log_retention` |
+| `src/cosmo/run/loop.py` | Gains: a one-shot pre-loop disk check (`doctor.check_disk`, aborts with `stop_reason=disk_low` at `severity=critical`), `apply_log_retention` called once before `run_create`, and `watchdog.notify` calls at every run-level transition plus once per DAG loop iteration |
+| `src/cosmo/config/model.py`, `defaults.toml` | New `LogRetentionConfig`/`[log_retention]` (`done_days=7`, `blocked_days=30`) |
+| `src/cosmo/store/enums.py` | `StopReason.DISK_LOW` |
+| `src/cosmo/store/migrations.py` | Migration 3: `run_state.stop_reason` CHECK constraint gains `'disk_low'` (recreate-copy-swap, same recipe as migration 2) |
+| `src/cosmo/store/reader.py` | `latest_run_id` -- `cosmo report`'s default-run lookup |
+| `src/cosmo/cli/main.py` | `cosmo report [--run <id>]` -- renders a `run_state` row plus its `run.summary` event payload |
+| `deploy/cosmo-run.service`, `deploy/README.md` | The systemd unit (new territory, no existing home) plus install/rationale notes |
+| `tests/test_watchdog.py`, `test_retention.py`, `test_run_disk_check.py` | New, real-socket / real-filesystem-mtime unit tests for the three new modules |
+| `tests/test_store_migrations.py`, `test_cli_report.py` | Migration 3 round-trip test; `cosmo report` CLI glue tests |
+| `tests/test_run_loop.py` | `_fast_config` now overrides `disk.min_free_gb` down to near-zero -- see decision 1 |
+
+### Decisions made during Phase 9
+
+**1. The pre-run disk check is real, not injectable, and every `run_queue`
+test needed a config override because of it.** Wiring `doctor.check_disk`
+straight into `run.loop.run_queue` (rather than adding yet another
+injectable callable, which every previous phase's own "extend, don't
+reimplement" discipline argued against for something this simple) means it
+calls real `shutil.disk_usage` against wherever a test's `tmp_path`
+actually lives. This host's own `/tmp` is a small tmpfs close to the spec
+default 10 GB floor (`docs/handoff.md`'s own pre-existing "known
+environment noise" note about `cosmo doctor`) -- every `test_run_loop.py`
+test started failing with `disk_low` the moment the check went in, not
+because of a bug but because the check was doing exactly its job against a
+genuinely low-space host. Fixed by having `_fast_config` override
+`disk.min_free_gb` to `0.001` (tests isolate from real environment state,
+same discipline `retries.delay_min`/`delay_max` already gets); the check's
+own real-abort mechanics get a dedicated test instead
+(`test_run_disk_check.py`, which deliberately sets the floor to an
+unsatisfiable 1 billion GB rather than trying to simulate a full disk).
+
+**2. The disk check runs once, on the first iteration of the main loop, not
+before `run_create`/the `RUNNING` transition.** Considered checking before
+`run_create` so a failed run never even gets an `idle`→`running` row, but
+that would mean the abort has no queryable `run.stopped` row to explain
+itself (spec 3.1's own "a run's outcome should be a real state" framing,
+already followed by the DAG-cycle-at-startup case this mirrors). Checking
+inside the loop, gated by a one-shot `disk_checked` flag, keeps the abort a
+first-class `RunOutcome`/`run_state` row -- same "abort, but leave a
+record" posture used for the DAG-cycle-at-startup abort right below it in
+the same loop.
+
+**3. `apply_log_retention` runs once at the very top of `run_queue`, before
+`run_create`, keyed off `run_id`-independent state.** It doesn't need a
+`run_id` at all -- it walks `paths.log_dir/harness/<task_id>/` by task_id,
+looks up each task's *current* store status, and deletes what's aged out.
+Placed ahead of the disk check deliberately (pruning stale logs is itself a
+disk-space action) and ahead of `run_create` since a systemd-managed loop
+(Phase 9's own unit) restarts `cosmo run` as a fresh process on every
+cycle -- see decision 5 below -- making "prune once per `cosmo run`
+invocation" the closest thing to a periodic sweep without a separate cron
+or `systemd.timer`.
+
+**4. Playwright trace/screenshot retention (spec 9.5's other bullet) needed
+no new code at all -- verified by reading, not guessed.** `gate.parsers.
+parse_playwright_json` only ever appends to `StageResult.artifact_paths`
+from a *failed* test's own attachments (the `else` branch of its per-test
+walk); a task that reaches `DONE` has zero genuine failures on its final
+gate run and therefore an empty `artifact_paths` by construction --
+"retained only for failing runs" already holds without a dedicated pruning
+pass. These artifacts also live inside the task's *worktree*
+(`frontend_dir/playwright-report/...`), not `paths.log_dir`, so they were
+never this module's territory regardless; worktree lifecycle is `git.
+worktree`'s. Recorded here so a future session doesn't rebuild this by
+mistake. Separately (unchanged from Phase 8, restated as a still-open
+item below): `git.worktree.sweep_stale_worktrees` -- the mechanism that
+would actually *remove* a `DONE` task's worktree, and thus its now-empty
+`artifact_paths` directory, off disk -- is still never called from
+anywhere.
+
+**5. `deploy/cosmo-run.service` uses `Restart=on-failure` +
+`RestartPreventExitStatus=1`, not a bare `Restart=always`.** `cosmo run`'s
+own exit code is `0` only for `queue_empty`/`completed`; every other stop
+(`PAUSED` for the breaker/a confirmed quota exhaustion -- spec 6.5's own
+"resuming requires manual intervention" -- or `STOPPED` for a cost
+ceiling/disk abort/startup DAG cycle) exits `1`, and none of those are
+fixed by an immediate blind restart (`run_cost`/task-cost ceilings would
+just be re-hit instantly since a new `run_id` resets `run_cost` to zero --
+Phase 8 decision 10). `RestartPreventExitStatus=1` excludes exactly that
+clean-exit-1 case from auto-restart. A genuinely wedged process, by
+contrast, never reaches `sys.exit` -- systemd's own `WatchdogSec` kill is a
+*signal* (`SIGABRT`), not an exit status, so it is unaffected by the
+exclusion and still triggers `Restart=on-failure`. **Both halves verified
+for real this session**, not just reasoned about: a throwaway `systemctl
+--user` unit driving `cosmo.watchdog.notify` directly showed (a) `READY=1`
+recognized (`Started ...service`), (b) `WATCHDOG=1` pings keeping it alive
+past a short `WatchdogSec`, (c) going silent triggering
+`Killing process ... with signal SIGABRT` / `Result: watchdog` followed by
+a real restart (`Scheduled restart job, restart counter is at 1`), and (d)
+a separate throwaway unit that called `notify(ready=True)` then
+`sys.exit(1)` ending in `Active: failed (Result: exit-code)` with **no**
+restart scheduled, confirming `RestartPreventExitStatus=1` actually
+suppresses it.
+
+**6. This host's WSL2 genuinely has systemd enabled** (`/etc/wsl.conf`'s
+`[boot] systemd=true` is set; `ps -p 1 -o comm=` reports `systemd`;
+`systemctl --user` works) -- checked for real per the handoff's own
+instruction, rather than assumed either way. The "run under systemd
+survives a restart, wedged loop caught by the watchdog" exit criterion was
+therefore testable here and was tested for real (decision 5). A host
+without that flag set would need a different supervision path; not
+encountered this session.
+
+**7. `WatchdogSec` is set to 10800s (3h) in the shipped unit, coarser than
+ideal, and this is recorded as a known limitation rather than silently
+shipped.** `watchdog.notify(watchdog=True)` is called at every run-level
+state transition and once per DAG-loop iteration (i.e., roughly once per
+task) -- not during a single task's own multi-hour `IMPLEMENTING`/
+`VALIDATING` attempt, since that would mean reaching into `task.machine`'s
+retry loop or its heartbeat-writing path, both out of this phase's own
+scope (`docs/handoff.md`'s own file list names `run.loop.run_queue`'s
+"natural per-task-transition point," not a deeper hook). A single task can
+legitimately run for `timeouts.implementing_wall` +
+`validating_wall` + `committing_wall` + `merging_wall` seconds (~2h25m at
+`defaults.toml`'s shipped values) with no ping in between, so
+`WatchdogSec` has to sit comfortably above that worst case to avoid
+false-triggering on a healthy long task -- meaning a *genuinely* wedged
+single task is only caught at the next task-boundary ping, not
+immediately. Piggybacking the ping on `task_heartbeat`'s own, far more
+frequent writes (spec 4/9.2) would tighten this; left for a later phase,
+named explicitly in `deploy/cosmo-run.service`'s own comment too so it
+isn't rediscovered as a surprise.
+
+**8. `cosmo report` renders the latest `run.summary` event, not a live
+in-progress run.** If a run is still `RUNNING`/`PAUSED` with no
+`run.summary` event yet (that event is only emitted once, at the very end
+of `run_queue`, mirroring Phase 8's own `_fill_summary_extras`), `cosmo
+report` says so explicitly rather than fabricating partial numbers from
+mid-run event counts -- `cosmo events tail --run <id>` is still the right
+tool for watching a run in progress; `report` is post-run triage,
+matching the handoff's own framing.
+
+### Real invocations this session (not just unit tests)
+
+- **OTel content-leakage check (exit criterion 3): a real `claude -p`
+  probe**, `CLAUDE_CODE_ENABLE_TELEMETRY=1 OTEL_LOG_USER_PROMPTS=0
+  OTEL_METRICS_EXPORTER=console OTEL_LOGS_EXPORTER=console claude -p
+  "<prompt containing a unique canary string>"`, output captured and
+  grepped. Result: `TELEMETRY_ENV` (`harness/claude/adapter.py`, already
+  shipped since Phase 4) is correct and sufficient *as-is* -- no code
+  change needed for exit criterion 3. The canary string appears nowhere in
+  the captured telemetry. `claude_code.user_prompt`'s `prompt` attribute
+  and `claude_code.assistant_response`'s `response` attribute are both
+  literally `"<REDACTED>"` (the CLI redacts the *assistant's* response
+  too, stricter than the spec's own "prompts and file contents" wording
+  asked for). Every metric/log record does carry account-identifying
+  resource attributes (`user.email`, `user.account_uuid`,
+  `organization.id`, `session.id`) -- expected for usage attribution, not
+  a content leak, but worth an operator knowing before pointing
+  `OTEL_EXPORTER_OTLP_ENDPOINT` at a shared/third-party collector.
+- **Watchdog/restart exit criterion (1): real `systemctl --user` units**,
+  full transcript summarized in decision 5 above.
+- **Pre-run disk check exit criterion (2): `test_run_disk_check.py`**
+  drives the real `run.loop.run_queue` code path (not a mock of
+  `check_disk`) with an unsatisfiable floor and asserts on the real
+  `RunOutcome`/store/event state -- the closest a fast test can get to "a
+  simulated low-disk condition aborts the run before any task starts"
+  without actually filling a real disk, which no test should do.
+
+### Things that will matter later
+
+**`git.worktree.sweep_stale_worktrees` (built in an earlier phase) is still
+never called from anywhere**, restated from Phase 8's own "things that
+will matter later" -- still true, still not this phase's fix (decision 4
+explains why the Playwright-artifact half of spec 9.5 didn't end up needing
+it after all, but a `DONE` task's worktree itself, and everything else
+under it, still leaks on disk with no sweep wired in). Phase 10's own
+"unattended overnight" acceptance run is likely to surface this for real if
+it isn't fixed first.
+
+**`WatchdogSec` granularity (decision 7) is task-boundary, not
+task-internal.** Tightening it means piggybacking `watchdog.notify` on
+`task_heartbeat`'s writes, which lives in `task.machine`/wherever Phase
+7's heartbeat writer actually is -- out of this phase's own scope as
+handed off.
+
+**No CLI command to resume a `PAUSED` run, still** (Phase 8's own
+still-open item) -- `cosmo report` makes a paused run's state legible, but
+doesn't add a way to act on it beyond what already existed (`cosmo run`
+again, starting a fresh `run_id`).
+
+**`MemoryMax=` deliberately left commented out in the shipped systemd
+unit** -- Open Item 2's own "retune against real data" posture; no real
+Phase 9/10 run has produced a usage number to size it against yet.
+
 ## Deviations from the spec, cumulative
 
 Kept here so a future spec revision can absorb them in one pass.
@@ -1727,3 +1925,6 @@ Kept here so a future spec revision can absorb them in one pass.
 | 23 | `rate_limit_info.rateLimitType`/`resetsAt` identified as the real field connecting spec 7.1's two named windows to an actual wire value | §7.1, §7.2 | 8 | Found by rereading `tests/fixtures/stream_json/api_retry.ndjson` (already captured in Phase 3, never fully used); the spec names "five-hour rolling"/"weekly" conceptually but no field to detect which one from |
 | 24 | `task.types.RunGuardAction` (`BLOCK_COST`/`REQUEUE`) added | §7.3, §3.3, §7.1 | 8 | The minimal, purely additive seam `task.machine.run_task` needed so the run loop can stop a task's retries (cost) or hand control back (wall clock/quota) without reimplementing any of Phase 7's retry/classification logic |
 | 25 | `cosmo run --task <id>` and the no-`--task` DAG path are two separate CLI code paths, not one path routing single-task through the DAG loop | §3.1, §5 | 8 | Protects Phase 7's already-tested single-task behavior (including its `run_id=None` posture) from `run_queue`'s run-level concerns (breaker/quota/cost/wall clock), which single-task mode was never specified to have |
+| 26 | `StopReason.DISK_LOW` added, schema migration 3 | §9.5, §3.1 | 9 | The pre-run disk check needs its own real, queryable stop reason distinct from `manual` (already reused for the startup DAG-cycle abort) |
+| 27 | `cosmo report` CLI command added | §9.5's own "post-run triage" framing | 9 | The plan's own Phase 9 summary names this explicitly; spec 9.2's `cosmo events tail` alone leaves `run.summary`'s payload as raw JSON |
+| 28 | `watchdog.notify` pings at run-level transitions and once per DAG-loop iteration, not at task-internal (heartbeat) granularity | §9.5 | 9 | The handoff's own file list names `run.loop.run_queue`'s per-task-transition point as the wiring seam, not a deeper hook into `task.machine`'s retry/heartbeat loop; recorded as a known `WatchdogSec` sizing tradeoff (decision 7) rather than silently shipped |

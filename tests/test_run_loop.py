@@ -39,7 +39,16 @@ def _fast_config(tmp_path: Path, **overrides: object) -> CosmoConfig:
         }
     )
     retries = cfg.retries.model_copy(update={"delay_min": 0, "delay_max": 0})
-    updates: dict[str, object] = {"paths": paths, "retries": retries}
+    # Phase 9's pre-run disk check (`run.loop.run_queue`) is real, not
+    # injectable -- it calls `shutil.disk_usage` against wherever `tmp_path`
+    # actually lives. This host's own `/tmp` is a small tmpfs close to the
+    # spec default 10 GB floor (see docs/handoff.md's known environment
+    # noise), so every test here would otherwise trip `disk_low` depending
+    # on how much else is running concurrently. Tests isolate from real
+    # environment state (see CLAUDE conventions); the disk check's own
+    # mechanics get a dedicated real test instead (test_run_disk_check.py).
+    disk = cfg.disk.model_copy(update={"min_free_gb": 0.001})
+    updates: dict[str, object] = {"paths": paths, "retries": retries, "disk": disk}
     updates.update(overrides)
     return cfg.model_copy(update=updates)
 

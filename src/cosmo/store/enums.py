@@ -92,7 +92,8 @@ class PauseReason(enum.Enum):
 
 
 class StopReason(enum.Enum):
-    """Spec 3.1 plus the 7.1 weekly-cap-beyond-budget case."""
+    """Spec 3.1 plus the 7.1 weekly-cap-beyond-budget case and 9.5's
+    pre-run disk check (Phase 9, migration 3)."""
 
     COMPLETED = "completed"
     MAX_TIME = "max_time"
@@ -100,6 +101,7 @@ class StopReason(enum.Enum):
     COST_LIMIT_REACHED = "cost_limit_reached"
     MANUAL = "manual"
     QUOTA_EXHAUSTED_WEEKLY = "quota_exhausted_weekly"
+    DISK_LOW = "disk_low"
 
 
 class HeartbeatSource(enum.Enum):

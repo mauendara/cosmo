@@ -1,17 +1,17 @@
-# Handoff — continue at Phase 9
+# Handoff — continue at Phase 10
 
-You are picking up Cosmo mid-build. Phases 0-8 are complete. Your job is
-Phase 9: observability (native OTel export, log/disk management, Playwright
-trace retention) and deployment (the systemd unit, watchdog pings, journald
-rate limits).
+You are picking up Cosmo mid-build. Phases 0-9 are complete. Your job is
+Phase 10: acceptance — a real target repo, 5-10 genuine OpenSpec changes
+with real `depends_on` edges, run unattended overnight under systemd with
+production config, then a post-run review against the spec's own claims.
 
 ## Read these first, in this order
 
 | Document | What it is | How to treat it |
 |---|---|---|
 | [v3-cosmo-autonomous-agent-spec.md](v3-cosmo-autonomous-agent-spec.md) | The authoritative specification | **Source of truth.** v1 and v2 are superseded — read them only for history |
-| [v3-implementation-plan.md](v3-implementation-plan.md) | 11-phase build plan | The map. Phase 9 is your scope (§9.4, §9.5, §1, §12) |
-| [v3-implementation-state.md](v3-implementation-state.md) | What actually exists, plus decisions and gotchas | Read the "Phase 8 — Complete" section in full before writing code — several of its decisions and deferred items are load-bearing for Phase 9 |
+| [v3-implementation-plan.md](v3-implementation-plan.md) | 11-phase build plan | The map. Phase 10 is your scope (its own section, near the end) |
+| [v3-implementation-state.md](v3-implementation-state.md) | What actually exists, plus decisions and gotchas | Read the "Phase 9 — Complete" section in full before doing anything — several of its decisions and open items are load-bearing for Phase 10 |
 
 `v1-*` and `v2-*` in this folder are earlier spec drafts. v3 is a superset of
 both. Do not implement from them.
@@ -24,66 +24,68 @@ build, and any decision you make along the way, in `v3-implementation-state.md`.
 ```
 /home/dev/delta/cosmo/          # working branch: develop
 ├── docs/                       # the three documents above
+├── deploy/                     # Phase 9: cosmo-run.service, README (install notes, WSL2 caveat)
 ├── templates/                  # harness + project templates (source of truth)
 ├── src/cosmo/
-│   ├── checks.py, config/, doctor.py, harness/, bootstrap/
+│   ├── checks.py, doctor.py, config/, harness/, bootstrap/
+│   ├── watchdog.py               # Phase 9: sd_notify, hand-rolled, no dependency
+│   ├── retention.py              # Phase 9: paths.log_dir rotation (7d done / 30d blocked)
 │   ├── git/                      # Phase 5: worktree lifecycle, merge ladder
 │   ├── gate/                     # Phase 6: the Docker validation gate
 │   ├── task/                     # Phase 7: the per-task state machine
-│   │   ├── machine.py              # run_task -- gained run_id/on_harness_result/check_run_guard hooks in Phase 8
-│   │   └── types.py                # RunGuardAction (Phase 8) -- the run loop's seam into run_task
 │   ├── knowledge/                # Phase 7: spec 11's COMMITTING-step guardrails
-│   ├── run/                      # Phase 8: run-level state machine, DAG, breaker, quota, cost
-│   │   ├── loop.py                 # run_queue -- the orchestrator; your own new work plugs in around this
-│   │   ├── dag.py                  # resolve_execution_order, find_cycle
-│   │   ├── breaker.py              # CircuitBreaker
-│   │   ├── quota.py                # observe_harness_result, HeuristicTracker, decide
-│   │   ├── cost.py                 # check_run_cost, task_cost_ceiling_reached
-│   │   └── types.py                # RunSummary, RunOutcome
+│   ├── run/                      # Phase 8/9: run-level state machine, DAG, breaker, quota, cost
+│   │   └── loop.py                 # run_queue -- gained the pre-run disk check, log
+│   │                                retention call, and watchdog pings this phase
 │   ├── store/                    # SQLite schema, StoreWriter, reader queries
-│   │   └── enums.py                 # RunStatus/PauseReason/StopReason -- run_state/run_cost/task_cost now have real writers (Phase 8)
+│   │   ├── migrations.py            # 3 migrations now -- run_state.stop_reason gained disk_low
+│   │   └── enums.py                 # StopReason.DISK_LOW (Phase 9)
 │   ├── events/                   # envelope + EventEmitter + emit_state_changed
-│   │   └── envelope.py              # EventType.RUN_COST_WARNING added in Phase 8 (deviation 21) -- not in spec 9.2's own list
 │   ├── proc/                     # ManagedProcess, WallClockTimer/StallTimer/LivenessTimers, orphan sweep
-│   ├── cli/main.py               # `cosmo` command -- `cosmo run` (--task or the DAG path), `cosmo doctor` is what you likely extend
-│   └── run/                      # not empty anymore -- Phase 8's run loop
-├── tests/                       # 316 passing + 7 opt-in real-Docker (COSMO_GATE_DOCKER_E2E=1)
+│   └── cli/main.py               # `cosmo` command -- gained `cosmo report` this phase
+├── tests/                       # 334 passing + 7 opt-in real-Docker (COSMO_GATE_DOCKER_E2E=1)
 │   └── fixtures/gate_repo/        # real Spring Boot + Vite/React fixture, reusable for your own tests too
 └── check.sh                     # ruff + format + mypy --strict + pytest
 ```
 
-There is no empty package waiting for you the way `cosmo.run` was for Phase
-8 — Phase 9's build items are additive to existing modules
-(`harness/claude/adapter.py`'s env vars, `doctor.py`'s disk check,
-`run.loop.run_queue`'s pre-run gate, log/trace retention somewhere new) plus
-one genuinely new piece: the systemd unit and its watchdog-ping wiring,
-which has no existing home at all. Decide where that lives (a new
-`deploy/` directory at the repo root is the natural guess, matching where a
-systemd unit file conventionally lives — not under `src/cosmo/`, which is
-importable Python) and document the choice, the same way every previous
-phase has for an ambiguous surface.
+Nothing empty is waiting for you the way `cosmo.run` was for Phase 8, or
+`deploy/` was for Phase 9 — Phase 10 is not a code-writing phase in the
+same sense as 0-9. It is: seed real OpenSpec changes into a real target
+repo, run the thing for real, unattended, overnight, then write down what
+actually happened. Whatever code changes *do* come out of it should be
+small and targeted — a real bug the overnight run surfaces, or Open Item
+2's timeout retuning, not new features.
 
 ## Get oriented (2 minutes)
 
 ```bash
 cd /home/dev/delta/cosmo
-git log --oneline           # Phase 8 should be committed at HEAD
+git log --oneline           # Phase 9 should be committed at HEAD
 git branch --show-current   # should say develop
 ./check.sh                  # must be green before you change anything
 cosmo doctor                # core checks + harness checks in two tables
 ```
 
-**Known, pre-existing environment noise on this host** (not something Phase
-9 broke, don't chase it): `cosmo doctor` may show `disk space: FAIL` — this
-WSL2 box runs close to the 10 GB floor at the *test* data path it checks
-(`/tmp` is a small tmpfs on this box); the real filesystem has hundreds of
-GB free. This box has no *global* git identity either — only this repo's
-own local config has one — so any test fixture your own work adds that
-calls `git commit` needs `-c user.name=...`/`-c user.email=...` passed
-explicitly. `gitleaks` is on PATH, `docker` works.
+**Known, pre-existing environment noise on this host** (not something
+Phase 9 broke, don't chase it): `cosmo doctor` may show `disk space: FAIL`
+— this WSL2 box runs close to the 10 GB floor at the *test* data path it
+checks (`/tmp` is a small tmpfs on this box); the real filesystem has
+hundreds of GB free. This box has no *global* git identity either — only
+this repo's own local config has one — so any test fixture your own work
+adds that calls `git commit` needs `-c user.name=...`/`-c
+user.email=...` passed explicitly. `gitleaks` is on PATH, `docker` works.
 
-**Two real environment gotchas from Phase 6, reconfirmed in Phase 7** —
-read Phase 6's state-doc section for the full diagnosis before you touch
+**This host's WSL2 genuinely has systemd enabled** (`/etc/wsl.conf`'s
+`[boot] systemd=true`, confirmed for real in Phase 9 — `ps -p 1 -o comm=`
+reports `systemd`, `systemctl --user` works). This is exactly what Phase
+10's "run unattended overnight under systemd" exit criterion needs — it is
+testable here, not just on a real droplet. See `deploy/README.md` before
+installing the unit; it documents the exact `Restart=`/
+`RestartPreventExitStatus=` reasoning and how it was verified for real in
+Phase 9 (throwaway `systemctl --user` units, not just read the docs).
+
+**Two real environment gotchas from Phase 6, reconfirmed since** — read
+Phase 6's state-doc section for the full diagnosis before you touch
 anything Docker- or npm-related: **`npm install` can hang indefinitely on
 this host if a previous run was killed mid-install** (fix: verified-clean
 `rm -rf node_modules package-lock.json` first, not waiting longer), and
@@ -100,17 +102,33 @@ need `uv tool install --editable .` again, run it as `env -u XDG_DATA_HOME
 uv tool install --editable --force .` or it will reinstall into the wrong
 place and leave `~/.local/bin/cosmo` dangling.
 
-**New from Phase 8, worth knowing before you touch the run loop:** the
-circuit breaker's tally, and the quota heuristic's consecutive-failure
-count, both live in-memory inside `run.loop.run_queue`'s single call —
-neither survives a process restart, and neither is reconstructed from the
-database on startup. A `PAUSED` run's *reason* survives (the persisted
-`run_state.status`/`pause_reason` row), but nothing currently resumes a
-paused run except re-invoking `cosmo run` from scratch, which starts a
-brand-new `run_id`. If Phase 9's systemd unit needs to "restart a wedged
-loop," it will restart it as a fresh run, re-resolving the DAG from
-whatever `task_queue` state currently holds — confirm that's the behavior
-you actually want before building the watchdog-restart path around it.
+**From Phase 9, worth knowing before an overnight run:**
+
+- **`git.worktree.sweep_stale_worktrees` is still never called from
+  anywhere** (flagged in Phase 8's state doc, restated in Phase 9's — still
+  true). A multi-task overnight run will leave every `DONE` task's worktree
+  on disk indefinitely; only a `BLOCKED` task's worktree is *supposed* to
+  survive (spec 3.2). This will very likely bite a real overnight run on
+  disk space alone — decide whether to wire the sweep in before or as part
+  of Phase 10's own run, not discover it as the run's own failure mode.
+- **`WatchdogSec` in the shipped unit is 10800s (3h), task-boundary
+  granularity, not task-internal** (Phase 9 decision 7/8) — a single
+  wedged `IMPLEMENTING`/`VALIDATING` attempt is only caught at the *next*
+  task-boundary ping, not immediately. If the overnight run needs tighter
+  detection, that's a real Phase 10 finding to record, not a Phase 9 bug.
+- **The circuit breaker's tally and quota heuristic's consecutive-failure
+  count still live in-memory inside one `run.loop.run_queue` call** —
+  unchanged since Phase 8. A systemd-restarted run (post-watchdog-kill or
+  a clean `on-failure` case) starts these counters from zero again, same
+  as a hand-restarted one.
+- **No CLI command to resume a `PAUSED` run** — still true. `cosmo report`
+  (Phase 9) makes a paused run's state legible after the fact but doesn't
+  add a resume path; re-running `cosmo run` starts a fresh `run_id`.
+- **Quota heuristic and secondary-signal config values are still
+  unverified guesses** (`quota.heuristic_consecutive_threshold`/
+  `heuristic_max_duration_seconds`/`result_error_subtypes`, Phase 8
+  decisions 4/5) — an overnight run is specifically positioned to confirm
+  or falsify these for real.
 
 ## Conventions this codebase follows
 
@@ -120,135 +138,73 @@ you actually want before building the watchdog-restart path around it.
   section that forced the decision. Match that.
 - **Config over constants.** Every tunable goes in `config/model.py` and
   `config/defaults.toml`, annotated with its spec section. No magic numbers.
-  `DiskConfig`/`min_free_gb` already exists and is already read by `cosmo
-  doctor` (`doctor.py:41`) — Phase 9's "pre-run disk check" needs a new
-  *call site* (inside `run.loop.run_queue`, before the loop starts), not
-  necessarily a new config field. Check what's already there before adding
-  more, the same instruction every previous phase's handoff has given.
 - **Tests isolate from the developer's environment.** Anything touching
   config must set `COSMO_CONFIG` and `XDG_DATA_HOME` to temp paths — see the
   autouse fixture in `tests/test_cli.py`/`test_cli_run_queue.py`. Anything
   touching a real git repo should build one in `tmp_path`, never touch this
   repo or a real target repo. Retry-driven tests should override
-  `retries.delay_min`/`delay_max` to `0` via `cfg.model_copy(...)`.
+  `retries.delay_min`/`delay_max` to `0` via `cfg.model_copy(...)`. **New in
+  Phase 9: any test exercising `run.loop.run_queue` for real must also
+  override `disk.min_free_gb` down near zero** (`_fast_config` in
+  `test_run_loop.py` already does this) — the pre-run disk check is real,
+  not injectable, and will otherwise fail against this host's own small
+  `/tmp` tmpfs.
 - **Fake the external process, test the mechanics — except where "check by
   hand, then use the real thing" already proved out.** `FakeHarnessAdapter`
   and `FakeGate` are the two test doubles later phases should target
-  directly; `run.loop.run_queue`'s own integration tests
-  (`tests/test_run_loop.py`) are the most recent example of that pattern at
-  the run-loop level. Real-process/real-Docker tests exist but are
-  skip-guarded (`COSMO_GATE_DOCKER_E2E=1`) because they take real minutes.
-  A systemd-unit exit criterion ("a run under systemd survives a restart")
-  almost certainly cannot be a fast unit test at all — treat it the way
-  Phase 6/7 treated their own opt-in real-Docker tests: a documented, opt-in
-  integration check, run for real by hand at least once this session, not
-  just asserted possible.
+  directly. Real-process/real-Docker tests exist but are skip-guarded
+  (`COSMO_GATE_DOCKER_E2E=1`) because they take real minutes. Phase 10's
+  own overnight run is the largest instance of this pattern in the whole
+  project — there is no way to fake your way through an acceptance phase.
 - **Boundary tests are load-bearing, not optional.** `test_harness_boundary.py`,
   `test_store_boundary.py`, `test_git_boundary.py`, `test_gate_boundary.py`.
-  None of them currently restrict `cosmo.run`'s imports either (confirmed
-  while building Phase 8, which imports `cosmo.task`/`cosmo.gate`/
-  `cosmo.git`/`cosmo.harness` freely) — re-verify this yourself before
-  assuming it still holds for whatever Phase 9 touches.
 - **Run `./check.sh` before committing.** All four must pass.
 - **When something fails, check with a real invocation before trusting a
   unit test's green.** This has found a real bug or made a real design
-  decision correctly in every phase so far, Phase 8 included: a standalone
-  script driving `run_queue` directly (not a pytest test) caught a genuine
-  unstubbed 5-hour `time.sleep` that every mocked/fake-clock test in the
-  suite passed straight through, because none of them happened to script
-  the exact sequence that triggered it (see state doc Phase 8 decision 6).
-  Do the same for Phase 9: a real `CLAUDE_CODE_ENABLE_TELEMETRY=1` probe
-  invocation to actually inspect exported telemetry for content leakage,
-  not just a code-review assertion that content logging is off; a real (or
-  at least real-`systemctl`-shaped) run to confirm the watchdog ping and
-  restart behavior, not just a unit test of the ping-emission code.
+  decision correctly in every phase so far. Phase 9's own instance: the
+  pre-run disk check exposed itself as *correct* against a real low-space
+  `/tmp`, not broken — the fix was the tests' own isolation, not the
+  check. Phase 9 also did the two other real-invocation checks the plan
+  asked for: a real `claude -p` probe with console OTel exporters to grep
+  for content leakage (found none — `TELEMETRY_ENV` was already correct),
+  and real `systemctl --user` units to prove the watchdog restart/
+  no-restart split actually behaves as designed.
 
-## Phase 9 scope
+## Phase 10 scope
 
-Spec §9.4 (native OpenTelemetry export), §9.5 (log/disk management, systemd
-unit), §1 (environment/stack — the systemd unit lives here conceptually),
-§12 (non-goals — check nothing you build here quietly re-opens one).
+Per the plan's own "Acceptance: unattended overnight run" section:
 
-Summary from the plan:
-
-1. **Native OTel export**: `CLAUDE_CODE_ENABLE_TELEMETRY=1`, 60s export
-   interval, **content logging off** (`OTEL_LOG_USER_PROMPTS=0` — already
-   set by `harness/claude/adapter.py`'s `TELEMETRY_ENV`, confirm it's still
-   correct and sufficient; this may already be fully done, verify before
-   building anything new). Prompts and file contents in a telemetry backend
-   is a data-exfiltration path on a private codebase — this is a hard
-   requirement, not a nice-to-have.
-2. **Log retention** (§9.5): per-task `raw_log_path` rotation — 7 days for
-   `DONE`, 30 days for `BLOCKED`. Playwright traces/screenshots retained
-   only for failing runs. Nothing in the codebase currently rotates or
-   deletes anything under `paths.log_dir` — this is new.
-3. **Pre-run disk check**: abort the run at `severity=critical` below
-   `disk.min_free_gb` (already exists, already used by `cosmo doctor`) —
-   wire the same check into `run.loop.run_queue` itself, before the loop's
-   first task starts, not just as a `cosmo doctor` advisory.
-4. **systemd unit**: `OOMPolicy=stop`, memory accounting, `WatchdogSec`
-   with a ping issued on each state transition (the loop needs to actually
-   call `sd_notify` or equivalent — check what's idiomatic in Python
-   without a heavy dependency), raised journald rate limits so the loop's
-   own logs aren't dropped. "Identical on the droplet and under WSL2" per
-   the plan — WSL2 has systemd support behind a flag
-   (`/etc/wsl.conf`'s `[boot] systemd=true`) on modern builds; confirm
-   whether this host actually has it enabled before assuming the exit
-   criterion is testable here at all, and say so either way rather than
-   silently skipping it.
-5. **`cosmo events`/`cosmo report` for post-run triage**: `cosmo events
-   tail` already exists (Phase 1); a `run.summary` renderer is new — Phase
-   8's `run.summary` event payload (`run.loop._fill_summary_extras`'s
-   shape) is what it should render.
+1. Point Cosmo at a real target repo initialized by `cosmo init`. Queue
+   5-10 genuine OpenSpec changes with real `depends_on` edges.
+2. Run unattended overnight under systemd (`deploy/cosmo-run.service`,
+   Phase 9) with production config (a real `COSMO_CONFIG` pointing at
+   non-XDG paths, not the dev defaults).
+3. Post-run review against the spec's own claims: did anything reach
+   `DONE` without a passing gate; did any test get weakened; were any
+   orphan processes/containers left; did quota handling behave; are the
+   p95 gate numbers consistent with §3.3's defaults.
 
 ### Exit criteria (from the plan)
 
-- A run under systemd survives a restart, and a deliberately wedged loop is
-  caught by the watchdog and restarted.
-- A simulated low-disk condition aborts the run before any task starts.
-- No prompt or file content appears anywhere in exported telemetry —
-  verified by inspection.
-
-## Things to know before you start
-
-**Phase 8's `run.loop.run_queue` is your real entry point for the pre-run
-disk check and any watchdog-ping wiring** — it already has a clean
-before-the-loop section (right after `writer.run_create`/`RUN_STARTED`)
-that a disk check slots into, and a natural per-task-transition point
-(everywhere it already calls `writer.run_transition`/emits an event) for a
-watchdog ping. Don't reimplement the loop; extend it, the same "call it,
-don't reimplement" discipline Phase 8 itself applied to Phase 7's
-`run_task`.
-
-**`EventType`'s enumerated list has drifted from spec 9.2's own text twice
-now** (deviation 17's `HeartbeatSource.STREAM`, deviation 21's
-`RUN_COST_WARNING`) — if Phase 9 needs its own new event type (a log-
-rotation event? a disk-abort event?), the pattern is: add it, emit it, and
-record it as the next cumulative deviation (next number is 26) rather than
-overloading an existing type's payload to avoid adding one.
-
-**No project/repo linkage on `task_queue` still** (Phase 7's "things that
-will matter later," restated in Phase 8's own list) — if log
-retention needs to know which *project* a task's logs belong to for
-retention-policy purposes, this gap is still there. Likely doesn't matter
-for Phase 9 (retention is keyed by task outcome and age, not project), but
-worth checking before assuming otherwise.
+- A full night's run completes with a coherent `run.summary` and an event
+  log sufficient to reconstruct every decision without reading a raw log
+  (`cosmo report` and `cosmo events tail`, both already built, are your
+  tools for this — if either turns out insufficient for real post-run
+  review, that's a real Phase 10 finding).
+- **Open Item 2** closed: §3.3 timeouts retuned against real p95 data, or
+  explicitly confirmed as-is with real data behind the confirmation.
 
 ## When you finish
 
-1. `./check.sh` green.
-2. Update `v3-implementation-state.md`: mark Phase 9 complete, list what
-   exists, record every decision made and anything a future session would
-   otherwise rediscover. Append any new spec deviation to the cumulative
-   table at the bottom (next number is 26).
-3. Commit to `develop` with a message explaining *why*, in the style of the
-   Phase 0-8 commits.
-4. Rewrite this handoff for Phase 10 — or delete it if the next session
-   continues immediately.
-
-Phase 10 is next: acceptance — a real target repo, 5-10 genuine OpenSpec
-changes with real `depends_on` edges, run unattended overnight under
-systemd with production config, then a post-run review against the spec's
-own claims (nothing reached `DONE` without a passing gate, no test was
-weakened, no orphan processes/containers, quota handling behaved, p95 gate
-numbers match §3.3's defaults or get retuned — Open Item 2, still open).
+1. `./check.sh` green (if any code changed at all).
+2. Update `v3-implementation-state.md`: mark Phase 10 complete, record the
+   overnight run's real findings (not a summary of what was *supposed* to
+   happen — what actually did), and append any new spec deviation to the
+   cumulative table (next number is 29).
+3. Commit to `develop` with a message explaining *why*, in the style of
+   the Phase 0-9 commits.
+4. This is the last phase in the plan — there is likely no Phase 11
+   handoff to write. If real work remains (the worktree sweep, watchdog
+   granularity, a resume-paused-run command, or anything the overnight run
+   itself surfaced), record it as an open item in the state doc rather
+   than inventing a new phase number the plan never named.

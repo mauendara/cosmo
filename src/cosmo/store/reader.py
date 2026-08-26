@@ -281,6 +281,21 @@ def get_run(db_path: Path, run_id: str) -> RunRow | None:
         conn.close()
 
 
+def latest_run_id(db_path: Path) -> str | None:
+    """The most recently started run -- `cosmo report`'s default target
+    when `--run` is omitted (Phase 9)."""
+    if not db_path.exists():
+        return None
+    conn = connect_reader(db_path)
+    try:
+        row = conn.execute(
+            "SELECT run_id FROM run_state ORDER BY started_at DESC LIMIT 1"
+        ).fetchone()
+        return str(row["run_id"]) if row is not None else None
+    finally:
+        conn.close()
+
+
 def get_run_cost(db_path: Path, run_id: str) -> float:
     if not db_path.exists():
         return 0.0

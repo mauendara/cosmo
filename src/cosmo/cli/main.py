@@ -45,7 +45,9 @@ from cosmo.store.enums import BlockedReason, RunStatus, StopReason, TaskStatus
 from cosmo.store.reader import (
     find_project_by_path,
     get_progress,
+    get_run,
     get_task,
+    latest_run_id,
     list_events,
     list_projects,
     list_tasks,
@@ -906,3 +908,80 @@ def events_tail(
             e.task_id or "-",
         )
     console.print(table)
+
+
+@app.command("report")
+def report_cmd(
+    run: Annotated[
+        str | None, typer.Option("--run", help="Defaults to the most recently started run.")
+    ] = None,
+    config: ConfigOption = None,
+) -> None:
+    """Post-run triage (plan Phase 9): renders one run's `run_state` row
+    plus its `run.summary` event payload (`run.loop._fill_summary_extras`'s
+    shape) -- everything `cosmo events tail --run <id>` would show, without
+    having to read raw event JSON by hand."""
+    cfg = _load(config)
+    run_id = run if run is not None else latest_run_id(cfg.paths.db_path)
+    if run_id is None:
+        err_console.print("[red]no runs recorded yet[/red]")
+        raise typer.Exit(code=1)
+
+    row = get_run(cfg.paths.db_path, run_id)
+    if row is None:
+        err_console.print(f"[red]no such run: {run_id!r}[/red]")
+        raise typer.Exit(code=1)
+
+    console.print(f"[bold]run[/bold] {row.run_id}")
+    status_style = {"running": "cyan", "paused": "yellow", "stopped": "green"}.get(
+        row.status, "white"
+    )
+    console.print(f"  status:        [{status_style}]{row.status}[/{status_style}]")
+    console.print(f"  harness:       {row.harness} ({row.permission_mode})")
+    console.print(f"  base branch:   {row.base_branch}")
+    if row.pause_reason:
+        console.print(f"  pause reason:  [yellow]{row.pause_reason}[/yellow]")
+    if row.stop_reason:
+        stop_style = "green" if row.stop_reason in ("completed", "queue_empty") else "red"
+        console.print(f"  stop reason:   [{stop_style}]{row.stop_reason}[/{stop_style}]")
+    console.print(f"  started at:    {row.started_at}")
+    console.print(f"  stopped at:    {row.stopped_at or '-'}")
+
+    summary_events = list_events(
+        cfg.paths.db_path, run_id=run_id, event_type=EventType.RUN_SUMMARY.value, limit=1
+    )
+    if not summary_events:
+        console.print("\n[dim](no run.summary event yet -- run still in progress)[/dim]")
+        return
+
+    payload = summary_events[0].payload
+    console.print("\n[bold]summary[/bold]")
+    console.print(f"  completed:     {payload.get('completed', 0)}")
+    console.print(f"  blocked:       {payload.get('blocked', 0)}")
+    by_reason = payload.get("blocked_by_reason") or {}
+    if isinstance(by_reason, dict) and by_reason:
+        for reason, count in by_reason.items():
+            console.print(f"    - {reason}: {count}")
+    console.print(f"  requeued:      {payload.get('requeued', 0)}")
+    console.print(f"  retried:       {payload.get('retried', 0)}")
+    duration = payload.get("total_duration_seconds")
+    if isinstance(duration, (int, float)):
+        console.print(f"  duration:      {duration / 60:.1f} min")
+    cost = payload.get("total_cost_usd")
+    if isinstance(cost, (int, float)) and cost:
+        console.print(f"  cost:          ${cost:.2f}")
+
+    flaky = payload.get("flaky_detected") or []
+    if isinstance(flaky, list) and flaky:
+        flaky_str = ", ".join(str(f) for f in flaky)
+        console.print(f"\n[yellow]flaky tests detected:[/yellow] {flaky_str}")
+    repeated = payload.get("repeated_merge_conflict_tasks") or []
+    if isinstance(repeated, list) and repeated:
+        console.print(
+            f"[yellow]repeated merge-conflict tasks:[/yellow] {', '.join(str(t) for t in repeated)}"
+        )
+    near_cap = payload.get("knowledge_files_near_cap") or []
+    if isinstance(near_cap, list) and near_cap:
+        console.print(
+            f"[yellow]knowledge files near cap:[/yellow] {', '.join(str(f) for f in near_cap)}"
+        )

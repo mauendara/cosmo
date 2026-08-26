@@ -1,0 +1,78 @@
+[Unit]
+Description=Cosmo autonomous run loop (spec 1, 9.5)
+# `cosmo doctor`'s own checks (git/docker/openspec/gitleaks on PATH) are a
+# faster failure than letting systemd start the unit and watch it die.
+# There is no hard systemd `Requires=` on docker.service here deliberately:
+# a droplet may run Docker via a non-systemd-managed daemon (e.g. rootless,
+# or a sidecar), and `cosmo doctor` already re-verifies this every start.
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=notify
+# Fill in the real values for this deployment -- these three are the only
+# per-host settings a systemd unit can't get from cosmo's own config file.
+# WorkingDirectory should be Cosmo's own checkout (this repo); --repo is
+# the TARGET repo cosmo operates on (spec 1's "Cosmo's own checkout of the
+# target repo, on base_branch" -- see `cosmo run --help`).
+WorkingDirectory=/opt/cosmo
+Environment=COSMO_CONFIG=/etc/cosmo/config.toml
+ExecStart=/opt/cosmo/.venv/bin/cosmo run --repo /var/cosmo/target-repo
+
+# Spec 9.5: WatchdogSec with the loop issuing a ping (`cosmo.watchdog.
+# notify`, wired into `run.loop.run_queue`) at every run-level state
+# transition (RUNNING/PAUSED/RUNNING/STOPPED) and once per task the DAG
+# scheduler picks up. That is coarser than task-internal liveness (a single
+# task's IMPLEMENTING/VALIDATING attempt can legitimately run for
+# `timeouts.implementing_wall` + `timeouts.validating_wall` +
+# `timeouts.committing_wall` + `timeouts.merging_wall` seconds -- ~2h25m at
+# defaults.toml's shipped values -- with no watchdog ping in between).
+# WatchdogSec is set well above that worst case so a *healthy* long task
+# is never mistaken for a hang; a genuinely wedged single task is only
+# caught at the next task-boundary ping after this timeout, not
+# immediately. Tightening this to task-internal granularity (piggybacking
+# on `task_heartbeat`'s own, much more frequent writes -- spec 4/9.2) is
+# open for a later phase; see docs/v3-implementation-state.md's Phase 9
+# section. Retune alongside timeouts.* if those defaults are retuned
+# (Open Item 2).
+WatchdogSec=10800
+
+# `Restart=on-failure` covers exactly the failure this unit is meant to
+# self-heal: a watchdog-timeout kill, which systemd delivers as a signal,
+# not a clean exit. `RestartPreventExitStatus=1` excludes `cosmo run`'s own
+# clean `exit(1)` for a deliberate stop (PAUSED for the circuit breaker or
+# a confirmed quota exhaustion -- spec 6.5's "resuming requires manual
+# intervention"; STOPPED for a cost ceiling, a disk-space abort, or a
+# startup DAG cycle -- none of which a blind restart fixes, and a cost or
+# disk ceiling would just be re-hit immediately since a new run_id starts
+# every counter fresh). A signal-based kill (the watchdog case) is *not* an
+# exit status, so it is unaffected by this exclusion and still restarts.
+Restart=on-failure
+RestartPreventExitStatus=1
+RestartSec=30
+# Caps runaway restart attempts if something keeps crash-looping despite
+# the exclusion above (e.g. a real bug, not a deliberate stop).
+StartLimitIntervalSec=3600
+StartLimitBurst=5
+
+# Spec 9.5: OOMPolicy=stop (never silently respawn into the same memory
+# pressure that just killed it) and real memory accounting so `systemctl
+# status`/`systemd-cgtop` report this unit's actual usage -- a 10h run
+# driving Docker containers, `stream-json` buffering, and Playwright is
+# exactly the kind of workload worth watching for a slow leak.
+OOMPolicy=stop
+MemoryAccounting=yes
+# Uncomment and size for the droplet once real usage is observed
+# (docs/v3-implementation-state.md Open Item 2's own "retune against real
+# data" posture) -- left unset here rather than guessed.
+# MemoryMax=4G
+
+# Spec 9.5: raised journald rate limits so the loop's own (verbose,
+# stream-json-adjacent) logging is never silently dropped mid-run. Unit-
+# scoped (systemd.exec(5)), not a global /etc/systemd/journald.conf edit --
+# this unit's volume is the one that matters, not the whole host's.
+LogRateLimitIntervalSec=1s
+LogRateLimitBurst=1000
+
+[Install]
+WantedBy=multi-user.target

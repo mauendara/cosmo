@@ -92,3 +92,47 @@ def test_migration_descriptions_are_free_of_single_quotes() -> None:
     apostrophe would break the statement rather than merely look odd."""
     for m in MIGRATIONS:
         assert "'" not in m.description
+
+
+def test_migration_3_preserves_existing_run_state_rows_and_accepts_disk_low(
+    tmp_path: Path,
+) -> None:
+    """Migration 3 (Phase 9) recreate-copy-swaps `run_state` to widen its
+    `stop_reason` CHECK constraint -- verify a pre-existing row survives the
+    swap (not just that the migration runs), and that the new value is
+    actually accepted afterward."""
+    db_path = tmp_path / "cosmo.db"
+    conn = connect_writer(db_path)
+    # Apply only migration 1 (stamped, so `migrate()` below treats this as
+    # a real database that predates migration 3, not an unmigrated one).
+    migration_1 = next(m for m in MIGRATIONS if m.version == 1)
+    conn.executescript(
+        f"BEGIN;\n{migration_1.sql}\n"
+        "CREATE TABLE schema_migrations ("
+        "    version INTEGER PRIMARY KEY, description TEXT NOT NULL, applied_at TEXT NOT NULL"
+        ");\n"
+        "INSERT INTO schema_migrations VALUES (1, 'initial', 't0');\n"
+        "COMMIT;"
+    )
+    conn.execute(
+        """
+        INSERT INTO run_state (
+            run_id, status, harness, permission_mode, max_turns, base_branch,
+            started_at, updated_at
+        ) VALUES ('run-1', 'stopped', 'claude', 'dontAsk', 80, 'develop', 't0', 't0')
+        """
+    )
+    conn.commit()
+
+    applied = migrate(conn)
+    assert 3 in applied
+
+    row = conn.execute("SELECT run_id, status FROM run_state WHERE run_id = 'run-1'").fetchone()
+    assert row is not None
+    assert row[1] == "stopped"
+
+    conn.execute("UPDATE run_state SET stop_reason = 'disk_low' WHERE run_id = 'run-1'")
+    conn.commit()
+    reread = conn.execute("SELECT stop_reason FROM run_state WHERE run_id = 'run-1'").fetchone()
+    assert reread[0] == "disk_low"
+    conn.close()

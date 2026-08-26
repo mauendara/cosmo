@@ -242,9 +242,50 @@ ALTER TABLE task_failures_v2 RENAME TO task_failures;
 CREATE INDEX idx_task_failures_task ON task_failures(task_id);
 """
 
+# ============================================================================
+# Migration 3 -- Phase 9: `run_state.stop_reason` gains 'disk_low'.
+#
+# Spec 9.5's pre-run disk check (`run.loop.run_queue`, wired this phase)
+# aborts a run before its first task rather than let a full disk fail every
+# task in a way that reads as a code error. That abort is a real
+# `stop_reason`, not an overload of an existing value (`manual` is already
+# reused for the DAG-cycle-at-startup case; `disk_low` is distinct so a
+# later query can tell the two apart) -- same recreate-copy-swap recipe as
+# migration 2, since SQLite has no `ALTER TABLE ... DROP CONSTRAINT`. Safe
+# to drop `run_state` mid-transaction despite `run_cost`/`task_cost`/
+# `task_transitions`/`task_failures` all holding FKs to it: SQLite only
+# checks a foreign key against the *current* schema when a child row is
+# inserted/updated, never at the parent's DDL time, and no child rows are
+# touched here.
+# ============================================================================
+_SCHEMA_V3 = """
+CREATE TABLE run_state_v2 (
+    run_id          TEXT PRIMARY KEY,
+    status          TEXT NOT NULL CHECK (status IN ('idle', 'running', 'paused', 'stopped')),
+    harness         TEXT NOT NULL,
+    permission_mode TEXT NOT NULL,
+    max_turns       INTEGER NOT NULL,
+    base_branch     TEXT NOT NULL,
+    pause_reason    TEXT CHECK (pause_reason IN (
+                        'circuit_breaker', 'quota_exhausted_5h', 'quota_exhausted_weekly'
+                    )),
+    stop_reason     TEXT CHECK (stop_reason IN (
+                        'completed', 'max_time', 'queue_empty', 'cost_limit_reached',
+                        'manual', 'quota_exhausted_weekly', 'disk_low'
+                    )),
+    started_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL,
+    stopped_at      TEXT
+);
+INSERT INTO run_state_v2 SELECT * FROM run_state;
+DROP TABLE run_state;
+ALTER TABLE run_state_v2 RENAME TO run_state;
+"""
+
 MIGRATIONS: list[Migration] = [
     Migration(1, "initial schema: events, queue, progress, run state, cost, history", _SCHEMA_V1),
     Migration(2, "task_failures.failure_stage gains secrets (gate gitleaks backstop)", _SCHEMA_V2),
+    Migration(3, "run_state.stop_reason gains disk_low (pre-run disk check)", _SCHEMA_V3),
 ]
 
 
