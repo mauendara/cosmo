@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import enum
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -25,6 +26,28 @@ class TaskContext:
     base_branch: str
     allow_test_edits: bool
     max_attempts: int
+
+
+class RunGuardAction(enum.Enum):
+    """What `task.machine.run_task`'s optional `check_run_guard` hook
+    (Phase 8) can ask it to do instead of starting the next `PROPOSING`/
+    `IMPLEMENTING` attempt. Lives here, not in `cosmo.run`, so `cosmo.task`
+    never has to import the run package that calls it -- `cosmo.run`
+    depends on `cosmo.task`, never the other way (same direction Phase 7
+    already established for `cosmo.gate`/`cosmo.git`)."""
+
+    BLOCK_COST = "block_cost"
+    """Spec 7.3: this task's accumulated cost hit `max_cost_per_task_usd`.
+    `run_task` blocks it (`blocked_reason=cost`) and returns -- the run
+    loop's queue continues with the next task."""
+
+    REQUEUE = "requeue"
+    """The run itself can no longer make progress on this task right now --
+    spec 3.3's run-level wall clock expired, or spec 7.1/7.2's quota
+    detection confirmed the harness is rate-limited. Not this task's fault,
+    so `run_task` returns it to `QUEUED` (`attempt_count` untouched) instead
+    of `BLOCKED`, and the run loop decides what happens to the *run*
+    (`STOPPED`/`max_time`, or `PAUSED` pending quota reset)."""
 
 
 @dataclass(frozen=True, slots=True)

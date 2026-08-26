@@ -167,7 +167,7 @@ def merge_task(
 
     if outcome.merged:
         remove_worktree(repo_path=repo_path, worktree_path=worktree_path, branch=branch)
-        transition = writer.queue_complete(task_id)
+        transition = writer.queue_complete(task_id, run_id=run_id)
         emitter.emit(
             event_type=EventType.TASK_COMPLETED,
             severity=Severity.INFO,
@@ -180,7 +180,10 @@ def merge_task(
         # attempt_merge_ladder always sets blocked_reason when merged=False.
         assert outcome.blocked_reason is not None
         transition = writer.queue_block(
-            task_id, outcome.blocked_reason, note="automated merge/rebase recovery did not succeed"
+            task_id,
+            outcome.blocked_reason,
+            run_id=run_id,
+            note="automated merge/rebase recovery did not succeed",
         )
         emitter.emit(
             event_type=EventType.TASK_BLOCKED,

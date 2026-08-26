@@ -12,7 +12,7 @@ rediscover.
 |---|---|
 | Last updated | 2026-08-25 |
 | Working branch | `develop` |
-| Head commit | `b1b4d98` — Phase 6 (Phase 7 not yet committed) |
+| Head commit | `3d472a9` — Phase 7 (Phase 8 not yet committed) |
 | Spec | [v3-cosmo-autonomous-agent-spec.md](v3-cosmo-autonomous-agent-spec.md) |
 
 ## Phase status
@@ -27,7 +27,7 @@ rediscover.
 | 5 — Worktree lifecycle and git operations | **Complete** |
 | 6 — Validation gate | **Complete** |
 | 7 — Task state machine | **Complete** |
-| 8 — Run loop, DAG, circuit breaker, quota | Not started |
+| 8 — Run loop, DAG, circuit breaker, quota | **Complete** |
 | 9 — Observability, logs, deployment | Not started |
 | 10 — Acceptance run | Not started |
 
@@ -1411,6 +1411,291 @@ via `model_copy`. A future run-loop-level test (Phase 8) driving several
 tasks through real retries back to back should keep doing the same, or the
 suite will slow down proportionally to how many retries a scenario needs.
 
+## Phase 8 — Complete
+
+All exit criteria met. `cosmo run` (no `--task`) drives the whole queue as
+a dependency-ordered DAG via `run.loop.run_queue`, calling Phase 7's
+`task.machine.run_task` once per eligible task, strictly serial (spec 5),
+until the queue empties, the circuit breaker trips, a quota/cost ceiling
+intervenes, or the run-level wall clock expires. `./check.sh`: 316 tests,
+7 skipped (unchanged from Phase 7 -- the real-Docker opt-ins), ~20s. Real
+invocations run this session, not just unit tests (state doc convention):
+`cosmo queue add --depends-on`/`cosmo run --dry-run` against a live DB
+(caught nothing, confirmed correct); a standalone script driving
+`run_queue` directly against `FakeHarnessAdapter`+`FakeGate` outside pytest
+(caught decision 6's real bug -- a genuine, unstubbed 5-hour `time.sleep`).
+
+### What exists
+
+| Path | Contents |
+|---|---|
+| `src/cosmo/run/loop.py` | `run_queue` -- the run-level orchestrator. One `_run_one_task` call per DAG-eligible task; `_handle_quota_pause_or_stop`, `_environment_error_weight`, `_fill_summary_extras`/`_knowledge_files_near_cap` are its own private helpers |
+| `src/cosmo/run/dag.py` | `resolve_execution_order` (Kahn's algorithm, hard `depends_on` + soft `priority` tie-break), `find_cycle` (plain `{task_id: depends_on}` graph, not `TaskRow`-shaped -- reused by `cli/main.py`'s `queue add`), `DagCycleError` |
+| `src/cosmo/run/breaker.py` | `CircuitBreaker` -- in-memory, per-`cosmo run`-process; `record_done`/`record_blocked` |
+| `src/cosmo/run/quota.py` | `observe_harness_result` (primary+secondary), `HeuristicTracker` (tertiary), `decide` (the pause-vs-resume-vs-stop branch), `QuotaSignal`/`QuotaDecision` |
+| `src/cosmo/run/cost.py` | `check_run_cost`, `task_cost_ceiling_reached`, `CostVerdict` |
+| `src/cosmo/run/types.py` | `RunSummary`, `RunOutcome` |
+| `src/cosmo/task/machine.py` | `run_task` gains `run_id`/`on_harness_result`/`check_run_guard` -- all optional, all additive; see decision 3 |
+| `src/cosmo/task/types.py` | `RunGuardAction` (`BLOCK_COST`/`REQUEUE`) -- lives here, not `cosmo.run`, so the dependency direction (`run` depends on `task`, never reversed) holds |
+| `src/cosmo/harness/base.py` | `HarnessResult` gains `quota_window`/`quota_resets_at`/`tool_call_count`, all defaulted |
+| `src/cosmo/harness/claude/stream.py` | `extract_quota_signal` -- normalizes both observed rate-limit wire shapes into `(window, resets_at)` |
+| `src/cosmo/harness/fake/adapter.py` | `FakeOutcome.RATE_LIMIT`/`COST_OVERRUN` (Phase 3 scaffolding, unused until now) wired for real; `ScriptedCall` gains `quota_window`/`quota_resets_at`/`tool_call_count` |
+| `src/cosmo/store/writer.py` | `run_create`/`run_transition`/`run_cost_add`/`task_cost_add` -- `run_state`/`run_cost`/`task_cost`'s first real writer (Phase 1 shipped the tables unused); `queue_transition`/`queue_block`/`queue_complete`/`queue_retry` gain an optional `run_id` |
+| `src/cosmo/store/reader.py` | `RunRow`/`get_run`/`get_run_cost`/`get_task_cost`; `list_task_failures` gains an optional `run_id` filter |
+| `src/cosmo/events/envelope.py` | `EventType.RUN_COST_WARNING` (deviation 21) |
+| `src/cosmo/config/model.py`, `defaults.toml` | New `QuotaConfig`/`[quota]` section |
+| `src/cosmo/cli/main.py` | `cosmo run` gains `--dry-run`; `--task` becomes optional (omitted -> the DAG path); `cosmo queue add` gains cycle rejection at enqueue |
+| `tests/test_run_dag.py`, `test_run_breaker.py`, `test_run_quota.py`, `test_run_cost.py` | Pure-logic unit tests for each module, isolated from the store/CLI |
+| `tests/test_run_loop.py` | Integration tests: `run_queue` against `FakeHarnessAdapter`+`FakeGate` over a real git repo -- the plan's own multi-task-DAG, breaker-trip, 5h-auto-resume, weekly-beyond-budget, per-task-cost-ceiling, and run-wall-clock exit-criterion scenarios, plus the cross-run-retry regression (decision 7) |
+| `tests/test_cli_run_queue.py` | CLI glue: `--dry-run` rendering, cycle rejection, routing to `run_queue` (monkeypatched, same posture `test_cli_run.py` already took for `run_task`) |
+
+### Decisions made during Phase 8
+
+**1. `cosmo run --task <id>` and the no-`--task` DAG path stay two separate
+CLI code paths, not one path routing single-task through the DAG loop
+too.** The handoff explicitly asked this be decided and documented (the
+same "ambiguous CLI surface" framing every previous phase used). Routing
+single-task through `run_queue` would have been more uniform, but
+`run_queue` owns run-level concerns (a `run_state` row, the breaker, quota,
+cost, the 10h wall clock) that Phase 7's single-task command was never
+specified to have and whose tests never exercised; risking that already-
+green surface for uniformity's sake wasn't worth it. `cosmo run --task`
+is therefore untouched byte-for-byte in its own control flow (still passes
+`run_id=None` to `run_task`, exactly Phase 7's posture) -- the same
+"diagnostic entry point, no store surprises" stance `cosmo validate`/
+`cosmo harness probe` already take relative to the real state machine.
+
+**2. `run_id` now threads for real through every `task_queue`/
+`task_transitions`/`task_failures` write `run.loop` makes, via new optional
+`run_id` parameters on `StoreWriter.queue_transition`/`queue_block`/
+`queue_complete`/`queue_retry`** (defaulting to `None`, so every existing
+caller -- the CLI's standalone `queue retry`/`queue block` commands, Phase
+7's own single-task path -- is unaffected). `task.machine.run_task` no
+longer hardcodes a local `run_id: str | None = None`; it is now a real
+parameter, `None` by default. This is exactly the change Phase 7 decision
+10 predicted would be needed once "Phase 8's run-level state machine
+exists" -- confirmed for real when two Phase 5 tests (`test_git_merge.py`'s
+`merge_task(run_id="run-1", ...)` calls) started raising
+`sqlite3.IntegrityError: FOREIGN KEY constraint failed` the moment
+`queue_complete`/`queue_block` began writing that value through for real;
+fixed by giving those two tests a real `writer.run_create(run_id="run-1",
+...)` row to reference, not by loosening the FK.
+
+**3. `task.machine.run_task` gained two purely additive optional hooks --
+`on_harness_result`/`check_run_guard` -- rather than any restructuring of
+its retry/classification logic**, per the handoff's own instruction ("call
+it, don't reimplement any part of it"). `on_harness_result` observes every
+raw `HarnessResult` from `propose()`/`implement()` as it happens (cost
+accounting, quota-signal capture); `check_run_guard` is polled at exactly
+two points -- the top of `_do_proposing`'s attempt loop and the top of
+`run_task`'s main `while True:` loop, i.e. immediately before every new
+`PROPOSING`/`IMPLEMENTING` attempt -- and can ask the task to stop
+(`RunGuardAction.BLOCK_COST` -> `_block(reason=COST)`) or hand control back
+to the run loop (`RunGuardAction.REQUEUE` -> `_requeue`, a new terminal
+outcome distinct from `_block`: `attempt_count` untouched, status ->
+`QUEUED`). Both default to `None`; every existing call site (including
+`cosmo run --task`) is unaffected. `RunGuardAction` itself lives in
+`cosmo.task.types`, not `cosmo.run`, so `cosmo.task` never has to import
+the package that calls it -- the dependency direction stays one-way, the
+same discipline `cosmo.gate`/`cosmo.git` already established relative to
+`cosmo.task`.
+
+**4. Spec 7.1/7.2's primary quota signal now has a real field to detect,
+found by rereading a fixture Phase 3 already captured but never fully
+used.** `tests/fixtures/stream_json/api_retry.ndjson`'s `rate_limit_event`
+line carries `rate_limit_info: {status, resetsAt, rateLimitType}` --
+`rateLimitType: "five_hour"` is the first real evidence connecting spec
+7.1's two named windows (five-hour rolling, weekly) to an actual wire
+field; `resetsAt` is a real epoch-seconds reset ETA. `harness.claude.
+stream.extract_quota_signal` normalizes this (and the `system/api_retry`
+shape's `retry_after_ms`, which carries no window/ETA at all -- a short
+internal backoff, not a real reset time) into `(window, resets_at_iso)`,
+surfaced on `HarnessResult` as new `quota_window`/`quota_resets_at` fields
+(defaulted, so every existing keyword construction of `HarnessResult`
+stayed valid). `rate_limit_info.status` values other than a real denial
+were never observed for real (the fixture's own call still *succeeds*,
+subtype `"success"` -- the CLI's internal retry absorbed the limit), so
+`cosmo.run.quota.observe_harness_result` deliberately only treats a signal
+as actionable when the call it rode in on failed, never merely because a
+rate-limit-shaped event was present.
+
+**5. Spec 7.2's secondary signal (the terminal result's error subtype) has
+no real captured value behind it.** No real `claude -p` invocation in this
+project's history has ever actually exhausted a quota window, so there is
+no known string to match `output_summary` against. `QuotaConfig.
+result_error_subtypes` (default: `["error_rate_limit"]`) is a configured,
+clearly-flagged best guess -- correctable the day a real capture exists,
+the same posture the spec's own timeout defaults take pending real p95
+data (Open Item 2). Recorded so a future session doesn't mistake the
+current value for verified.
+
+**6. A real, unstubbed 5-hour `time.sleep` -- found by running `run_queue`
+directly outside pytest, not by a unit test's green.** The first version
+of the circuit-breaker test (3 distinct tasks failing `environment_error`)
+hung for real. Root cause: the tertiary wall-clock heuristic
+(`HeuristicTracker`, spec 7.2's last resort -- "repeated immediate
+failures... with no tool calls executed") and an ordinary
+`environment_error` block look *identical* from the outside (both are
+fast, zero-tool-call, failed calls), and the first version of `run_queue`
+fed every `BLOCKED`/`QUEUED` outcome to the heuristic *before* checking
+whether the breaker itself had already explained the same evidence. On the
+3rd blocked task, the heuristic fired first, and the run paused for a
+"confirmed-by-default" `five_hour` quota window with no injected `sleep`
+stub in that test -- a real 18000-second `time.sleep` (`QuotaConfig.
+default_5h_resume_delay_seconds`). Every mocked/fake-clock test in the
+suite passed regardless, since none of them happened to script exactly 3
+back-to-back environment failures with no explicit `sleep=` override; only
+a real, unmocked invocation surfaced it, echoing Phase 7's own "check with
+a real invocation" findings. Fixed by reordering: `_run_one_task` now
+returns only a *confirmed* (primary/secondary) quota signal in `_TaskRun
+Result.quota_signal`; the tertiary heuristic is consulted by `run_queue`
+itself, and only for a `BLOCKED` outcome that the breaker did *not* already
+trip on -- never for `DONE`/`QUEUED` at all. A confirmed signal still wins
+outright, checked before the breaker or the heuristic get any say.
+
+**7. Worktree/branch reuse across a within-run requeue is scoped to the
+*current* run, not "does a `worktree_path` exist at all" -- found by
+writing a genuine cross-run regression test, not by inspection.** A task
+returned to `QUEUED` by `check_run_guard` (wall clock or quota) keeps its
+`worktree_path` (`queue_transition` deliberately doesn't clear it, unlike
+`queue_complete`/`queue_block`'s own terminal-state handling) so the same
+attempt can resume without a redundant `git worktree add`. But a task
+`BLOCKED` in one `cosmo run` invocation and later retried (`cosmo queue
+retry`) by a *new* one still carries the *old* run's `worktree_path` --
+different `run_id`, different path. The first version of this logic
+reused any non-`None` `worktree_path` unconditionally; a dedicated
+cross-run test (block in run 1, retry, drive run 2) caught it two ways in
+sequence: first a `git worktree add` failure at the stale path (fixed by
+comparing the recorded path against `work_dir/<CURRENT run_id>/<task_id>`
+and falling through to `create_worktree` on a mismatch), then a *second*
+failure -- `fatal: a branch named 'task/<spec_id>' already exists` --
+since `git worktree add`'s branch name is task-scoped
+(`task/<spec_id>`), not run-scoped, and spec 3.2 deliberately retains a
+`BLOCKED` task's branch (not just its worktree) for inspection. Fixed by
+calling `git.worktree.remove_worktree` (worktree + branch) on the stale
+path before creating the fresh one -- a retry is a deliberate "start over,"
+not a resurrection of the abandoned attempt.
+
+**8. The circuit breaker is evaluated once per task's *terminal* `DONE`/
+`BLOCKED` outcome, in-memory, scoped to one `cosmo run` process -- not
+continuously mid-task, and not persisted/reconstructed across a restart.**
+Spec 6.5 is phrased in terms of task outcomes ("N distinct tasks... land in
+`BLOCKED`"), so per-task granularity is spec-faithful, not a shortcut.
+`merge_conflict`/`flaky_unresolved` blocks are excluded from the tally
+*entirely* (neither add to nor reset the consecutive-blocked streak) --
+spec 3.4's own framing: they signal queue contention over shared files,
+not a broken environment. A `PAUSED`-for-breaker run's in-memory tally is
+lost on restart, but that costs nothing real: spec 6.5's own "resuming
+requires manual intervention" already means a human reviews the situation
+before anything continues, and the persisted `run_state.status='paused'`
+row (not the tally) is what that review actually needs to see.
+
+**9. The breaker's per-task `environment_error` weight is computed from
+`task_failures`/`events`, scoped to the *current* `run_id`** (`list_task_
+failures` gains an optional `run_id` filter for exactly this) **--** a
+distinct task counts once (weight 1) if it had any `environment_error`
+failure during this run, or `config.circuit_breaker.reap_failure_weight`
+(default 2) instead if a process-reap failure occurred for it. The reap
+weight is read back from `TASK_FAILED` events carrying a
+`circuit_breaker_weight` payload key -- `proc.reap.cancel_and_reap`'s own
+existing hook (Phase 2, explicitly built "for the breaker, once it
+exists," per its own docstring), unused by anything until now.
+
+**10. `task_cost` stays deliberately lifetime-accumulated per `task_id`,
+never per-run.** `task_cost`'s schema (Phase 1, frozen -- forward-only
+migrations, no down-migration) has no `run_id` column, matching spec 8's
+own framing ("accumulated per-task cost", not per-task-per-run). A task
+once `BLOCKED` with `blocked_reason=cost` therefore stays over its ceiling
+across a later `cosmo queue retry` unless `cost.max_cost_per_task_usd`
+itself is raised -- the ceiling is a real, standing budget, not something a
+retry silently resets. `run_cost`, by contrast, is scoped to one `run_id`
+already (the schema's own `run_cost.run_id PRIMARY KEY REFERENCES run_
+state(run_id)`), so the run-level ceiling naturally resets each run.
+
+**11. `RunGuardAction` has exactly two members, mapped to two different
+task-level outcomes.** `BLOCK_COST` -> `_block(reason=COST)`: spec 7.3's
+literal behavior ("that task BLOCKED..., queue continues"). `REQUEUE` ->
+`_requeue` (new): spec 3.3's literal "in-flight task returns to QUEUED" for
+the run-level wall clock, extended by inference to a confirmed quota
+signal too -- neither is the task's own fault, and burning `attempt_count`
+against either would be wrong. `ESCALATE_CIRCUIT_BREAKER` (spec 9.3's own
+`NextAction` enum, called out as deferred to Phase 8 by both `gate.
+validate_task`'s docstring and Phase 7 decision 6) is deliberately *not*
+produced by anything in this phase: the breaker's own trip decision is a
+run-level judgment made *after* a task's outcome is already known and
+recorded (`task_failures.next_action` already written), not a retroactive
+rewrite of that row's `next_action` -- the run-level `run.paused` event
+(with `triggering_task`) is the breaker's real, separate signal instead.
+
+**12. `EventType.RUN_COST_WARNING` added -- not in spec 9.2's own
+enumerated event list.** Spec 7.3 requires "a warning event at 80% of
+`max_cost_per_run_usd`" but never names one; 9.2's list has no run-level
+warning event at all. Recorded as deviation 21. Emitted at most once per
+run (a `cost_warned` flag), not once per task that happens to still be
+over the threshold.
+
+**13. `cosmo run --dry-run` is a separate, lightweight CLI-only code path
+-- it never constructs a `StoreWriter`, an adapter, or calls `run.loop.
+run_queue` at all.** It calls `run.dag.resolve_execution_order` directly
+against `store.reader.list_tasks`, printing the order or a clean "cycle"
+error. This mirrors `cosmo validate`/`cosmo harness probe`'s existing
+"diagnostic entry point, no store side effects" posture (Phase 3/6) rather
+than adding a `dry_run` flag to `run_queue` itself, which would have made
+every real invocation's control flow branch around a mode that does
+nothing.
+
+**14. Cycle detection (`run.dag.find_cycle`) takes a plain `{task_id:
+depends_on}` mapping, not a `TaskRow`-shaped API.** `cosmo queue add`
+needs to check a cycle that includes the *not-yet-inserted* task being
+added -- building a full `TaskRow` for a row that doesn't exist in the
+store yet would be awkward for no benefit, since the function only ever
+needs the dependency graph shape. `resolve_execution_order` builds this
+same shape internally (restricted to non-`done` tasks -- a `done` task
+cannot participate in a live cycle, it already ran) and calls `find_cycle`
+defensively too, even though `queue add`'s own check should make a cycle
+unreachable in practice; belt-and-suspenders given the run loop is where a
+cycle would actually jam something.
+
+### Things that will matter later
+
+**No general startup sweep of stale worktrees across runs, despite spec
+3.2 naming one** ("a startup sweep prunes worktrees belonging to completed
+runs"). Decision 7 above fixes the one specific collision this phase's own
+testing hit (a retried, previously-`BLOCKED` task's stale worktree/branch)
+but does nothing for a worktree left behind by a task that was never
+retried, or by a run that crashed mid-task. Phase 9/10's own territory
+(deployment, long-running-process concerns) is the natural place for a
+real sweep.
+
+**Quota heuristic and secondary-signal config values are still guesses,
+not tuned against a real exhaustion** (`quota.heuristic_consecutive_
+threshold`/`heuristic_max_duration_seconds`/`result_error_subtypes`) --
+decisions 4/5 above already flag this per-value; noted again here since
+it's the kind of thing an acceptance run (Phase 10) is specifically
+positioned to falsify or confirm.
+
+**No CLI command to explicitly resume a `PAUSED` run.** A human reviewing
+a breaker trip or an interrupted quota pause currently just re-invokes
+`cosmo run` (no `--task`), which starts a *new* `run_id`/`run_state` row
+rather than resuming the paused one -- `PAUSED` rows simply accumulate with
+no resume linkage recorded. This may be the correct v1 posture (the spec
+never asks for a resume subcommand, and a fresh run naturally re-resolves
+the DAG from current `task_queue` state, achieving the same practical
+effect), but it means `run_state` rows don't tell a complete story of "was
+this run ever resumed" the way `task_queue`'s own retry history does.
+
+**Cost ceilings are only exercised against `FakeHarnessAdapter`'s
+scriptable `total_cost_usd` field, never a real per-token adapter** (none
+exists yet) -- unchanged from spec 7.3's own "inert for v1" framing, just
+restated here since Phase 8 is the mechanism's first real caller.
+
+**One project/repo per `cosmo run` (DAG mode), same as Phase 7's
+single-task `--repo` flag already assumed.** `task_queue` still has no
+`project_id`/repo linkage (Phase 7's own carried-forward item); a
+multi-project run would need either a schema column or a per-task
+resolution step neither this phase nor Phase 7 built. Decided and
+documented per the handoff's own request: v1 assumes one project per run.
+
 ## Deviations from the spec, cumulative
 
 Kept here so a future spec revision can absorb them in one pass.
@@ -1437,3 +1722,8 @@ Kept here so a future spec revision can absorb them in one pass.
 | 18 | `VALIDATING`'s `timeouts.validating_wall`/`validating_stall` are not wired to an external timer | §3.3 | 7 | `gate.stage_timeout_seconds` (Phase 6) already bounds each gate stage and converts a stage timeout to `environment_error` before `task/machine.py` ever sees it; `run_validation_gate` has no `cancel()` hook, so a second outer timer could only abandon a thread without stopping the Docker containers it started |
 | 19 | `environment_error`'s retry bound (both `IMPLEMENTING` and `VALIDATING`) reuses `retries.max_attempts` rather than a dedicated field | §6.2, §6.5 | 7 | Spec 6.2 says it "does not count toward the retry limit" with no bound at all; without Phase 8's circuit breaker to eventually stop a stuck environment across tasks, an explicit local bound is the conservative interim choice, not the real fix |
 | 20 | `ProgressConfig`/`[progress].poll_interval_seconds` added | §4 | 7 | Spec names "polling fallback at 5-10s" but no config field existed for it; also reused as the native-progress poll interval since there is no separate stream-driven path (deviation 17) |
+| 21 | `EventType.RUN_COST_WARNING` added, not in spec 9.2's own enumerated event list | §7.3, §9.2 | 8 | §7.3 requires "a warning event at 80% of max_cost_per_run_usd" but never names one; §9.2's list has no run-level warning event at all |
+| 22 | `HarnessResult` gains `quota_window`/`quota_resets_at`/`tool_call_count`, all defaulted | §2.2, §7.2 | 8 | The uniform result object needs a harness-agnostic way to carry a quota/liveness signal out of the adapter layer; spec 2.2 names none |
+| 23 | `rate_limit_info.rateLimitType`/`resetsAt` identified as the real field connecting spec 7.1's two named windows to an actual wire value | §7.1, §7.2 | 8 | Found by rereading `tests/fixtures/stream_json/api_retry.ndjson` (already captured in Phase 3, never fully used); the spec names "five-hour rolling"/"weekly" conceptually but no field to detect which one from |
+| 24 | `task.types.RunGuardAction` (`BLOCK_COST`/`REQUEUE`) added | §7.3, §3.3, §7.1 | 8 | The minimal, purely additive seam `task.machine.run_task` needed so the run loop can stop a task's retries (cost) or hand control back (wall clock/quota) without reimplementing any of Phase 7's retry/classification logic |
+| 25 | `cosmo run --task <id>` and the no-`--task` DAG path are two separate CLI code paths, not one path routing single-task through the DAG loop | §3.1, §5 | 8 | Protects Phase 7's already-tested single-task behavior (including its `run_id=None` posture) from `run_queue`'s run-level concerns (breaker/quota/cost/wall clock), which single-task mode was never specified to have |

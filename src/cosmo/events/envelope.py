@@ -27,6 +27,11 @@ class EventType(enum.Enum):
     RUN_RESUMED = "run.resumed"
     RUN_STOPPED = "run.stopped"
     RUN_SUMMARY = "run.summary"
+    RUN_COST_WARNING = "run.cost_warning"
+    """Phase 8 addition, not in spec 9.2's own enumerated list -- spec 7.3
+    requires "a warning event at 80% of max_cost_per_run_usd" but never
+    names one. See `docs/v3-implementation-state.md`'s cumulative deviation
+    table."""
     AGENT_ASSETS_SYNCED = "agent_assets.synced"
     TASK_STATE_CHANGED = "task.state_changed"
     TASK_FAILED = "task.failed"

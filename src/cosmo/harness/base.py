@@ -36,7 +36,17 @@ class HarnessCapabilities:
 
 @dataclass(frozen=True, slots=True)
 class HarnessResult:
-    """The uniform result object every adapter method returns (spec 2.2)."""
+    """The uniform result object every adapter method returns (spec 2.2).
+
+    `quota_window`/`quota_resets_at`/`tool_call_count` are Phase 8 additions,
+    appended with defaults so every existing keyword construction stays
+    valid. Harness-agnostic by design (spec 2's own discipline: core code
+    never branches on which harness produced a result) -- an adapter with no
+    rate-limit-shaped wire signal at all (`FakeHarnessAdapter`, any future
+    non-Claude adapter) simply never sets `quota_window`, and Phase 8's
+    quota detection degrades to its secondary/tertiary signals for it, the
+    same as spec 7.2 already prescribes for a harness with no primary
+    signal."""
 
     success: bool
     output_summary: str
@@ -46,6 +56,18 @@ class HarnessResult:
     total_cost_usd: float | None
     exit_code: int | None
     session_id: str | None
+    quota_window: str | None = None
+    """Spec 7.1's window this result's rate-limit signal (if any) names --
+    `"five_hour"` or `"weekly"` -- from the harness's primary structured
+    quota signal, when it has one (spec 4/7.2).
+    `None` means no such signal was observed on this call."""
+    quota_resets_at: str | None = None
+    """UTC ISO 8601 timestamp the named window resets at, when the wire
+    signal carries one. `None` if unknown even though `quota_window` is set
+    (e.g. the `system/api_retry` shape, spec 4's own capture note)."""
+    tool_call_count: int = 0
+    """Spec 7.2's wall-clock heuristic needs "no tool calls executed";
+    0 for any adapter with no stream to count from."""
 
 
 class HarnessAdapter(ABC):

@@ -25,6 +25,7 @@ from __future__ import annotations
 import enum
 import json
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 
 
@@ -150,6 +151,10 @@ class StreamReader:
         self.terminal_result: ClassifiedEvent | None = None
         self.latest_rate_limit: ClassifiedEvent | None = None
         self.session_id: str | None = None
+        self.tool_call_count = 0
+        """Spec 7.2's wall-clock quota heuristic keys on "no tool calls
+        executed"; counted here rather than re-scanning `events` later
+        since this is the one place that already sees every line once."""
 
     def feed(self, chunk: bytes) -> None:
         for line in self._lines.feed(chunk):
@@ -167,4 +172,57 @@ class StreamReader:
             self.terminal_result = event
         elif event.kind is ClassifiedKind.RATE_LIMIT:
             self.latest_rate_limit = event
+        elif event.kind is ClassifiedKind.TOOL_CALL:
+            self.tool_call_count += 1
         return event
+
+
+def extract_quota_signal(reader: StreamReader) -> tuple[str | None, str | None]:
+    """Spec 7.1/7.2's primary quota signal, normalized from whichever of the
+    two observed wire shapes `reader.latest_rate_limit` last held (see this
+    module's docstring on `rate_limit_event` vs. `system/api_retry`).
+    Returns `(window, resets_at_iso)`; `(None, None)` if no rate-limit-shaped
+    event was seen on this call at all.
+
+    Deliberately returns whatever was last observed regardless of
+    `HarnessResult.success` -- the fixture behind
+    `test_api_retry_is_the_primary_quota_signal_in_both_observed_shapes`
+    shows a real capture where the CLI's own internal retry absorbed a rate
+    limit and the call still succeeded. Whether an observed signal is
+    *actionable* (the call ultimately failed) is a policy question for
+    `cosmo.run.quota`, not a parsing question for this module.
+    """
+    event = reader.latest_rate_limit
+    if event is None:
+        return None, None
+
+    info = event.payload.get("rate_limit_info")
+    if isinstance(info, dict):
+        window = _normalize_window(info.get("rateLimitType"))
+        resets_epoch = info.get("resetsAt")
+        resets_at = (
+            _epoch_seconds_to_iso(resets_epoch) if isinstance(resets_epoch, int | float) else None
+        )
+        return window, resets_at
+
+    # The `system/api_retry` shape (`{"type": "system", "subtype":
+    # "api_retry", "retry_after_ms": ...}`) carries no window or reset-ETA
+    # field at all -- `retry_after_ms` is a short internal backoff (30s in
+    # the captured fixture), not a real quota reset time, so it is never
+    # used as `resets_at`. Still a real signal that *some* rate limit was
+    # touched; default to the shorter, safer window with an unknown reset
+    # time -- the caller falls back to its own configured default delay.
+    return "five_hour", None
+
+
+def _normalize_window(raw: object) -> str:
+    # Spec 7.1 names exactly two windows. `rateLimitType` values beyond
+    # "five_hour" are treated as the weekly cap -- the only other window
+    # the spec defines -- rather than matched against a specific string,
+    # since no real capture of the weekly-cap shape exists yet (see
+    # `QuotaConfig`'s docstring).
+    return "five_hour" if raw == "five_hour" else "weekly"
+
+
+def _epoch_seconds_to_iso(value: float) -> str:
+    return datetime.fromtimestamp(value, tz=UTC).isoformat(timespec="milliseconds")

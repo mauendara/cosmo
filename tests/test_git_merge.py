@@ -147,6 +147,16 @@ def test_blocked_with_merge_conflict_when_rebase_itself_conflicts(tmp_path: Path
     writer.queue_add(task_id="task1", spec_path="p1", max_attempts=2)
     writer.queue_add(task_id="task2", spec_path="p2", max_attempts=2)
     emitter = EventEmitter(writer)
+    # Phase 8: task_transitions.run_id/task_failures.run_id now carry a
+    # real, FK-enforced value -- a run_state row must exist for "run-1"
+    # before merge_task (a real writer of both) can reference it.
+    writer.run_create(
+        run_id="run-1",
+        harness="claude",
+        permission_mode="dontAsk",
+        max_turns=80,
+        base_branch="develop",
+    )
 
     task1 = create_worktree(
         repo_path=repo,
@@ -228,6 +238,13 @@ def test_a_clean_merge_needs_no_rebase(tmp_path: Path) -> None:
     writer = StoreWriter(db_path)
     writer.queue_add(task_id="task1", spec_path="p1", max_attempts=2)
     emitter = EventEmitter(writer)
+    writer.run_create(
+        run_id="run-1",
+        harness="claude",
+        permission_mode="dontAsk",
+        max_turns=80,
+        base_branch="develop",
+    )
 
     task1 = create_worktree(
         repo_path=repo,

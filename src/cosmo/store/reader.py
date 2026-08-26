@@ -73,6 +73,21 @@ class TaskFailureRow:
 
 
 @dataclass(frozen=True, slots=True)
+class RunRow:
+    run_id: str
+    status: str
+    harness: str
+    permission_mode: str
+    max_turns: int
+    base_branch: str
+    pause_reason: str | None
+    stop_reason: str | None
+    started_at: str
+    updated_at: str
+    stopped_at: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class ProjectRow:
     project_id: str
     target_path: str
@@ -197,19 +212,29 @@ def list_events(
         conn.close()
 
 
-def list_task_failures(db_path: Path, task_id: str) -> list[TaskFailureRow]:
+def list_task_failures(
+    db_path: Path, task_id: str, *, run_id: str | None = None
+) -> list[TaskFailureRow]:
     """Feeds spec 6.3's informed retries: `record_task_failure` already
     persists everything the retry prompt needs (`error_detail`, which stage,
     which attempt), so the state machine reads it back here rather than
     threading a `GateResult`/failure detail across the retry boundary by
-    hand."""
+    hand. `run_id` (Phase 8) narrows to failures recorded during one run --
+    the circuit breaker's per-task `environment_error` tally needs exactly
+    that scope, not a task's full cross-run history."""
     if not db_path.exists():
         return []
     conn = connect_reader(db_path)
     try:
-        rows = conn.execute(
-            "SELECT * FROM task_failures WHERE task_id = ? ORDER BY id", (task_id,)
-        ).fetchall()
+        if run_id is not None:
+            rows = conn.execute(
+                "SELECT * FROM task_failures WHERE task_id = ? AND run_id = ? ORDER BY id",
+                (task_id, run_id),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM task_failures WHERE task_id = ? ORDER BY id", (task_id,)
+            ).fetchall()
         return [
             TaskFailureRow(
                 id=r["id"],
@@ -227,6 +252,57 @@ def list_task_failures(db_path: Path, task_id: str) -> list[TaskFailureRow]:
             )
             for r in rows
         ]
+    finally:
+        conn.close()
+
+
+def get_run(db_path: Path, run_id: str) -> RunRow | None:
+    if not db_path.exists():
+        return None
+    conn = connect_reader(db_path)
+    try:
+        row = conn.execute("SELECT * FROM run_state WHERE run_id = ?", (run_id,)).fetchone()
+        if row is None:
+            return None
+        return RunRow(
+            run_id=row["run_id"],
+            status=row["status"],
+            harness=row["harness"],
+            permission_mode=row["permission_mode"],
+            max_turns=row["max_turns"],
+            base_branch=row["base_branch"],
+            pause_reason=row["pause_reason"],
+            stop_reason=row["stop_reason"],
+            started_at=row["started_at"],
+            updated_at=row["updated_at"],
+            stopped_at=row["stopped_at"],
+        )
+    finally:
+        conn.close()
+
+
+def get_run_cost(db_path: Path, run_id: str) -> float:
+    if not db_path.exists():
+        return 0.0
+    conn = connect_reader(db_path)
+    try:
+        row = conn.execute(
+            "SELECT total_cost_usd FROM run_cost WHERE run_id = ?", (run_id,)
+        ).fetchone()
+        return float(row["total_cost_usd"]) if row is not None else 0.0
+    finally:
+        conn.close()
+
+
+def get_task_cost(db_path: Path, task_id: str) -> float:
+    if not db_path.exists():
+        return 0.0
+    conn = connect_reader(db_path)
+    try:
+        row = conn.execute(
+            "SELECT total_cost_usd FROM task_cost WHERE task_id = ?", (task_id,)
+        ).fetchone()
+        return float(row["total_cost_usd"]) if row is not None else 0.0
     finally:
         conn.close()
 

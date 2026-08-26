@@ -87,7 +87,17 @@ def test_hang_blocks_until_cancel_is_called() -> None:
     assert results == [False]
 
 
-def test_rate_limit_and_cost_overrun_outcomes_report_failure_with_their_own_fields() -> None:
+def test_rate_limit_and_cost_overrun_outcomes_report_their_own_fields() -> None:
+    """Phase 8 is the first real caller of these two `FakeOutcome` values
+    (Phase 3's own docstring on `ScriptedCall` flagged their nuance as
+    deliberately unmodeled until whichever phase needed it). RATE_LIMIT is a
+    genuinely failed call carrying a quota signal (`cosmo.run.quota` only
+    treats a signal as actionable on a failed call, matching the real
+    Claude adapter's `extract_quota_signal`). COST_OVERRUN is the opposite
+    case spec 7.3 actually describes: an otherwise-successful call whose
+    reported cost is what becomes the problem -- distinct from RATE_LIMIT
+    so a test can exercise the cost-ceiling path without also tripping
+    quota detection."""
     adapter = _adapter(
         script=[
             ScriptedCall(outcome=FakeOutcome.RATE_LIMIT, output_summary="rate limited"),
@@ -100,5 +110,6 @@ def test_rate_limit_and_cost_overrun_outcomes_report_failure_with_their_own_fiel
 
     assert rate_limited.success is False
     assert rate_limited.output_summary == "rate limited"
-    assert cost_overrun.success is False
+    assert rate_limited.quota_window == "five_hour"
+    assert cost_overrun.success is True
     assert cost_overrun.total_cost_usd == 999.0

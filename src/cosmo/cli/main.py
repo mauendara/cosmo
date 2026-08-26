@@ -38,8 +38,10 @@ from cosmo.harness import (
     resolve_harness_name,
 )
 from cosmo.harness.base import HarnessCapabilities, HarnessResult
+from cosmo.run.dag import DagCycleError, find_cycle, resolve_execution_order
+from cosmo.run.loop import run_queue
 from cosmo.store import StoreWriter, TaskNotFoundError
-from cosmo.store.enums import BlockedReason, TaskStatus
+from cosmo.store.enums import BlockedReason, RunStatus, StopReason, TaskStatus
 from cosmo.store.reader import (
     find_project_by_path,
     get_progress,
@@ -338,23 +340,52 @@ def validate_cmd(
 
 @app.command("run")
 def run_cmd(
-    task_id: Annotated[
-        str, typer.Option("--task", help="A task already added via `cosmo queue add`.")
-    ],
+    *,
     repo: Annotated[
         Path, typer.Option(help="Cosmo's own checkout of the target repo, on base_branch.")
     ],
+    task_id: Annotated[
+        str | None,
+        typer.Option(
+            "--task",
+            help="Drive only this one queued task (plan Phase 7 posture), instead of the "
+            "full DAG (plan Phase 8, the default when omitted).",
+        ),
+    ] = None,
     base_branch: Annotated[
         str | None, typer.Option(help="Defaults to git.base_branch from config.")
     ] = None,
     harness: HarnessOption = None,
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run",
+            help="Print the DAG's resolved multi-task execution order without executing "
+            "anything. Ignored (and irrelevant) with --task.",
+        ),
+    ] = False,
     config: ConfigOption = None,
 ) -> None:
-    """Drive one queued task through the full spec 3.2 state machine (plan
-    Phase 7 exit criterion): `QUEUED -> PROPOSING -> ... -> DONE`, or
-    `BLOCKED` on an unrecoverable failure. Creates the task's worktree
-    (spec 3.2/10.5), then calls `task.machine.run_task`."""
+    """`--task <id>`: drive one queued task through the full spec 3.2 state
+    machine (plan Phase 7 exit criterion) -- `QUEUED -> PROPOSING -> ... ->
+    DONE`, or `BLOCKED` on an unrecoverable failure. No `--task`: drive the
+    *whole* queue as a dependency-ordered DAG (plan Phase 8 exit criterion)
+    via `run.loop.run_queue` -- strictly serial (spec 5), until the queue
+    empties, a circuit breaker trips, a quota/cost ceiling stops it, or the
+    run-level wall clock expires. Both paths create each task's worktree
+    (spec 3.2/10.5) the same way; deliberately kept as two paths rather than
+    routing single-task through the DAG loop too, so Phase 7's already-
+    tested single-task behavior (including its `run_id=None`, no-run-
+    tracking posture) is untouched -- see `docs/v3-implementation-state.
+    md`'s Phase 8 section for the full reasoning."""
     cfg = _load(config)
+
+    if task_id is None:
+        _run_queue_cmd(
+            repo=repo, base_branch=base_branch, harness=harness, dry_run=dry_run, cfg=cfg
+        )
+        return
+
     task = get_task(cfg.paths.db_path, task_id)
     if task is None:
         err_console.print(f"[red]no such task: {task_id!r}[/red]")
@@ -408,6 +439,67 @@ def run_cmd(
     style = "green" if final_status is TaskStatus.DONE else "yellow"
     console.print(f"[{style}]{final_status.value}[/{style}] {task_id}")
     if final_status is not TaskStatus.DONE:
+        raise typer.Exit(code=1)
+
+
+_RUN_SUCCESSFUL_STOP_REASONS = frozenset({StopReason.COMPLETED, StopReason.QUEUE_EMPTY})
+
+
+def _run_queue_cmd(
+    *,
+    repo: Path,
+    base_branch: str | None,
+    harness: str | None,
+    dry_run: bool,
+    cfg: CosmoConfig,
+) -> None:
+    resolved_base = base_branch if base_branch is not None else cfg.git.base_branch
+    name, source = resolve_harness_name(harness, None, cfg.harness.name)
+    console.print(f"harness: [bold]{name}[/bold] (from {source})")
+
+    if dry_run:
+        try:
+            order = resolve_execution_order(list_tasks(cfg.paths.db_path))
+        except DagCycleError as exc:
+            err_console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(code=1) from None
+        if not order:
+            console.print("[yellow]no eligible queued tasks[/yellow]")
+            return
+        for i, tid in enumerate(order, start=1):
+            console.print(f"{i}. {tid}")
+        return
+
+    try:
+        adapter = get_adapter(name)(cfg)
+    except UnknownHarnessError as exc:
+        err_console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from None
+
+    writer = StoreWriter(cfg.paths.db_path)
+    try:
+        emitter = EventEmitter(writer)
+        outcome = run_queue(
+            config=cfg,
+            writer=writer,
+            emitter=emitter,
+            adapter=adapter,
+            repo_path=repo,
+            base_branch=resolved_base,
+            harness_name=name,
+        )
+    finally:
+        writer.close()
+
+    ok = outcome.status is RunStatus.STOPPED and outcome.stop_reason in _RUN_SUCCESSFUL_STOP_REASONS
+    style = "green" if ok else "yellow"
+    reason = f" ({outcome.stop_reason.value})" if outcome.stop_reason is not None else ""
+    console.print(f"[{style}]{outcome.status.value}{reason}[/{style}]")
+    console.print(
+        f"completed={outcome.summary.completed} blocked={outcome.summary.blocked} "
+        f"requeued={outcome.summary.requeued} retried={outcome.summary.retried}"
+    )
+    if not ok:
         raise typer.Exit(code=1)
 
 
@@ -651,12 +743,28 @@ def queue_add(
 ) -> None:
     cfg = _load(config)
     resolved_task_id = task_id or Path(spec_path).stem
+    resolved_depends_on = list(depends_on) if depends_on else []
+
+    # Spec 5: "cycle detection at enqueue". Checked against every
+    # not-yet-`done` task already in the queue plus this not-yet-inserted
+    # one -- `run.dag.find_cycle` takes a plain {task_id: depends_on} graph
+    # for exactly this reason, so no full `TaskRow` needs constructing for
+    # a task that doesn't exist yet.
+    existing = {
+        t.task_id: t.depends_on for t in list_tasks(cfg.paths.db_path) if t.status != "done"
+    }
+    existing[resolved_task_id] = resolved_depends_on
+    cycle = find_cycle(existing)
+    if cycle is not None:
+        err_console.print(f"[red]depends_on cycle: {' -> '.join(cycle)}[/red]")
+        raise typer.Exit(code=1)
+
     writer = StoreWriter(cfg.paths.db_path)
     try:
         result = writer.queue_add(
             task_id=resolved_task_id,
             spec_path=spec_path,
-            depends_on=list(depends_on) if depends_on else [],
+            depends_on=resolved_depends_on,
             priority=priority,
             max_attempts=max_attempts if max_attempts is not None else cfg.retries.max_attempts,
             allow_test_edits=allow_test_edits,

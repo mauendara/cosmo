@@ -21,7 +21,16 @@ from pathlib import Path
 
 from cosmo.store.clock import utcnow_iso
 from cosmo.store.connection import checkpoint_truncate, connect_writer
-from cosmo.store.enums import BlockedReason, FailureStage, FailureType, NextAction, TaskStatus
+from cosmo.store.enums import (
+    BlockedReason,
+    FailureStage,
+    FailureType,
+    NextAction,
+    PauseReason,
+    RunStatus,
+    StopReason,
+    TaskStatus,
+)
 from cosmo.store.migrations import migrate
 
 WriteJob = Callable[[sqlite3.Connection], None]
@@ -124,7 +133,7 @@ class StoreWriter:
                 task_id, run_id=None, from_state=None, to_state="queued", now=now
             )
 
-    def queue_retry(self, task_id: str) -> TransitionResult:
+    def queue_retry(self, task_id: str, *, run_id: str | None = None) -> TransitionResult:
         """Reset a `blocked` or `failed_retry` task back to `queued`."""
         now = utcnow_iso()
         with self._conn:
@@ -138,7 +147,7 @@ class StoreWriter:
                 (now, task_id),
             )
             return self._record_transition(
-                task_id, run_id=None, from_state=from_state, to_state="queued", now=now
+                task_id, run_id=run_id, from_state=from_state, to_state="queued", now=now
             )
 
     def queue_block(
@@ -146,6 +155,7 @@ class StoreWriter:
         task_id: str,
         blocked_reason: BlockedReason,
         *,
+        run_id: str | None = None,
         note: str | None = None,
     ) -> TransitionResult:
         now = utcnow_iso()
@@ -161,19 +171,22 @@ class StoreWriter:
                 (blocked_reason.value, note, now, task_id),
             )
             return self._record_transition(
-                task_id, run_id=None, from_state=from_state, to_state="blocked", now=now
+                task_id, run_id=run_id, from_state=from_state, to_state="blocked", now=now
             )
 
-    def queue_transition(self, task_id: str, to_state: TaskStatus) -> TransitionResult:
+    def queue_transition(
+        self, task_id: str, to_state: TaskStatus, *, run_id: str | None = None
+    ) -> TransitionResult:
         """The generic `task_queue.status` setter Phase 7 needs for every
         state that has no dedicated method above (`proposing`, `proposed`,
         `implementing`, `validating`, `committing`, `merging`,
-        `failed_retry`) -- `queued`/`blocked`/`done` keep their own named
-        methods above since they also touch other columns
-        (`blocked_reason`, `worktree_path`). `run_id` is always `None` here,
-        like every other write site in this class -- `task_transitions.
-        run_id` has a real, enforced FK to `run_state`, which nothing writes
-        a row to until Phase 8's run-level state machine exists."""
+        `failed_retry`, and now `queued` again for Phase 8's run-wall-clock
+        requeue) -- `queued`/`blocked`/`done` also keep their own named
+        methods above since those touch other columns (`blocked_reason`,
+        `worktree_path`). `run_id` defaults to `None` for every caller
+        outside a run (the CLI's standalone `queue retry`/`queue block`
+        commands, which have no run to attribute to) -- `task.machine.
+        run_task` (Phase 8) is the one caller that now passes a real value."""
         now = utcnow_iso()
         with self._conn:
             from_state = self._current_status(task_id)
@@ -182,7 +195,7 @@ class StoreWriter:
                 (to_state.value, now, task_id),
             )
             return self._record_transition(
-                task_id, run_id=None, from_state=from_state, to_state=to_state.value, now=now
+                task_id, run_id=run_id, from_state=from_state, to_state=to_state.value, now=now
             )
 
     def queue_begin_attempt(self, task_id: str) -> int:
@@ -218,7 +231,7 @@ class StoreWriter:
                 (str(worktree_path), now, task_id),
             )
 
-    def queue_complete(self, task_id: str) -> TransitionResult:
+    def queue_complete(self, task_id: str, *, run_id: str | None = None) -> TransitionResult:
         """`DONE`: the worktree has already been removed by the caller (spec
         3.2), so `worktree_path` is cleared here rather than left dangling."""
         now = utcnow_iso()
@@ -233,7 +246,7 @@ class StoreWriter:
                 (now, task_id),
             )
             return self._record_transition(
-                task_id, run_id=None, from_state=from_state, to_state="done", now=now
+                task_id, run_id=run_id, from_state=from_state, to_state="done", now=now
             )
 
     # -- task_failures (spec 9.3) -------------------------------------------
@@ -281,6 +294,116 @@ class StoreWriter:
                     event_id,
                 ),
             )
+
+    # -- run_state / run_cost / task_cost (spec 3.1, 7.3) -- Phase 8's own
+    # first real writer; the tables shipped unused since Phase 1. ----------
+    def run_create(
+        self,
+        *,
+        run_id: str,
+        harness: str,
+        permission_mode: str,
+        max_turns: int,
+        base_branch: str,
+    ) -> None:
+        """Inserts at `idle` (spec 3.1's own starting state) -- the caller
+        transitions to `running` via `run_transition` immediately after, the
+        same "insert, then transition" split `queue_add`/`queue_transition`
+        already use for tasks, so `run.started` has a real row to reference
+        by the time it's emitted."""
+        now = utcnow_iso()
+        with self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO run_state (
+                    run_id, status, harness, permission_mode, max_turns, base_branch,
+                    started_at, updated_at
+                ) VALUES (?, 'idle', ?, ?, ?, ?, ?, ?)
+                """,
+                (run_id, harness, permission_mode, max_turns, base_branch, now, now),
+            )
+            self._conn.execute(
+                "INSERT INTO run_cost (run_id, total_cost_usd, updated_at) VALUES (?, 0.0, ?)",
+                (run_id, now),
+            )
+
+    def run_transition(
+        self,
+        run_id: str,
+        status: RunStatus,
+        *,
+        pause_reason: PauseReason | None = None,
+        stop_reason: StopReason | None = None,
+    ) -> None:
+        """`pause_reason`/`stop_reason` are set exactly on the transition
+        that carries them and left alone otherwise (`COALESCE`-free here,
+        unlike `stopped_at` below, since a later `RUNNING`->`PAUSED` cycle
+        with a *different* reason should overwrite the old one outright, not
+        retain it)."""
+        now = utcnow_iso()
+        stopped_at = now if status is RunStatus.STOPPED else None
+        with self._conn:
+            self._conn.execute(
+                """
+                UPDATE run_state
+                SET status = ?, pause_reason = ?, stop_reason = ?, updated_at = ?,
+                    stopped_at = COALESCE(?, stopped_at)
+                WHERE run_id = ?
+                """,
+                (
+                    status.value,
+                    pause_reason.value if pause_reason is not None else None,
+                    stop_reason.value if stop_reason is not None else None,
+                    now,
+                    stopped_at,
+                    run_id,
+                ),
+            )
+
+    def run_cost_add(self, run_id: str, delta_usd: float) -> float:
+        """UPSERT-accumulate (spec 8: current-state, one row per run, never
+        one row per tick). Returns the new running total so the caller
+        (spec 7.3's ceiling/80%-warning checks) doesn't need a second
+        query."""
+        now = utcnow_iso()
+        with self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO run_cost (run_id, total_cost_usd, updated_at) VALUES (?, ?, ?)
+                ON CONFLICT(run_id) DO UPDATE SET
+                    total_cost_usd = total_cost_usd + excluded.total_cost_usd,
+                    updated_at = excluded.updated_at
+                """,
+                (run_id, delta_usd, now),
+            )
+            row = self._conn.execute(
+                "SELECT total_cost_usd FROM run_cost WHERE run_id = ?", (run_id,)
+            ).fetchone()
+            return float(row["total_cost_usd"])
+
+    def task_cost_add(self, task_id: str, delta_usd: float) -> float:
+        """Deliberately lifetime-accumulated per `task_id`, not per-run:
+        `task_cost`'s schema (Phase 1) has no `run_id` column, matching
+        spec 8's own framing ("accumulated per-task cost", not
+        per-task-per-run). A task once `BLOCKED` with `blocked_reason=cost`
+        therefore stays over its ceiling across a later `queue retry` unless
+        `cost.max_cost_per_task_usd` is raised -- the ceiling is a real
+        budget, not something a retry silently resets."""
+        now = utcnow_iso()
+        with self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO task_cost (task_id, total_cost_usd, updated_at) VALUES (?, ?, ?)
+                ON CONFLICT(task_id) DO UPDATE SET
+                    total_cost_usd = total_cost_usd + excluded.total_cost_usd,
+                    updated_at = excluded.updated_at
+                """,
+                (task_id, delta_usd, now),
+            )
+            row = self._conn.execute(
+                "SELECT total_cost_usd FROM task_cost WHERE task_id = ?", (task_id,)
+            ).fetchone()
+            return float(row["total_cost_usd"])
 
     def _current_status(self, task_id: str) -> str:
         row = self._conn.execute(

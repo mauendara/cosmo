@@ -18,7 +18,7 @@ from cosmo.checks import CheckResult, check_executable, fail, ok, warn
 from cosmo.config import CosmoConfig
 from cosmo.events import EventEmitter
 from cosmo.harness.base import HarnessAdapter, HarnessCapabilities, HarnessResult
-from cosmo.harness.claude.stream import ClassifiedEvent, StreamReader
+from cosmo.harness.claude.stream import ClassifiedEvent, StreamReader, extract_quota_signal
 from cosmo.proc import ManagedProcess, cancel_and_reap
 
 BINARY = "claude"
@@ -263,6 +263,7 @@ class ClaudeCodeAdapter(HarnessAdapter):
         duration_seconds = time.monotonic() - started
         terminal = reader.terminal_result
         success = exit_code == 0  # spec 2.3: zero vs non-zero exit only, never a specific value
+        quota_window, quota_resets_at = extract_quota_signal(reader)
 
         return HarnessResult(
             success=success,
@@ -273,6 +274,9 @@ class ClaudeCodeAdapter(HarnessAdapter):
             total_cost_usd=_extract(terminal, "total_cost_usd"),
             exit_code=exit_code,
             session_id=reader.session_id,
+            quota_window=quota_window,
+            quota_resets_at=quota_resets_at,
+            tool_call_count=reader.tool_call_count,
         )
 
 

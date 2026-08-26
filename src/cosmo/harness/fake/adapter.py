@@ -46,6 +46,13 @@ class ScriptedCall:
     total_cost_usd: float | None = None
     exit_code: int | None = None
     session_id: str | None = "fake-session"
+    tool_call_count: int = 0
+    # Only meaningful for FakeOutcome.RATE_LIMIT (Phase 8): lets a test
+    # script exactly which spec 7.1 window and reset ETA the scripted call
+    # reports, the fake-adapter equivalent of `extract_quota_signal`'s
+    # output for the real Claude adapter.
+    quota_window: str | None = None
+    quota_resets_at: str | None = None
 
 
 class FakeHarnessAdapter(HarnessAdapter):
@@ -137,8 +144,17 @@ class FakeHarnessAdapter(HarnessAdapter):
                 session_id=call.session_id,
             )
 
-        success = call.outcome is FakeOutcome.SUCCESS
+        # COST_OVERRUN is a normal, successful call that happens to report a
+        # high total_cost_usd (spec 7.3: it's the cumulative run/task total
+        # that becomes a problem, not any single call failing). RATE_LIMIT
+        # is a genuinely failed call, matching this module's own quota
+        # design: a rate-limit signal is only actionable when the call it
+        # rode in on did not succeed (see `cosmo.run.quota`).
+        success = call.outcome in (FakeOutcome.SUCCESS, FakeOutcome.COST_OVERRUN)
         exit_code = call.exit_code if call.exit_code is not None else (0 if success else 1)
+        quota_window = call.quota_window
+        if call.outcome is FakeOutcome.RATE_LIMIT and quota_window is None:
+            quota_window = "five_hour"
         return HarnessResult(
             success=success,
             output_summary=call.output_summary or call.outcome.value,
@@ -148,4 +164,7 @@ class FakeHarnessAdapter(HarnessAdapter):
             total_cost_usd=call.total_cost_usd,
             exit_code=exit_code,
             session_id=call.session_id,
+            quota_window=quota_window,
+            quota_resets_at=call.quota_resets_at,
+            tool_call_count=call.tool_call_count,
         )

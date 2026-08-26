@@ -99,6 +99,22 @@ max_file_lines = 400
 # (docs/v3-implementation-state.md's Phase 7 section explains why).
 poll_interval_seconds = 7
 
+[quota]
+# Spec 7.1/7.2. Primary detection is the stream-json rate-limit signal
+# (harness.claude.stream.extract_quota_signal); this section only configures
+# the secondary and tertiary fallbacks.
+# Secondary: terminal `result` error subtypes that mean "quota exhausted".
+# Unverified against a real capture -- see QuotaConfig's docstring.
+result_error_subtypes = ["error_rate_limit"]
+# Tertiary (wall-clock heuristic, severity=warning, never confirmed):
+# this many consecutive distinct tasks failing near-instantly with zero
+# tool calls is treated as a probable (not confirmed) quota exhaustion.
+heuristic_consecutive_threshold = 3
+heuristic_max_duration_seconds = 5.0
+# Fallback resume delay when a confirmed 5-hour-window signal carries no
+# resets_at ETA (the system/api_retry shape never does -- see stream.py).
+default_5h_resume_delay_seconds = 18000
+
 [disk]
 # Spec 9.5: a full disk fails every later task in a way that reads as a code error.
 min_free_gb = 10.0

@@ -158,6 +158,26 @@ class ProgressConfig(_Strict):
     poll_interval_seconds: int = Field(gt=0)
 
 
+class QuotaConfig(_Strict):
+    """Spec 7.1/7.2. Detection order: a harness's primary structured
+    rate-limit signal (`HarnessResult.quota_window`, e.g. the Claude
+    adapter's `harness.claude.stream.extract_quota_signal`), the terminal
+    result's error subtype (secondary), then a wall-clock heuristic (last
+    resort, must never be reported as confirmed).
+
+    `result_error_subtypes` has no real captured value behind it yet -- no
+    real `claude -p` run in this project has ever actually exhausted a quota
+    window (see `docs/v3-implementation-state.md`'s Phase 8 section). It is
+    configurable specifically so it can be corrected the day a real one is
+    captured, the same posture the spec's own timeout defaults take pending
+    real p95 data (Open Item 2)."""
+
+    result_error_subtypes: list[str] = Field(min_length=1)
+    heuristic_consecutive_threshold: int = Field(gt=0)
+    heuristic_max_duration_seconds: float = Field(gt=0.0)
+    default_5h_resume_delay_seconds: int = Field(gt=0)
+
+
 class DiskConfig(_Strict):
     min_free_gb: float = Field(gt=0.0)
 
@@ -199,6 +219,7 @@ class CosmoConfig(_Strict):
     gate: GateConfig
     knowledge: KnowledgeConfig
     progress: ProgressConfig
+    quota: QuotaConfig
     disk: DiskConfig
     git: GitConfig
     paths: PathsConfig

@@ -64,6 +64,7 @@ from __future__ import annotations
 
 import subprocess
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -74,7 +75,7 @@ from cosmo.events.helpers import emit_state_changed
 from cosmo.gate.runner import run_validation_gate
 from cosmo.gate.validate import GateRunner, validate_task
 from cosmo.git.merge import MergeCommandError, merge_task
-from cosmo.harness.base import HarnessAdapter
+from cosmo.harness.base import HarnessAdapter, HarnessResult
 from cosmo.knowledge.caps import docs_md_files, files_over_cap
 from cosmo.knowledge.decisions_log import append_decision_entry
 from cosmo.proc.timers import LivenessTimers
@@ -93,7 +94,10 @@ from cosmo.task.classify import classify_harness_failure
 from cosmo.task.progress import ProgressWatcher, read_progress_from_file
 from cosmo.task.retry import build_retry_context
 from cosmo.task.timeouts import run_with_liveness_timeout, run_with_wall_clock_timeout
-from cosmo.task.types import FailureClassification, TaskContext
+from cosmo.task.types import FailureClassification, RunGuardAction, TaskContext
+
+OnHarnessResult = Callable[[HarnessResult], None]
+CheckRunGuard = Callable[[], RunGuardAction | None]
 
 _PROPOSING_MAX_LOCAL_ATTEMPTS = 2  # spec 3.3: "retry once, then BLOCKED"
 
@@ -113,26 +117,74 @@ def run_task(
     adapter: HarnessAdapter,
     repo_path: Path,
     gate_runner: GateRunner = run_validation_gate,
+    run_id: str | None = None,
+    on_harness_result: OnHarnessResult | None = None,
+    check_run_guard: CheckRunGuard | None = None,
 ) -> TaskStatus:
+    """`run_id` defaults to `None`, preserving Phase 7's "no run tracking"
+    posture for any caller that doesn't have one -- `cosmo run --task`
+    (single-task CLI) still passes `None`. Phase 8's run loop is the first
+    caller to pass a real value.
+
+    `on_harness_result`/`check_run_guard` are Phase 8's cost/quota/run-wall-
+    clock seam (see `task.types.RunGuardAction`'s docstring): purely
+    additive hooks that never change this function's own retry/
+    classification logic when unset (both default to `None`). `on_harness_
+    result` observes every raw `HarnessResult` from `propose()`/
+    `implement()` as it happens; `check_run_guard` is polled once before
+    each new `PROPOSING`/`IMPLEMENTING` attempt starts."""
     task_id = ctx.task_id
-    run_id: str | None = None  # spec 3.2: no run-level tracking until Phase 8
 
     proposed = _do_proposing(
-        ctx=ctx, config=config, writer=writer, emitter=emitter, adapter=adapter, run_id=run_id
+        ctx=ctx,
+        config=config,
+        writer=writer,
+        emitter=emitter,
+        adapter=adapter,
+        run_id=run_id,
+        on_harness_result=on_harness_result,
+        check_run_guard=check_run_guard,
     )
     if proposed is not TaskStatus.PROPOSED:
+        # BLOCKED (an ordinary PROPOSING failure) or QUEUED (`check_run_
+        # guard` fired REQUEUE before/during PROPOSING) -- either way this
+        # task's run is over for now.
         return proposed
-    emit_state_changed(emitter, writer.queue_transition(task_id, TaskStatus.PROPOSED))
+    emit_state_changed(
+        emitter, writer.queue_transition(task_id, TaskStatus.PROPOSED, run_id=run_id)
+    )
 
     task_row = get_task(config.paths.db_path, task_id)
     attempt_count = task_row.attempt_count if task_row is not None else 0
     validating_env_retries = 0
 
     while True:
+        if check_run_guard is not None:
+            guard_action = check_run_guard()
+            if guard_action is RunGuardAction.REQUEUE:
+                return _requeue(writer=writer, emitter=emitter, task_id=task_id, run_id=run_id)
+            if guard_action is RunGuardAction.BLOCK_COST:
+                return _block(
+                    writer=writer,
+                    emitter=emitter,
+                    task_id=task_id,
+                    run_id=run_id,
+                    reason=BlockedReason.COST,
+                    note="task cost ceiling reached (spec 7.3)",
+                )
+
         # -- IMPLEMENTING -----------------------------------------------
-        emit_state_changed(emitter, writer.queue_transition(task_id, TaskStatus.IMPLEMENTING))
+        emit_state_changed(
+            emitter, writer.queue_transition(task_id, TaskStatus.IMPLEMENTING, run_id=run_id)
+        )
         implemented = _do_implementing(
-            ctx=ctx, config=config, writer=writer, emitter=emitter, adapter=adapter, run_id=run_id
+            ctx=ctx,
+            config=config,
+            writer=writer,
+            emitter=emitter,
+            adapter=adapter,
+            run_id=run_id,
+            on_harness_result=on_harness_result,
         )
 
         if not implemented.success:
@@ -148,6 +200,7 @@ def run_task(
                         writer=writer,
                         emitter=emitter,
                         task_id=task_id,
+                        run_id=run_id,
                         reason=BlockedReason.TIMEOUT,
                         note=implemented.classification.error_summary,
                     )
@@ -167,15 +220,20 @@ def run_task(
                         writer=writer,
                         emitter=emitter,
                         task_id=task_id,
+                        run_id=run_id,
                         reason=BlockedReason.ENVIRONMENT,
                         note=implemented.classification.error_summary,
                     )
-            emit_state_changed(emitter, writer.queue_transition(task_id, TaskStatus.FAILED_RETRY))
+            emit_state_changed(
+                emitter, writer.queue_transition(task_id, TaskStatus.FAILED_RETRY, run_id=run_id)
+            )
             _retry_delay(config)
             continue
 
         # -- VALIDATING ---------------------------------------------------
-        emit_state_changed(emitter, writer.queue_transition(task_id, TaskStatus.VALIDATING))
+        emit_state_changed(
+            emitter, writer.queue_transition(task_id, TaskStatus.VALIDATING, run_id=run_id)
+        )
         gate_result = validate_task(
             task_id=task_id,
             run_id=run_id,
@@ -198,10 +256,13 @@ def run_task(
                     writer=writer,
                     emitter=emitter,
                     task_id=task_id,
+                    run_id=run_id,
                     reason=BlockedReason.ENVIRONMENT,
                     note=gate_result.error_summary,
                 )
-            emit_state_changed(emitter, writer.queue_transition(task_id, TaskStatus.FAILED_RETRY))
+            emit_state_changed(
+                emitter, writer.queue_transition(task_id, TaskStatus.FAILED_RETRY, run_id=run_id)
+            )
             _retry_delay(config)
             continue
 
@@ -216,10 +277,13 @@ def run_task(
                     writer=writer,
                     emitter=emitter,
                     task_id=task_id,
+                    run_id=run_id,
                     reason=BlockedReason.CODE_FAILURE,
                     note=gate_result.error_summary,
                 )
-            emit_state_changed(emitter, writer.queue_transition(task_id, TaskStatus.FAILED_RETRY))
+            emit_state_changed(
+                emitter, writer.queue_transition(task_id, TaskStatus.FAILED_RETRY, run_id=run_id)
+            )
             _retry_delay(config)
             continue
 
@@ -233,7 +297,9 @@ def run_task(
             attempt_count=attempt_count,
         )
         if committing is _CommitOutcome.RETRY:
-            emit_state_changed(emitter, writer.queue_transition(task_id, TaskStatus.FAILED_RETRY))
+            emit_state_changed(
+                emitter, writer.queue_transition(task_id, TaskStatus.FAILED_RETRY, run_id=run_id)
+            )
             _retry_delay(config)
             continue
         if committing is _CommitOutcome.BLOCKED:
@@ -241,7 +307,7 @@ def run_task(
         break  # _CommitOutcome.DONE
 
     # -- MERGING ------------------------------------------------------------
-    emit_state_changed(emitter, writer.queue_transition(task_id, TaskStatus.MERGING))
+    emit_state_changed(emitter, writer.queue_transition(task_id, TaskStatus.MERGING, run_id=run_id))
     return _do_merging(
         ctx=ctx,
         config=config,
@@ -286,17 +352,37 @@ def _do_proposing(
     emitter: EventEmitter,
     adapter: HarnessAdapter,
     run_id: str | None,
+    on_harness_result: OnHarnessResult | None,
+    check_run_guard: CheckRunGuard | None,
 ) -> TaskStatus:
     task_id = ctx.task_id
-    emit_state_changed(emitter, writer.queue_transition(task_id, TaskStatus.PROPOSING))
+    emit_state_changed(
+        emitter, writer.queue_transition(task_id, TaskStatus.PROPOSING, run_id=run_id)
+    )
 
     for local_attempt in range(1, _PROPOSING_MAX_LOCAL_ATTEMPTS + 1):
+        if check_run_guard is not None:
+            guard_action = check_run_guard()
+            if guard_action is RunGuardAction.REQUEUE:
+                return _requeue(writer=writer, emitter=emitter, task_id=task_id, run_id=run_id)
+            if guard_action is RunGuardAction.BLOCK_COST:
+                return _block(
+                    writer=writer,
+                    emitter=emitter,
+                    task_id=task_id,
+                    run_id=run_id,
+                    reason=BlockedReason.COST,
+                    note="task cost ceiling reached (spec 7.3)",
+                )
+
         result = run_with_wall_clock_timeout(
             lambda: adapter.propose(Path(ctx.spec_path), {"task_id": task_id}),
             wall_s=float(config.timeouts.proposing_wall),
             cancel=lambda: adapter.cancel(task_id),
             kill_grace_s=float(config.timeouts.kill_grace),
         )
+        if result.value is not None and on_harness_result is not None:
+            on_harness_result(result.value)
         if result.value is not None and result.value.success:
             return TaskStatus.PROPOSED
 
@@ -315,12 +401,17 @@ def _do_proposing(
                 writer=writer,
                 emitter=emitter,
                 task_id=task_id,
+                run_id=run_id,
                 reason=reason,
                 note=classification.error_summary,
             )
-        emit_state_changed(emitter, writer.queue_transition(task_id, TaskStatus.FAILED_RETRY))
+        emit_state_changed(
+            emitter, writer.queue_transition(task_id, TaskStatus.FAILED_RETRY, run_id=run_id)
+        )
         _retry_delay(config)
-        emit_state_changed(emitter, writer.queue_transition(task_id, TaskStatus.PROPOSING))
+        emit_state_changed(
+            emitter, writer.queue_transition(task_id, TaskStatus.PROPOSING, run_id=run_id)
+        )
 
     raise AssertionError("unreachable: the loop above always returns or blocks")
 
@@ -343,6 +434,7 @@ def _do_implementing(
     emitter: EventEmitter,
     adapter: HarnessAdapter,
     run_id: str | None,
+    on_harness_result: OnHarnessResult | None,
 ) -> _ImplementOutcome:
     """Runs one `implement()` attempt under the wall/stall timeout and
     returns its outcome -- deliberately no side effects on `attempt_count`
@@ -406,6 +498,9 @@ def _do_implementing(
         watcher.stop()
         writer.drain()
 
+    if timeout_result.value is not None and on_harness_result is not None:
+        on_harness_result(timeout_result.value)
+
     if timeout_result.value is not None and timeout_result.value.success:
         return _ImplementOutcome(success=True, timed_out=False, classification=None)
 
@@ -436,7 +531,9 @@ def _do_committing(
     attempt_count: int,
 ) -> str:
     task_id = ctx.task_id
-    emit_state_changed(emitter, writer.queue_transition(task_id, TaskStatus.COMMITTING))
+    emit_state_changed(
+        emitter, writer.queue_transition(task_id, TaskStatus.COMMITTING, run_id=run_id)
+    )
 
     touched = docs_md_files(ctx.worktree_path, ctx.base_branch, ctx.branch)
     over_cap = files_over_cap(ctx.worktree_path, touched, config.knowledge.max_file_lines)
@@ -464,6 +561,7 @@ def _do_committing(
                 writer=writer,
                 emitter=emitter,
                 task_id=task_id,
+                run_id=run_id,
                 reason=BlockedReason.CODE_FAILURE,
                 note=error_summary,
             )
@@ -490,6 +588,7 @@ def _do_committing(
             writer=writer,
             emitter=emitter,
             task_id=task_id,
+            run_id=run_id,
             reason=BlockedReason.ENVIRONMENT,
             note=str(exc),
         )
@@ -586,6 +685,7 @@ def _do_merging(
             writer=writer,
             emitter=emitter,
             task_id=ctx.task_id,
+            run_id=run_id,
             reason=BlockedReason.ENVIRONMENT,
             note=str(exc),
         )
@@ -601,18 +701,33 @@ def _block(
     writer: StoreWriter,
     emitter: EventEmitter,
     task_id: str,
+    run_id: str | None = None,
     reason: BlockedReason,
     note: str | None,
 ) -> TaskStatus:
-    transition = writer.queue_block(task_id, reason, note=note)
+    transition = writer.queue_block(task_id, reason, run_id=run_id, note=note)
     emitter.emit(
         event_type=EventType.TASK_BLOCKED,
         severity=Severity.WARNING,
+        run_id=run_id,
         task_id=task_id,
         payload={"blocked_reason": reason.value, "note": note},
     )
     emit_state_changed(emitter, transition)
     return TaskStatus.BLOCKED
+
+
+def _requeue(
+    *, writer: StoreWriter, emitter: EventEmitter, task_id: str, run_id: str | None
+) -> TaskStatus:
+    """Spec 3.3's run-level wall clock ("in-flight task returns to QUEUED")
+    and spec 7.1/7.2's quota pause both resolve here (`task.types.
+    RunGuardAction.REQUEUE`'s docstring): neither is this task's fault, so
+    `attempt_count` is left untouched -- unlike `_block`, this is not a
+    terminal outcome for the task, only for this attempt at running it."""
+    transition = writer.queue_transition(task_id, TaskStatus.QUEUED, run_id=run_id)
+    emit_state_changed(emitter, transition)
+    return TaskStatus.QUEUED
 
 
 def _retry_delay(config: CosmoConfig) -> None:
