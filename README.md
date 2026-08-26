@@ -99,6 +99,16 @@ automatically from its path later.
 Run `cosmo doctor --project-path /path/to/your-project` to confirm
 everything's ready.
 
+Every command below that operates on a target repo (`spec add`, `spec
+queue`, `run`) takes `--repo <path>`, but it's only needed when you're
+invoking `cosmo` from somewhere else — run it from inside the target repo
+itself and `--repo` defaults to the current directory. Either way, the
+resolved path is checked against `cosmo init`'s own registration first: an
+unregistered directory (typo'd `--repo`, or `cosmo init` never run there)
+fails loudly rather than silently operating against the wrong place. The
+rest of this guide spells `--repo` out explicitly for clarity; drop it once
+you're used to running from inside the project.
+
 ### 2. Get work into the queue
 
 See [Two ways to queue work](#two-ways-to-queue-work) below for the full

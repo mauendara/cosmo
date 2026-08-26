@@ -21,6 +21,7 @@ from cosmo.cli.main import app
 from cosmo.config import load_config
 from cosmo.harness import get_adapter as real_get_adapter
 from cosmo.harness.fake import FakeHarnessAdapter
+from cosmo.store import StoreWriter
 from cosmo.store.enums import TaskStatus
 from cosmo.store.reader import get_task
 from cosmo.task.types import TaskContext
@@ -53,6 +54,15 @@ def _repo_on_develop(tmp_path: Path) -> Path:
     _git(repo, "add", "README.md")
     _git(repo, "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "base")
     _git(repo, "branch", "-M", "develop")
+    # `cosmo run` now validates `--repo` against a real registration
+    # (`cli.main._resolve_project_repo`) -- register it directly rather
+    # than a full `cosmo init` (this file fakes the harness adapter and has
+    # no need for `openspec/`/`docs/`/template sync).
+    writer = StoreWriter(load_config().paths.db_path)
+    try:
+        writer.register_project(target_path=str(repo.resolve()), harness="claude")
+    finally:
+        writer.close()
     return repo
 
 

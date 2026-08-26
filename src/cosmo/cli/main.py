@@ -131,6 +131,34 @@ def _load(config_path: Path | None) -> CosmoConfig:
         raise typer.Exit(code=2) from None
 
 
+def _resolve_project_repo(repo: Path | None, cfg: CosmoConfig) -> tuple[Path, str | None]:
+    """Shared by every command that operates against a target repo (`run`,
+    `spec add`, `spec queue`): `repo` defaults to the current working
+    directory when omitted -- the common case of running `cosmo` from
+    inside the target repo itself, `--repo`/`--project-path` only needed
+    when invoking from somewhere else. Either way, resolved and checked
+    against `projects` (`cosmo init`'s own registration, spec 10.4 step 6)
+    rather than silently operating against an arbitrary directory: an
+    unregistered path is almost always a typo'd `--repo` or a forgotten
+    `cosmo init`, not something to guess through.
+
+    Returns the resolved path and the project's own registered harness
+    (`None` if genuinely unregistered, though that path never returns here
+    -- see below) so callers can feed it into `resolve_harness_name`'s
+    project tier, the same resolution order `cosmo doctor --project-path`
+    already honors (spec 2: "--harness flag > project registration > config
+    default")."""
+    resolved = (repo if repo is not None else Path.cwd()).resolve()
+    project = find_project_by_path(cfg.paths.db_path, str(resolved))
+    if project is None:
+        err_console.print(
+            f"[red]{resolved} is not a Cosmo-orchestrated project[/red] -- "
+            f"run `cosmo init {resolved}` first"
+        )
+        raise typer.Exit(code=1)
+    return resolved, project.harness
+
+
 def _render_checks(title: str, results: list[CheckResult]) -> None:
     table = Table(title=title, title_justify="left", show_lines=False)
     table.add_column("", width=6)
@@ -352,8 +380,12 @@ def validate_cmd(
 def run_cmd(
     *,
     repo: Annotated[
-        Path, typer.Option(help="Cosmo's own checkout of the target repo, on base_branch.")
-    ],
+        Path | None,
+        typer.Option(
+            help="Cosmo's own checkout of the target repo, on base_branch. "
+            "Defaults to the current directory."
+        ),
+    ] = None,
     task_id: Annotated[
         str | None,
         typer.Option(
@@ -389,10 +421,16 @@ def run_cmd(
     tracking posture) is untouched -- see `docs/v3-implementation-state.
     md`'s Phase 8 section for the full reasoning."""
     cfg = _load(config)
+    resolved_repo, project_harness = _resolve_project_repo(repo, cfg)
 
     if task_id is None:
         _run_queue_cmd(
-            repo=repo, base_branch=base_branch, harness=harness, dry_run=dry_run, cfg=cfg
+            repo=resolved_repo,
+            base_branch=base_branch,
+            harness=harness,
+            project_harness=project_harness,
+            dry_run=dry_run,
+            cfg=cfg,
         )
         return
 
@@ -405,7 +443,7 @@ def run_cmd(
         raise typer.Exit(code=1)
 
     resolved_base = base_branch if base_branch is not None else cfg.git.base_branch
-    name, source = resolve_harness_name(harness, None, cfg.harness.name)
+    name, source = resolve_harness_name(harness, project_harness, cfg.harness.name)
     console.print(f"harness: [bold]{name}[/bold] (from {source})")
     try:
         adapter = get_adapter(name)(cfg)
@@ -419,7 +457,7 @@ def run_cmd(
         run_id = uuid.uuid4().hex
         spec_id = Path(task.spec_path).stem
         info = create_worktree(
-            repo_path=repo,
+            repo_path=resolved_repo,
             work_dir=cfg.paths.work_dir,
             run_id=run_id,
             task_id=task_id,
@@ -441,7 +479,12 @@ def run_cmd(
             max_attempts=task.max_attempts,
         )
         final_status = run_task(
-            ctx=ctx, config=cfg, writer=writer, emitter=emitter, adapter=adapter, repo_path=repo
+            ctx=ctx,
+            config=cfg,
+            writer=writer,
+            emitter=emitter,
+            adapter=adapter,
+            repo_path=resolved_repo,
         )
     finally:
         writer.close()
@@ -460,11 +503,12 @@ def _run_queue_cmd(
     repo: Path,
     base_branch: str | None,
     harness: str | None,
+    project_harness: str | None,
     dry_run: bool,
     cfg: CosmoConfig,
 ) -> None:
     resolved_base = base_branch if base_branch is not None else cfg.git.base_branch
-    name, source = resolve_harness_name(harness, None, cfg.harness.name)
+    name, source = resolve_harness_name(harness, project_harness, cfg.harness.name)
     console.print(f"harness: [bold]{name}[/bold] (from {source})")
 
     if dry_run:
@@ -841,7 +885,13 @@ def _render_spec_preview(name: str, task_files: list[SpecTaskFile]) -> None:
 @spec_app.command("add")
 def spec_add(
     name: Annotated[str, typer.Argument(help="Short kebab-case name for this spec.")],
-    repo: Annotated[Path, typer.Option(help="Target repo containing (or to contain) docs/specs/.")],
+    repo: Annotated[
+        Path | None,
+        typer.Option(
+            help="Target repo containing (or to contain) docs/specs/. "
+            "Defaults to the current directory."
+        ),
+    ] = None,
     from_file: Annotated[
         Path | None,
         typer.Option(
@@ -861,7 +911,8 @@ def spec_add(
     hand-edit before `cosmo spec queue` inserts them (spec 5's own preview-
     first precedent, `cosmo run --dry-run`)."""
     cfg = _load(config)
-    spec_path = repo / "docs" / "specs" / f"{name}-spec.md"
+    resolved_repo, project_harness = _resolve_project_repo(repo, cfg)
+    spec_path = resolved_repo / "docs" / "specs" / f"{name}-spec.md"
     if not spec_path.is_file():
         if from_file is None:
             err_console.print(
@@ -872,11 +923,11 @@ def spec_add(
         spec_path.parent.mkdir(parents=True, exist_ok=True)
         spec_path.write_text(from_file.read_text(encoding="utf-8"), encoding="utf-8")
 
-    resolved_name, source = resolve_harness_name(harness, None, cfg.harness.name)
+    resolved_name, source = resolve_harness_name(harness, project_harness, cfg.harness.name)
     console.print(f"harness: [bold]{resolved_name}[/bold] (from {source})")
-    adapter = get_adapter(resolved_name)(cfg, cwd=repo)
+    adapter = get_adapter(resolved_name)(cfg, cwd=resolved_repo)
 
-    tasks_dir = _spec_tasks_dir(repo, name)
+    tasks_dir = _spec_tasks_dir(resolved_repo, name)
     prompt = (
         f"Follow the spec-enrichment skill against the raw spec at "
         f"docs/specs/{name}-spec.md. Enrich it against this project's own "
@@ -927,7 +978,10 @@ def spec_add(
 @spec_app.command("queue")
 def spec_queue(
     name: Annotated[str, typer.Argument(help="The spec name a prior `cosmo spec add` produced.")],
-    repo: Annotated[Path, typer.Option(help="Target repo containing docs/specs/.")],
+    repo: Annotated[
+        Path | None,
+        typer.Option(help="Target repo containing docs/specs/. Defaults to the current directory."),
+    ] = None,
     config: ConfigOption = None,
 ) -> None:
     """Insert one task per `docs/specs/<name>-spec/tasks/*.md` file into the
@@ -935,7 +989,8 @@ def spec_queue(
     `cosmo spec add` and this command *is* the preview's confirmation step
     -- there is no separate approval UI."""
     cfg = _load(config)
-    tasks_dir = _spec_tasks_dir(repo, name)
+    resolved_repo, _project_harness = _resolve_project_repo(repo, cfg)
+    tasks_dir = _spec_tasks_dir(resolved_repo, name)
     try:
         task_files = list_task_files(tasks_dir)
     except TaskFileError as exc:

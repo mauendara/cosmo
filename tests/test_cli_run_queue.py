@@ -15,12 +15,24 @@ from typer.testing import CliRunner
 
 import cosmo.cli.main as cli_main
 from cosmo.cli.main import app
+from cosmo.config import load_config
 from cosmo.harness.fake import FakeHarnessAdapter
 from cosmo.run.types import RunOutcome, RunSummary
 from cosmo.store import StoreWriter
 from cosmo.store.enums import RunStatus, StopReason
 
 runner = CliRunner()
+
+
+def _register(repo: Path, *, harness: str = "claude") -> None:
+    """`cosmo run` now validates `--repo` against a real registration
+    (`cli.main._resolve_project_repo`) -- register it directly, matching
+    `cosmo init`'s own `str(path.resolve())` storage convention."""
+    writer = StoreWriter(load_config().paths.db_path)
+    try:
+        writer.register_project(target_path=str(repo.resolve()), harness=harness)
+    finally:
+        writer.close()
 
 
 @pytest.fixture(autouse=True)
@@ -47,6 +59,7 @@ def _outcome(**overrides: object) -> RunOutcome:
 
 
 def test_dry_run_prints_no_eligible_tasks_on_an_empty_queue(tmp_path: Path) -> None:
+    _register(tmp_path)
     result = runner.invoke(app, ["run", "--repo", str(tmp_path), "--dry-run"])
 
     assert result.exit_code == 0, result.output
@@ -54,6 +67,7 @@ def test_dry_run_prints_no_eligible_tasks_on_an_empty_queue(tmp_path: Path) -> N
 
 
 def test_dry_run_prints_the_resolved_dependency_order(tmp_path: Path) -> None:
+    _register(tmp_path)
     runner.invoke(app, ["queue", "add", "openspec/changes/a", "--task-id", "a"])
     runner.invoke(
         app, ["queue", "add", "openspec/changes/b", "--task-id", "b", "--depends-on", "a"]
@@ -70,8 +84,7 @@ def test_dry_run_reports_a_cycle_cleanly(tmp_path: Path) -> None:
     # `queue add` itself rejects a cycle at enqueue (see the dedicated test
     # below) -- bypass it here via the writer directly, so `--dry-run`'s
     # own defensive `DagCycleError` handling is exercised for real.
-    from cosmo.config import load_config
-
+    _register(tmp_path)
     cfg = load_config()
     writer = StoreWriter(cfg.paths.db_path)
     try:
@@ -106,6 +119,7 @@ def test_queue_add_rejects_a_cycle_at_enqueue(tmp_path: Path) -> None:
 def test_no_task_flag_routes_to_run_queue_and_prints_the_outcome(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    _register(tmp_path)
     runner.invoke(app, ["queue", "add", "openspec/changes/a", "--task-id", "a"])
     captured: dict[str, Any] = {}
 
@@ -119,7 +133,7 @@ def test_no_task_flag_routes_to_run_queue_and_prints_the_outcome(
 
     assert result.exit_code == 0, result.output
     assert "queue_empty" in result.output
-    assert captured["repo_path"] == tmp_path
+    assert captured["repo_path"] == tmp_path.resolve()
     assert captured["base_branch"] == "develop"
     assert captured["harness_name"] == "claude"
 
@@ -127,6 +141,7 @@ def test_no_task_flag_routes_to_run_queue_and_prints_the_outcome(
 def test_a_paused_or_non_terminal_outcome_exits_nonzero(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    _register(tmp_path)
     monkeypatch.setattr(
         cli_main,
         "run_queue",

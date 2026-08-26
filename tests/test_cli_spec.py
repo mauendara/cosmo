@@ -14,6 +14,7 @@ from typer.testing import CliRunner
 
 from cosmo.cli.main import app
 from cosmo.config import load_config
+from cosmo.store import StoreWriter
 from cosmo.store.reader import list_tasks
 
 runner = CliRunner()
@@ -29,6 +30,18 @@ def _db_path() -> Path:
     return load_config().paths.db_path
 
 
+def _register(repo: Path, *, harness: str = "claude") -> None:
+    """`spec add`/`spec queue` validate `--repo` against a real
+    registration (`cli.main._resolve_project_repo`) -- register it
+    directly, matching `cosmo init`'s own `str(path.resolve())` storage
+    convention."""
+    writer = StoreWriter(_db_path())
+    try:
+        writer.register_project(target_path=str(repo.resolve()), harness=harness)
+    finally:
+        writer.close()
+
+
 def _write_task_file(repo: Path, spec_name: str, filename: str, body: str) -> Path:
     tasks_dir = repo / "docs" / "specs" / f"{spec_name}-spec" / "tasks"
     tasks_dir.mkdir(parents=True, exist_ok=True)
@@ -37,9 +50,53 @@ def _write_task_file(repo: Path, spec_name: str, filename: str, body: str) -> Pa
     return path
 
 
+def test_spec_add_on_an_unregistered_repo_fails_loudly_without_touching_the_filesystem(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "target"
+    repo.mkdir()
+
+    result = runner.invoke(app, ["spec", "add", "demo", "--repo", str(repo), "--harness", "fake"])
+
+    assert result.exit_code == 1
+    assert "not a Cosmo-orchestrated project" in result.stderr.replace("\n", "")
+    assert "cosmo init" in result.stderr
+    assert not (repo / "docs").exists()
+
+
+def test_spec_queue_on_an_unregistered_repo_fails_loudly(tmp_path: Path) -> None:
+    repo = tmp_path / "target"
+    repo.mkdir()
+
+    result = runner.invoke(app, ["spec", "queue", "demo", "--repo", str(repo)])
+
+    assert result.exit_code == 1
+    assert "not a Cosmo-orchestrated project" in result.stderr.replace("\n", "")
+
+
+def test_spec_add_and_queue_default_repo_to_the_current_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Running from inside a registered target repo needs no `--repo` at
+    all -- only invoking from somewhere else does."""
+    repo = tmp_path / "target"
+    repo.mkdir()
+    _register(repo)
+    _write_task_file(
+        repo, "demo", "backend-task.md", "---\ntask_id: demo-backend\ndepends_on: []\n---\n\nbody\n"
+    )
+    monkeypatch.chdir(repo)
+
+    result = runner.invoke(app, ["spec", "queue", "demo"])
+
+    assert result.exit_code == 0, result.stdout
+    assert {t.task_id for t in list_tasks(_db_path())} == {"demo-backend"}
+
+
 def test_spec_add_without_a_raw_spec_file_or_from_fails_loudly(tmp_path: Path) -> None:
     repo = tmp_path / "target"
     repo.mkdir()
+    _register(repo)
     result = runner.invoke(app, ["spec", "add", "demo", "--repo", str(repo), "--harness", "fake"])
     assert result.exit_code == 1
     assert "does not exist" in result.stderr
@@ -54,6 +111,7 @@ def test_spec_add_copies_in_a_raw_spec_via_from_and_reports_when_the_harness_wri
     not crash trying to render an empty preview."""
     repo = tmp_path / "target"
     repo.mkdir()
+    _register(repo)
     raw = tmp_path / "raw.md"
     raw.write_text("# Demo\nAdd a health check endpoint.\n", encoding="utf-8")
 
@@ -70,6 +128,7 @@ def test_spec_add_copies_in_a_raw_spec_via_from_and_reports_when_the_harness_wri
 def test_spec_queue_inserts_one_task_per_file_with_the_right_batch_id(tmp_path: Path) -> None:
     repo = tmp_path / "target"
     repo.mkdir()
+    _register(repo)
     _write_task_file(
         repo,
         "demo",
@@ -100,6 +159,7 @@ def test_spec_queue_inserts_one_task_per_file_with_the_right_batch_id(tmp_path: 
 def test_spec_queue_with_no_task_files_fails_loudly(tmp_path: Path) -> None:
     repo = tmp_path / "target"
     repo.mkdir()
+    _register(repo)
     result = runner.invoke(app, ["spec", "queue", "demo", "--repo", str(repo)])
     assert result.exit_code == 1
     assert "no *-task.md files found" in result.stderr
@@ -108,6 +168,7 @@ def test_spec_queue_with_no_task_files_fails_loudly(tmp_path: Path) -> None:
 def test_spec_queue_rejects_a_cycle_atomically_before_inserting_anything(tmp_path: Path) -> None:
     repo = tmp_path / "target"
     repo.mkdir()
+    _register(repo)
     _write_task_file(
         repo, "cyclic", "a-task.md", "---\ntask_id: cyc-a\ndepends_on: [cyc-b]\n---\n\na\n"
     )
@@ -125,6 +186,7 @@ def test_spec_queue_rejects_a_cycle_atomically_before_inserting_anything(tmp_pat
 def test_spec_queue_rejects_a_malformed_task_file(tmp_path: Path) -> None:
     repo = tmp_path / "target"
     repo.mkdir()
+    _register(repo)
     _write_task_file(repo, "bad", "only-task.md", "no frontmatter here at all\n")
 
     result = runner.invoke(app, ["spec", "queue", "bad", "--repo", str(repo)])
@@ -136,6 +198,7 @@ def test_spec_queue_rejects_a_malformed_task_file(tmp_path: Path) -> None:
 def test_spec_queue_on_a_duplicate_task_id_fails_loudly(tmp_path: Path) -> None:
     repo = tmp_path / "target"
     repo.mkdir()
+    _register(repo)
     runner.invoke(
         app, ["queue", "add", "openspec/changes/demo-backend", "--task-id", "demo-backend"]
     )

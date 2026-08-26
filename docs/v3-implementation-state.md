@@ -2165,6 +2165,44 @@ and `spec queue` (N candidates, already cycle-checked as a batch).
   symlink automatically, with zero changes needed to `bootstrap.assets.
   sync_harness_assets` (already a generic whole-tree copy).
 
+### Fast-follow, same session: `--repo` defaults to cwd, validated against registration
+
+Not part of the original v4 plan -- user feedback on the freshly-updated
+README (every example spelled out `--repo /path/to/your-project`, even
+though the whole point of `cosmo init` registering a project is that Cosmo
+can find it again). `run`/`spec add`/`spec queue` all took `--repo` as a
+*required* option with no default, and none of them checked the resolved
+path against `projects` (`cosmo init`'s own registration, spec 10.4 step
+6) at all -- an unregistered or typo'd path was silently accepted and only
+failed later, deep inside whatever the command tried to do with it.
+
+Fixed with one shared helper, `cli.main._resolve_project_repo(repo, cfg)`:
+`repo` defaults to `Path.cwd()` when omitted (the common case: running
+`cosmo` from inside the target repo itself needs no `--repo` at all, only
+invoking from somewhere else does), and either way the resolved path is
+looked up via `store.reader.find_project_by_path` -- an unregistered
+directory fails loudly (`"<path> is not a Cosmo-orchestrated project --
+run cosmo init <path> first"`) rather than proceeding. All three commands'
+`repo: Annotated[Path, ...]` became `repo: Annotated[Path | None, ...] =
+None`.
+
+**Real bug found and fixed as part of this, not a new one introduced by
+it:** `cosmo run` never resolved harness via project registration at all
+-- `_run_queue_cmd`/`run_cmd`'s single-task path both called
+`resolve_harness_name(harness, None, cfg.harness.name)`, hardcoding the
+project tier to `None` even though `resolve_harness_name`'s own docstring
+states the resolution order as "--harness flag > project registration >
+config default" (spec 2) and `cosmo doctor --project-path` already honored
+it correctly. `_resolve_project_repo` returns the project's own registered
+harness alongside the resolved path for exactly this reason; `run`/`spec
+add` now both pass it through. Confirmed by a real invocation: `cosmo run
+--dry-run` from inside a registered project now prints `harness: claude
+(from project registration)` instead of silently falling back to `(from
+config default)`.
+
+`spec queue` doesn't invoke a harness at all, so it only gained the
+repo-resolution/validation half, not the harness-tier fix.
+
 ### Things that will matter later
 
 **No real `claude -p` review invocation has ever been run** -- `adapter.
