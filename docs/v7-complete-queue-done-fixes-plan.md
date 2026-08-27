@@ -2,17 +2,19 @@
 
 ## Status
 
-**Items 1 and 3 implemented** (deviation 71,
+**Items 1, 2, and 3 implemented** (deviation 71,
 [v3-implementation-state.md](v3-implementation-state.md)'s cumulative
-table) — `StopReason.BLOCKED_REMAINING` distinguishes a genuinely
-empty/finished queue from every remaining task being stuck `BLOCKED`
-(no longer green/exit-0 either way), and `run.recovery.
-requeue_cost_blocked_tasks` re-evaluates `blocked`/`cost` tasks against
-each fresh `cosmo run` invocation's own config. **Items 2 and 4 remain
-open, deliberately deferred**: item 2 (get `cosmo notify watch` actually
-configured and running) needs a real Telegram bot token/chat id, not
-available this session; item 4 (whether future spec batches should be
-authored with more parallel branches) is a question for the *next* spec
+table, plus a later same-session follow-up for item 2) —
+`StopReason.BLOCKED_REMAINING` distinguishes a genuinely empty/finished
+queue from every remaining task being stuck `BLOCKED` (no longer
+green/exit-0 either way); `run.recovery.requeue_cost_blocked_tasks`
+re-evaluates `blocked`/`cost` tasks against each fresh `cosmo run`
+invocation's own config; and `cosmo notify watch` is now configured with a
+real Telegram bot token/chat id (`~/.config/cosmo/config.toml`, outside the
+repo) and running for real via `systemctl --user` (`cosmo-notify.service`),
+verified with a real `"ok":true` delivery from the Telegram API, not just a
+clean refusal. **Item 4 remains open**: whether future spec batches should
+be authored with more parallel branches is a question for the *next* spec
 batch's authoring, not code. Originally written after a dedicated research
 pass (no code changed) over the real event/transition history of the
 completed Phase 10 acceptance run against `todo-frontend-app`

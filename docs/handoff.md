@@ -31,11 +31,20 @@ re-evaluates every such task against the *current* config and clears the
 ones no longer over ceiling, preserving `attempt_count`/`worktree_path`
 since nothing about the task itself failed.
 
-**v7 items 2 and 4 remain open, deliberately deferred** — item 2 (get
-`cosmo notify watch` actually configured and running with a real Telegram
-bot token/chat id) needs credentials not available this session; item 4
-(whether future spec batches should be authored with more parallel
-branches) is a question for the *next* spec batch's authoring, not code.
+**v7 item 2 is now also done, later in this same session** — the user
+supplied a real Telegram bot token (`@CosmoNotifyTelegramBot`) and, once
+they messaged it once (bots can't message first), a real chat id was
+pulled from `getUpdates`. Both now live in `~/.config/cosmo/config.toml`
+(`chmod 600`, outside the repo, never committed) under `[notify]`. Verified
+for real, not just configured: a `TelegramSink.send` call got a real
+`"ok":true` back from the Telegram API; `cosmo notify watch` starts clean
+against the real store with no refusal; the installed
+`~/.config/systemd/user/cosmo-notify.service` (stale from the prior
+session, predating deviation 69's `[Service]`→`[Unit]` fix for
+`StartLimitIntervalSec`/`StartLimitBurst`) was patched to match the repo's
+own `deploy/cosmo-notify.service` and is now `enabled`+`active (running)`
+via `systemctl --user`. Only item 4 remains open — a spec-authoring
+question for the *next* batch, not code.
 
 **v6 ([v6-project-template-aware-stuff-plan.md](v6-project-template-aware-stuff-plan.md))
 was explicitly asked about this session and deliberately not started** —
@@ -197,7 +206,7 @@ Real, honest gaps — not fixed this session, and not fixable casually:
 | [v4-changes-to-workflow-plan.md](v4-changes-to-workflow-plan.md) | The raw-spec-workflow feature design | Implemented — see its own Status line |
 | [v5-improvements-plan.md](v5-improvements-plan.md) | Crash/pause resume, Telegram notifications, `--follow`, live-terminal observability, the quota-bypass flag, harness failure-pattern research (§5) | Implemented, parts 1-4/6-7 plus part 5's Class 1 — see its own Status line |
 | [v6-project-template-aware-stuff-plan.md](v6-project-template-aware-stuff-plan.md) | Making the gate/failure-classifier project-template-aware, for stacks beyond Java+Spring/Vite+React | **Not started — design record only.** Needs a real second stack before it's buildable; the user is doing that testing themselves before this gets picked up again — don't start it opportunistically |
-| [v7-complete-queue-done-fixes-plan.md](v7-complete-queue-done-fixes-plan.md) | Closing the "queue_empty looks like done" gap found auditing the Phase 10 acceptance run's own timing data | **Items 1+3 implemented this session** (deviation 71) — see its own Status line. Items 2 (real Telegram credentials needed) and 4 (a spec-authoring question, not code) remain open |
+| [v7-complete-queue-done-fixes-plan.md](v7-complete-queue-done-fixes-plan.md) | Closing the "queue_empty looks like done" gap found auditing the Phase 10 acceptance run's own timing data | **Items 1, 2, and 3 done this session** (deviation 71 + a same-session Telegram follow-up) — see its own Status line. Only item 4 (a spec-authoring question, not code) remains open |
 
 `v1-*` and `v2-*` in this folder are earlier spec drafts, fully superseded.
 `simple-template-handoff.md`/`old-agents-skills/` are historical, already
