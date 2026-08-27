@@ -226,3 +226,69 @@ def test_migration_6_adds_spec_batch_id_defaulting_to_null(tmp_path: Path) -> No
     reread = conn.execute("SELECT spec_batch_id FROM task_queue WHERE task_id = 't1'").fetchone()
     assert reread[0] == "demo-spec"
     conn.close()
+
+
+def test_migration_7_preserves_existing_run_state_rows_and_accepts_crashed(
+    tmp_path: Path,
+) -> None:
+    """v5 improvements plan part 1: migration 7 recreate-copy-swaps
+    `run_state` again to widen `stop_reason` for the startup reconciliation
+    sweep's own `StopReason.CRASHED`."""
+    db_path = tmp_path / "cosmo.db"
+    conn = connect_writer(db_path)
+    migrate(conn)
+    conn.execute(
+        """
+        INSERT INTO run_state (
+            run_id, status, harness, permission_mode, max_turns, base_branch,
+            started_at, updated_at
+        ) VALUES ('run-1', 'running', 'claude', 'dontAsk', 80, 'develop', 't0', 't0')
+        """
+    )
+    conn.commit()
+
+    conn.execute(
+        "UPDATE run_state SET status = 'stopped', stop_reason = 'crashed' WHERE run_id = 'run-1'"
+    )
+    conn.commit()
+    row = conn.execute(
+        "SELECT status, stop_reason FROM run_state WHERE run_id = 'run-1'"
+    ).fetchone()
+    assert row[0] == "stopped"
+    assert row[1] == "crashed"
+    conn.close()
+
+
+def test_migration_8_adds_failure_signature_defaulting_to_null(tmp_path: Path) -> None:
+    conn = connect_writer(tmp_path / "cosmo.db")
+    migrate(conn)
+    conn.execute(
+        """
+        INSERT INTO task_queue (
+            task_id, spec_path, status, attempt_count, max_attempts, created_at, updated_at
+        ) VALUES ('t1', 'openspec/changes/t1', 'queued', 0, 2, 't0', 't0')
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO task_failures (
+            task_id, attempt_number, failure_type, failure_stage, error_summary,
+            will_retry, next_action, timestamp
+        ) VALUES ('t1', 0, 'environment_error', 'build', 'frontend build failed', 1, 'retry', 't0')
+        """
+    )
+    conn.commit()
+    row = conn.execute(
+        "SELECT failure_signature FROM task_failures WHERE task_id = 't1'"
+    ).fetchone()
+    assert row[0] is None
+
+    conn.execute(
+        "UPDATE task_failures SET failure_signature = 'missing_lockfile' WHERE task_id = 't1'"
+    )
+    conn.commit()
+    reread = conn.execute(
+        "SELECT failure_signature FROM task_failures WHERE task_id = 't1'"
+    ).fetchone()
+    assert reread[0] == "missing_lockfile"
+    conn.close()

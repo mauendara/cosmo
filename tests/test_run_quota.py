@@ -25,6 +25,39 @@ def _config(**overrides: object) -> QuotaConfig:
     return QuotaConfig(**base)  # type: ignore[arg-type]
 
 
+def test_bypass_skips_the_five_hour_pause_and_reports_running() -> None:
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    signal = QuotaSignal(window="five_hour", resets_at="2026-01-01T01:00:00+00:00", confirmed=True)
+
+    decision = decide(
+        signal,
+        config=_config(bypass_5h_with_credits=True),
+        run_wall_remaining_seconds=36000.0,
+        now=now,
+    )
+
+    assert decision.status is RunStatus.RUNNING
+    assert decision.bypassed is True
+    assert decision.pause_reason is None
+    assert decision.stop_reason is None
+
+
+def test_bypass_does_not_touch_the_weekly_window() -> None:
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    signal = QuotaSignal(window="weekly", resets_at="2026-01-01T02:00:00+00:00", confirmed=True)
+
+    decision = decide(
+        signal,
+        config=_config(bypass_5h_with_credits=True),
+        run_wall_remaining_seconds=36000.0,
+        now=now,
+    )
+
+    assert decision.bypassed is False
+    assert decision.status is RunStatus.PAUSED
+    assert decision.pause_reason is PauseReason.QUOTA_EXHAUSTED_WEEKLY
+
+
 def _result(
     *,
     success: bool,

@@ -218,6 +218,63 @@ def test_record_task_failure_round_trips(tmp_path: Path) -> None:
     assert "FooTest.java" in record["files_touched"]
 
 
+def test_record_task_failure_computes_failure_signature_from_error_detail(tmp_path: Path) -> None:
+    """v5 improvements plan part 5 (Class 1): computed automatically at this
+    one chokepoint, no call-site change needed."""
+    db_path = tmp_path / "cosmo.db"
+    writer = StoreWriter(db_path)
+    writer.queue_add(task_id="add-foo", spec_path="p1", max_attempts=2)
+
+    writer.record_task_failure(
+        task_id="add-foo",
+        run_id=None,
+        attempt_number=1,
+        failure_type=FailureType.ENVIRONMENT_ERROR,
+        failure_stage=FailureStage.BUILD,
+        error_summary="frontend build failed",
+        error_detail="npm ERR! The `npm ci` command can only install packages when your "
+        "package.json and package-lock.json are in sync.",
+        files_touched=[],
+        will_retry=True,
+        next_action=NextAction.RETRY,
+    )
+    writer.close()
+
+    row = (
+        sqlite3.connect(db_path)
+        .execute("SELECT failure_signature FROM task_failures WHERE task_id = 'add-foo'")
+        .fetchone()
+    )
+    assert row[0] == "missing_lockfile"
+
+
+def test_record_task_failure_leaves_failure_signature_null_when_unmatched(tmp_path: Path) -> None:
+    db_path = tmp_path / "cosmo.db"
+    writer = StoreWriter(db_path)
+    writer.queue_add(task_id="add-foo", spec_path="p1", max_attempts=2)
+
+    writer.record_task_failure(
+        task_id="add-foo",
+        run_id=None,
+        attempt_number=1,
+        failure_type=FailureType.CODE_ERROR,
+        failure_stage=FailureStage.UNIT_TESTS,
+        error_summary="1 unit test failed",
+        error_detail="FooTest#bar: expected 1 but was 2",
+        files_touched=[],
+        will_retry=True,
+        next_action=NextAction.RETRY,
+    )
+    writer.close()
+
+    row = (
+        sqlite3.connect(db_path)
+        .execute("SELECT failure_signature FROM task_failures WHERE task_id = 'add-foo'")
+        .fetchone()
+    )
+    assert row[0] is None
+
+
 def test_record_task_failure_accepts_secrets_stage(tmp_path: Path) -> None:
     """`FailureStage.SECRETS` (Phase 6 deviation #11) round-trips through
     the migration-2 CHECK constraint."""

@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import json
 import sqlite3
 import subprocess
 import threading
+import time
 import uuid
 from dataclasses import Field
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -31,7 +34,7 @@ from cosmo.bootstrap import (
 from cosmo.checks import CheckResult, CheckStatus
 from cosmo.config import DEFAULTS_PATH, CosmoConfig, load_config, user_config_path
 from cosmo.doctor import core_checks
-from cosmo.events import EventEmitter, EventType, Severity, emit_state_changed
+from cosmo.events import Event, EventEmitter, EventType, Severity, emit_state_changed
 from cosmo.gate.runner import run_validation_gate
 from cosmo.gate.types import GateResult
 from cosmo.git.worktree import (
@@ -47,8 +50,12 @@ from cosmo.harness import (
     resolve_harness_name,
 )
 from cosmo.harness.base import HarnessCapabilities, HarnessResult
+from cosmo.notify.telegram import TelegramSink
+from cosmo.notify.watch import run_watch_loop
 from cosmo.run.dag import DagCycleError, find_cycle, resolve_execution_order
 from cosmo.run.loop import run_queue
+from cosmo.run.recovery import RunLockHeldError
+from cosmo.run.types import RunOutcome
 from cosmo.spec import SpecTaskFile, TaskFileError, list_task_files
 from cosmo.store import StoreWriter, TaskNotFoundError
 from cosmo.store.enums import BlockedReason, RunStatus, StopReason, TaskStatus
@@ -57,8 +64,11 @@ from cosmo.store.reader import (
     get_progress,
     get_run,
     get_task,
+    latest_event_rowid,
+    latest_paused_run_id,
     latest_run_id,
     list_events,
+    list_events_after,
     list_projects,
     list_task_failures,
     list_tasks,
@@ -83,6 +93,12 @@ project_app = typer.Typer(name="project", help="Manage registered projects.", no
 templates_app = typer.Typer(
     name="templates", help="Inspect available templates.", no_args_is_help=True
 )
+run_app = typer.Typer(
+    name="run", help="Drive the task queue.", no_args_is_help=False, invoke_without_command=True
+)
+notify_app = typer.Typer(
+    name="notify", help="Notification sinks and the always-on watcher.", no_args_is_help=True
+)
 app.add_typer(config_app)
 app.add_typer(harness_app)
 app.add_typer(queue_app)
@@ -90,6 +106,8 @@ app.add_typer(spec_app)
 app.add_typer(events_app)
 app.add_typer(project_app)
 app.add_typer(templates_app)
+app.add_typer(run_app)
+app.add_typer(notify_app)
 
 console = Console()
 err_console = Console(stderr=True)
@@ -102,6 +120,34 @@ def _print_activity(line: str) -> None:
     cross-thread. Purely a live foreground terminal cue, never written to
     the events DB (spec 4's event log stays as sparse as it already is)."""
     console.print(f"[dim]  · {line}[/dim]")
+
+
+_EMIT_LIFECYCLE_INFO_TYPES = frozenset(
+    {EventType.RUN_STARTED.value, EventType.RUN_RESUMED.value, EventType.RUN_SUMMARY.value}
+)
+_EMIT_SEVERITY_STYLE = {"info": "cyan", "warning": "yellow", "error": "red", "critical": "bold red"}
+
+
+def _print_emit(event: Event) -> None:
+    """`EventEmitter(writer, on_emit=...)` sink for `cosmo run`/`cosmo run
+    resume` (v5 improvements plan part 6) -- the coarse, persisted
+    state-transition stream (`TASK_STATE_CHANGED` only fires on an actual
+    transition, never on the much chattier `task.heartbeat`), styled
+    distinctly from `_print_activity`'s dim per-tool-call chatter so a
+    human skimming a long scrollback can tell "the state actually changed"
+    from "yet another Bash call" at a glance. Filtered to `WARNING`+ plus a
+    small set of `INFO`-severity lifecycle events, the same severity-based
+    judgment `[notify].min_severity` already has to make."""
+    if event.severity is Severity.INFO and event.event_type not in _EMIT_LIFECYCLE_INFO_TYPES:
+        return
+    style = _EMIT_SEVERITY_STYLE.get(event.severity.value, "white")
+    detail = ""
+    if event.event_type == EventType.RUN_PAUSED.value:
+        resume_delay = event.payload.get("resume_delay_seconds")
+        if isinstance(resume_delay, (int, float)):
+            eta = datetime.now(UTC) + timedelta(seconds=resume_delay)
+            detail = f" (resume at {eta.strftime('%Y-%m-%dT%H:%MZ')})"
+    console.print(f"[bold {style}]>> {event.event_type}[/bold {style}]{detail}")
 
 
 ConfigOption = Annotated[
@@ -394,8 +440,9 @@ def validate_cmd(
         raise typer.Exit(code=1)
 
 
-@app.command("run")
+@run_app.callback(invoke_without_command=True)
 def run_cmd(
+    typer_ctx: typer.Context,
     *,
     repo: Annotated[
         Path | None,
@@ -437,7 +484,14 @@ def run_cmd(
     routing single-task through the DAG loop too, so Phase 7's already-
     tested single-task behavior (including its `run_id=None`, no-run-
     tracking posture) is untouched -- see `docs/v3-implementation-state.
-    md`'s Phase 8 section for the full reasoning."""
+    md`'s Phase 8 section for the full reasoning.
+
+    `run` is a `typer.Typer` sub-app, not a leaf command, so `cosmo run
+    resume` (v5 improvements plan part 2) can live alongside it -- this
+    callback still runs first either way (`invoke_without_command=True`),
+    so it returns immediately when a subcommand was actually invoked."""
+    if typer_ctx.invoked_subcommand is not None:
+        return
     cfg = _load(config)
     resolved_repo, project_harness = _resolve_project_repo(repo, cfg)
 
@@ -471,7 +525,7 @@ def run_cmd(
 
     writer = StoreWriter(cfg.paths.db_path)
     try:
-        emitter = EventEmitter(writer)
+        emitter = EventEmitter(writer, on_emit=_print_emit)
         run_id = uuid.uuid4().hex
         spec_id = Path(task.spec_path).stem
         info = create_worktree(
@@ -560,20 +614,29 @@ def _run_queue_cmd(
 
     writer = StoreWriter(cfg.paths.db_path)
     try:
-        emitter = EventEmitter(writer)
-        outcome = run_queue(
-            config=cfg,
-            writer=writer,
-            emitter=emitter,
-            adapter=adapter,
-            repo_path=repo,
-            base_branch=resolved_base,
-            harness_name=name,
-            on_activity=_print_activity,
-        )
+        emitter = EventEmitter(writer, on_emit=_print_emit)
+        try:
+            outcome = run_queue(
+                config=cfg,
+                writer=writer,
+                emitter=emitter,
+                adapter=adapter,
+                repo_path=repo,
+                base_branch=resolved_base,
+                harness_name=name,
+                on_activity=_print_activity,
+            )
+        except RunLockHeldError as exc:
+            err_console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(code=1) from None
     finally:
         writer.close()
 
+    _print_run_outcome(outcome)
+
+
+def _print_run_outcome(outcome: RunOutcome) -> None:
+    """Shared by `cosmo run` (full queue) and `cosmo run resume`."""
     ok = outcome.status is RunStatus.STOPPED and outcome.stop_reason in _RUN_SUCCESSFUL_STOP_REASONS
     style = "green" if ok else "yellow"
     reason = f" ({outcome.stop_reason.value})" if outcome.stop_reason is not None else ""
@@ -589,6 +652,82 @@ def _run_queue_cmd(
         )
     if not ok:
         raise typer.Exit(code=1)
+
+
+@run_app.command("resume")
+def run_resume(
+    run_id: Annotated[
+        str | None,
+        typer.Argument(help="Run to resume; defaults to the most recently paused run."),
+    ] = None,
+    repo: Annotated[
+        Path | None,
+        typer.Option(
+            help="Cosmo's own checkout of the target repo, on base_branch. "
+            "Defaults to the current directory."
+        ),
+    ] = None,
+    harness: HarnessOption = None,
+    yes: Annotated[bool, typer.Option("--yes", help="Skip the confirmation prompt.")] = False,
+    config: ConfigOption = None,
+) -> None:
+    """`cosmo run resume RUN_ID` (v5 improvements plan part 2): re-attaches
+    to an existing `PAUSED` run instead of starting a fresh one -- built
+    entirely from existing primitives (`run.loop.run_queue`'s own
+    `resume_run_id` parameter), so cost accounting, the startup
+    reconciliation sweep, and the process lock all apply exactly as they do
+    to a fresh `cosmo run`."""
+    cfg = _load(config)
+    resolved_repo, project_harness = _resolve_project_repo(repo, cfg)
+
+    target_run_id = run_id if run_id is not None else latest_paused_run_id(cfg.paths.db_path)
+    if target_run_id is None:
+        err_console.print("[red]no paused run to resume[/red]")
+        raise typer.Exit(code=1)
+
+    row = get_run(cfg.paths.db_path, target_run_id)
+    if row is None:
+        err_console.print(f"[red]no such run: {target_run_id!r}[/red]")
+        raise typer.Exit(code=1)
+    if row.status != "paused":
+        err_console.print(f"[red]run {target_run_id!r} is {row.status!r}, not paused[/red]")
+        raise typer.Exit(code=1)
+
+    _render_run_report(cfg, target_run_id)
+
+    if not yes and not typer.confirm("\nResume this run?"):
+        raise typer.Exit(code=0)
+
+    name, source = resolve_harness_name(harness, project_harness, cfg.harness.name)
+    console.print(f"harness: [bold]{name}[/bold] (from {source})")
+    try:
+        adapter = get_adapter(name)(cfg)
+    except UnknownHarnessError as exc:
+        err_console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from None
+
+    writer = StoreWriter(cfg.paths.db_path)
+    try:
+        emitter = EventEmitter(writer, on_emit=_print_emit)
+        try:
+            outcome = run_queue(
+                config=cfg,
+                writer=writer,
+                emitter=emitter,
+                adapter=adapter,
+                repo_path=resolved_repo,
+                base_branch=row.base_branch,
+                harness_name=name,
+                on_activity=_print_activity,
+                resume_run_id=target_run_id,
+            )
+        except RunLockHeldError as exc:
+            err_console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(code=1) from None
+    finally:
+        writer.close()
+
+    _print_run_outcome(outcome)
 
 
 @app.command()
@@ -1372,6 +1511,15 @@ def events_tail(
         ),
     ] = False,
     limit: Annotated[int, typer.Option(help="Most recent N events.")] = 50,
+    follow: Annotated[
+        bool,
+        typer.Option(
+            "--follow",
+            "-f",
+            help="After the initial listing, keep polling for new events past the last one "
+            "seen and print each as it lands, tail -f-style (v5 improvements plan part 4).",
+        ),
+    ] = False,
     config: ConfigOption = None,
 ) -> None:
     cfg = _load(config)
@@ -1402,12 +1550,47 @@ def events_tail(
             console.print(f"\n[bold]#{e.sequence} {e.event_type}[/bold]")
             console.print(json.dumps(e.payload, indent=2, default=str))
 
+    if not follow:
+        return
+
+    since = latest_event_rowid(cfg.paths.db_path)
+    try:
+        while True:
+            time.sleep(cfg.progress.poll_interval_seconds)
+            for rowid, e in list_events_after(cfg.paths.db_path, since):
+                since = rowid
+                if run is not None and e.run_id != run:
+                    continue
+                if task is not None and e.task_id != task:
+                    continue
+                if severity is not None and e.severity != severity:
+                    continue
+                if event_type is not None and e.event_type != event_type:
+                    continue
+                console.print(
+                    f"{e.sequence}\t{e.timestamp}\t{e.severity}\t{e.event_type}\t"
+                    f"{e.run_id or '-'}\t{e.task_id or '-'}"
+                )
+                if payload:
+                    console.print(json.dumps(e.payload, indent=2, default=str))
+    except KeyboardInterrupt:
+        pass
+
 
 @app.command("report")
 def report_cmd(
     run: Annotated[
         str | None, typer.Option("--run", help="Defaults to the most recently started run.")
     ] = None,
+    follow: Annotated[
+        bool,
+        typer.Option(
+            "--follow",
+            "-f",
+            help="Keep re-rendering until the run reaches a terminal status "
+            "(v5 improvements plan part 4).",
+        ),
+    ] = False,
     config: ConfigOption = None,
 ) -> None:
     """Post-run triage (plan Phase 9): renders one run's `run_state` row
@@ -1420,6 +1603,30 @@ def report_cmd(
         err_console.print("[red]no runs recorded yet[/red]")
         raise typer.Exit(code=1)
 
+    if not follow:
+        _render_run_report(cfg, run_id)
+        return
+
+    try:
+        while True:
+            row = get_run(cfg.paths.db_path, run_id)
+            if row is None:
+                err_console.print(f"[red]no such run: {run_id!r}[/red]")
+                raise typer.Exit(code=1)
+            _render_run_report(cfg, run_id)
+            if row.status == "stopped":
+                break
+            console.print()
+            time.sleep(cfg.progress.poll_interval_seconds)
+    except KeyboardInterrupt:
+        pass
+
+
+def _render_run_report(cfg: CosmoConfig, run_id: str) -> None:
+    """The body `report_cmd` renders once, and `--follow`/`cosmo run
+    resume` (v5 improvements plan part 2, so the operator gets the same
+    pause-reason/cost/blocked-task context before confirming a resume)
+    both re-render on demand."""
     row = get_run(cfg.paths.db_path, run_id)
     if row is None:
         err_console.print(f"[red]no such run: {run_id!r}[/red]")
@@ -1439,6 +1646,23 @@ def report_cmd(
         console.print(f"  stop reason:   [{stop_style}]{row.stop_reason}[/{stop_style}]")
     console.print(f"  started at:    {row.started_at}")
     console.print(f"  stopped at:    {row.stopped_at or '-'}")
+
+    interrupted = list_events(
+        cfg.paths.db_path,
+        run_id=run_id,
+        event_type=EventType.TASK_INTERRUPTED.value,
+        limit=10_000,
+    )
+    if interrupted:
+        # v5 improvements plan part 1: `run.recovery.reconcile_interrupted_
+        # tasks` requeued these at this run's own startup -- surfaced here
+        # as the one-line summary the plan's own prose named, rather than
+        # leaving it visible only through a targeted `cosmo events tail`.
+        recovered_ids = sorted({e.task_id for e in interrupted if e.task_id})
+        console.print(
+            f"  [yellow]recovered from an interrupted run:[/yellow] "
+            f"{len(recovered_ids)} task(s) ({', '.join(recovered_ids)})"
+        )
 
     summary_events = list_events(
         cfg.paths.db_path, run_id=run_id, event_type=EventType.RUN_SUMMARY.value, limit=1
@@ -1484,3 +1708,36 @@ def report_cmd(
             "[yellow]queued but unschedulable (unmet dependencies):[/yellow] "
             f"{', '.join(str(t) for t in stalled)}"
         )
+
+
+# ---------------------------------------------------------------------------
+# cosmo notify -- v5 improvements plan part 3.
+# ---------------------------------------------------------------------------
+
+
+@notify_app.command("watch")
+def notify_watch(config: ConfigOption = None) -> None:
+    """The always-on watcher: polls the `events` table and forwards
+    anything notification-worthy to the configured sink. Deliberately its
+    own long-running process (`deploy/cosmo-notify.service`), never inline
+    in `cosmo run` -- see `notify.watch`'s own module docstring for why."""
+    cfg = _load(config)
+    if not cfg.notify.enabled:
+        err_console.print("[red]notify.enabled is false -- nothing to watch[/red]")
+        raise typer.Exit(code=1)
+    if not cfg.notify.telegram_bot_token or not cfg.notify.telegram_chat_id:
+        err_console.print(
+            "[red]notify.telegram_bot_token and notify.telegram_chat_id are both "
+            "required when notify.enabled is true[/red]"
+        )
+        raise typer.Exit(code=1)
+
+    sink = TelegramSink(
+        bot_token=cfg.notify.telegram_bot_token, chat_id=cfg.notify.telegram_chat_id
+    )
+    console.print(
+        f"[dim]watching {cfg.paths.db_path} -- alerting after "
+        f"{cfg.notify.stale_after_seconds}s of silence[/dim]"
+    )
+    with contextlib.suppress(KeyboardInterrupt):
+        run_watch_loop(db_path=cfg.paths.db_path, sink=sink, config=cfg.notify)

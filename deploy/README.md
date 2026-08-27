@@ -1,21 +1,34 @@
-# Deployment (Phase 9, spec 9.5 / spec 1)
+# Deployment (Phase 9, spec 9.5 / spec 1; `cosmo-notify.service` is v5 improvements plan part 3)
 
 `cosmo-run.service` is the systemd unit for running `cosmo run` unattended
 -- on the droplet or under WSL2, "identical" per the plan (spec 1). It is
 not installed by any Cosmo command; an operator copies/symlinks it in.
 
+`cosmo-notify.service` is a second, independent unit running `cosmo notify
+watch` -- the always-on process that forwards `events` rows to a
+notification sink (Telegram today) and raises its own staleness alert if
+the table goes quiet while a run isn't in a terminal status. It exists
+specifically because delivery must not live inside the run-loop process: a
+sink call inline in event emission cannot report the run loop's *own*
+crash, since whatever would send that message dies with the process.
+
 ## Installing
 
 ```bash
-sudo cp deploy/cosmo-run.service /etc/systemd/system/
+sudo cp deploy/cosmo-run.service deploy/cosmo-notify.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now cosmo-run.service
+sudo systemctl enable --now cosmo-run.service cosmo-notify.service
 ```
 
-Edit the three per-host values at the top of `[Service]` before enabling:
-`WorkingDirectory` (Cosmo's own checkout), `COSMO_CONFIG` (the host's
-config file -- droplet paths, not XDG defaults), and the `--repo` path in
-`ExecStart` (the target repo Cosmo operates on).
+Edit the three per-host values at the top of `cosmo-run.service`'s
+`[Service]` before enabling: `WorkingDirectory` (Cosmo's own checkout),
+`COSMO_CONFIG` (the host's config file -- droplet paths, not XDG defaults),
+and the `--repo` path in `ExecStart` (the target repo Cosmo operates on).
+`cosmo-notify.service` needs the same `WorkingDirectory`/`COSMO_CONFIG` and
+nothing else -- it only reads the same database `cosmo-run.service`
+writes; enabling it does nothing until `[notify]` in that config file has
+`enabled = true` and a real `telegram_bot_token`/`telegram_chat_id` (`cosmo
+notify watch` refuses to start otherwise).
 
 ## WSL2
 

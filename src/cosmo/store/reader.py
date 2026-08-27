@@ -71,6 +71,7 @@ class TaskFailureRow:
     will_retry: bool
     next_action: str
     timestamp: str
+    failure_signature: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -166,6 +167,20 @@ def get_progress(db_path: Path, task_id: str) -> ProgressRow | None:
         conn.close()
 
 
+def _event_from_row(row: sqlite3.Row) -> EventRow:
+    return EventRow(
+        event_id=row["event_id"],
+        run_id=row["run_id"],
+        task_id=row["task_id"],
+        timestamp=row["timestamp"],
+        sequence=row["sequence"],
+        event_type=row["event_type"],
+        severity=row["severity"],
+        schema_version=row["schema_version"],
+        payload=json.loads(row["payload"]),
+    )
+
+
 def list_events(
     db_path: Path,
     *,
@@ -196,20 +211,45 @@ def list_events(
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         sql = f"SELECT * FROM events {where} ORDER BY timestamp DESC, sequence DESC LIMIT ?"
         rows = conn.execute(sql, (*params, limit)).fetchall()
-        return [
-            EventRow(
-                event_id=r["event_id"],
-                run_id=r["run_id"],
-                task_id=r["task_id"],
-                timestamp=r["timestamp"],
-                sequence=r["sequence"],
-                event_type=r["event_type"],
-                severity=r["severity"],
-                schema_version=r["schema_version"],
-                payload=json.loads(r["payload"]),
-            )
-            for r in rows
-        ]
+        return [_event_from_row(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def latest_event_rowid(db_path: Path) -> int:
+    """The implicit SQLite `rowid` of the most recent `events` row, or `0`
+    if the table is empty -- `events.sequence` is scoped per `run_id`
+    (`event_sequence`'s own per-scope counter), so it can't be used to tail
+    *across* runs; `rowid` (every rowid table gets one for free, and
+    `events` was never declared `WITHOUT ROWID`) is a simple, stable,
+    insertion-ordered substitute. Feeds `cosmo events tail --follow` (v5
+    improvements plan part 4) and `cosmo notify watch` (part 3)."""
+    if not db_path.exists():
+        return 0
+    conn = connect_reader(db_path)
+    try:
+        row = conn.execute("SELECT COALESCE(MAX(rowid), 0) AS m FROM events").fetchone()
+        return int(row["m"])
+    finally:
+        conn.close()
+
+
+def list_events_after(
+    db_path: Path, after_rowid: int, *, limit: int = 1000
+) -> list[tuple[int, EventRow]]:
+    """Every `events` row with `rowid > after_rowid`, oldest first, paired
+    with its own `rowid` so the caller can advance its own high-water mark
+    without a second query. See `latest_event_rowid`'s docstring for why
+    `rowid`, not `sequence`."""
+    if not db_path.exists():
+        return []
+    conn = connect_reader(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT rowid AS _rowid, * FROM events WHERE rowid > ? ORDER BY rowid LIMIT ?",
+            (after_rowid, limit),
+        ).fetchall()
+        return [(int(r["_rowid"]), _event_from_row(r)) for r in rows]
     finally:
         conn.close()
 
@@ -251,11 +291,28 @@ def list_task_failures(
                 will_retry=bool(r["will_retry"]),
                 next_action=r["next_action"],
                 timestamp=r["timestamp"],
+                failure_signature=r["failure_signature"],
             )
             for r in rows
         ]
     finally:
         conn.close()
+
+
+def _run_from_row(row: sqlite3.Row) -> RunRow:
+    return RunRow(
+        run_id=row["run_id"],
+        status=row["status"],
+        harness=row["harness"],
+        permission_mode=row["permission_mode"],
+        max_turns=row["max_turns"],
+        base_branch=row["base_branch"],
+        pause_reason=row["pause_reason"],
+        stop_reason=row["stop_reason"],
+        started_at=row["started_at"],
+        updated_at=row["updated_at"],
+        stopped_at=row["stopped_at"],
+    )
 
 
 def get_run(db_path: Path, run_id: str) -> RunRow | None:
@@ -264,21 +321,7 @@ def get_run(db_path: Path, run_id: str) -> RunRow | None:
     conn = connect_reader(db_path)
     try:
         row = conn.execute("SELECT * FROM run_state WHERE run_id = ?", (run_id,)).fetchone()
-        if row is None:
-            return None
-        return RunRow(
-            run_id=row["run_id"],
-            status=row["status"],
-            harness=row["harness"],
-            permission_mode=row["permission_mode"],
-            max_turns=row["max_turns"],
-            base_branch=row["base_branch"],
-            pause_reason=row["pause_reason"],
-            stop_reason=row["stop_reason"],
-            started_at=row["started_at"],
-            updated_at=row["updated_at"],
-            stopped_at=row["stopped_at"],
-        )
+        return _run_from_row(row) if row is not None else None
     finally:
         conn.close()
 
@@ -294,6 +337,37 @@ def latest_run_id(db_path: Path) -> str | None:
             "SELECT run_id FROM run_state ORDER BY started_at DESC LIMIT 1"
         ).fetchone()
         return str(row["run_id"]) if row is not None else None
+    finally:
+        conn.close()
+
+
+def latest_paused_run_id(db_path: Path) -> str | None:
+    """The most recently updated `paused` run -- `cosmo run resume`'s
+    default target when no `run_id` is given (v5 improvements plan part 2),
+    matching `latest_run_id`'s own default-target convention."""
+    if not db_path.exists():
+        return None
+    conn = connect_reader(db_path)
+    try:
+        row = conn.execute(
+            "SELECT run_id FROM run_state WHERE status = 'paused' ORDER BY updated_at DESC LIMIT 1"
+        ).fetchone()
+        return str(row["run_id"]) if row is not None else None
+    finally:
+        conn.close()
+
+
+def list_running_runs(db_path: Path) -> list[RunRow]:
+    """Every `run_state` row still `running` right now -- under Cosmo's
+    strictly serial, single-process design (spec 5), only possible at
+    startup if the process that owned it died. Feeds `run.recovery.
+    reconcile_interrupted_tasks` (v5 improvements plan part 1)."""
+    if not db_path.exists():
+        return []
+    conn = connect_reader(db_path)
+    try:
+        rows = conn.execute("SELECT * FROM run_state WHERE status = 'running'").fetchall()
+        return [_run_from_row(r) for r in rows]
     finally:
         conn.close()
 

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from collections.abc import Callable
 from typing import Any
 
 from cosmo.events.envelope import EVENT_SCHEMA_VERSION, Event, EventType
@@ -24,8 +25,16 @@ class EventEmitter:
     """Bound to one `StoreWriter` -- and therefore to the single write
     connection the main loop owns (spec 8) -- for its whole lifetime."""
 
-    def __init__(self, writer: StoreWriter) -> None:
+    def __init__(self, writer: StoreWriter, on_emit: Callable[[Event], None] | None = None) -> None:
+        # v5 improvements plan part 6: an optional coarse-grained print
+        # hook, called after the DB insert succeeds -- mirrors
+        # `on_activity`'s own "presentation is a CLI concern, the emitter
+        # itself stays ignorant of it" shape. `cli.main` wires a sibling to
+        # `_print_activity` here so the one terminal already running
+        # `cosmo run` shows state transitions/pauses, not just per-tool-call
+        # chatter.
         self._writer = writer
+        self._on_emit = on_emit
 
     def emit(
         self,
@@ -71,7 +80,7 @@ class EventEmitter:
                     json.dumps(body),
                 ),
             )
-        return Event(
+        event = Event(
             event_id=event_id,
             run_id=run_id,
             task_id=task_id,
@@ -82,3 +91,6 @@ class EventEmitter:
             schema_version=EVENT_SCHEMA_VERSION,
             payload=body,
         )
+        if self._on_emit is not None:
+            self._on_emit(event)
+        return event

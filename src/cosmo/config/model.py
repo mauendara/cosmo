@@ -15,6 +15,8 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from cosmo.store.enums import Severity
+
 
 class _Strict(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -182,6 +184,14 @@ class QuotaConfig(_Strict):
     heuristic_max_duration_seconds: float = Field(gt=0.0)
     default_5h_resume_delay_seconds: int = Field(gt=0)
 
+    bypass_5h_with_credits: bool = False
+    """v5 improvements plan part 7. Off by default -- an explicit opt-in for
+    an account whose usage credits keep calls succeeding past the 5-hour
+    subscription window. `CosmoConfig`'s own validator refuses to load when
+    this is `True` but `cost.max_cost_per_run_usd` is left at its
+    no-hard-stop default of `0.0` -- the bypass must not exist without the
+    spend ceiling it recreates the need for."""
+
 
 class ReviewConfig(_Strict):
     """v4 workflow changes (`docs/v4-changes-to-workflow-plan.md`): the
@@ -231,6 +241,28 @@ class GitConfig(_Strict):
     unified_identity: bool
 
 
+class NotifyConfig(_Strict):
+    """v5 improvements plan part 3. `enabled=False` is a silent no-op --
+    `cosmo notify watch` refuses to start with a clear error instead of
+    running uselessly (see `cli.main.notify_watch`). Delivery lives in its
+    own always-on process (`cosmo notify watch`, `deploy/cosmo-notify.
+    service`), never inline in the run-loop process -- see the plan's own
+    "delivery must not live inside the run-loop process" note: a crash of
+    the run loop itself must still be reported, which is impossible if
+    whatever would report it dies with it."""
+
+    enabled: bool = False
+    telegram_bot_token: str | None = None
+    telegram_chat_id: str | None = None
+    min_severity: Severity = Severity.WARNING
+    stale_after_seconds: int = Field(gt=0, default=1800)
+    """No new run-level activity in this long, with the run not yet in a
+    terminal `run_state` status, is itself treated as a crash signal --
+    chosen against the real cadence of `task.heartbeat` rows (tied to
+    `progress.poll_interval_seconds`), which land far more often than this
+    whenever a task is genuinely active."""
+
+
 class PathsConfig(_Strict):
     """Where Cosmo keeps its own state.
 
@@ -262,4 +294,19 @@ class CosmoConfig(_Strict):
     disk: DiskConfig
     log_retention: LogRetentionConfig
     git: GitConfig
+    notify: NotifyConfig
     paths: PathsConfig
+
+    @model_validator(mode="after")
+    def _bypass_requires_a_spend_ceiling(self) -> CosmoConfig:
+        # v5 improvements plan part 7 (decision 7): don't ship the risky
+        # half (bypassing a confirmed quota pause) without its own backstop
+        # turned on -- same instinct part 3 already applied to keeping
+        # Telegram delivery out of the crash-prone run process.
+        if self.quota.bypass_5h_with_credits and not self.cost.run_limit_enabled:
+            raise ValueError(
+                "quota.bypass_5h_with_credits requires a non-zero "
+                "cost.max_cost_per_run_usd -- refusing to start without the "
+                "spend ceiling the bypass recreates the need for"
+            )
+        return self

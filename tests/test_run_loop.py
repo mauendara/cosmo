@@ -601,3 +601,40 @@ def test_run_queue_sweeps_a_stale_worktree_left_by_a_crashed_prior_process(
         writer.close()
 
     assert not stale.exists()
+
+
+def test_a_dag_cycle_abort_emits_exactly_one_run_stopped_event(tmp_path: Path) -> None:
+    """A startup-time abort (disk_low, a DAG cycle) used to emit its own
+    detailed `run.stopped` inline *and* fall through to the generic
+    post-loop emission every non-PAUSED stop gets -- double-counting every
+    such abort in `cosmo events tail`. Fixed to emit exactly one, carrying
+    the richer detail (severity=critical, the cycle's own error string)."""
+    cfg = _fast_config(tmp_path)
+    repo = _repo_on_develop(tmp_path)
+
+    writer = StoreWriter(cfg.paths.db_path)
+    writer.queue_add(task_id="a", spec_path="openspec/changes/a", depends_on=["b"], max_attempts=2)
+    writer.queue_add(task_id="b", spec_path="openspec/changes/b", depends_on=["a"], max_attempts=2)
+    emitter = EventEmitter(writer)
+    adapter = FakeHarnessAdapter(cfg, script=ScriptedCall(outcome=FakeOutcome.SUCCESS))
+
+    try:
+        outcome = run_queue(
+            config=cfg,
+            writer=writer,
+            emitter=emitter,
+            adapter=adapter,
+            repo_path=repo,
+            base_branch="develop",
+            harness_name="claude",
+        )
+    finally:
+        writer.close()
+
+    assert outcome.status is RunStatus.STOPPED
+    assert outcome.stop_reason is StopReason.MANUAL
+
+    events = list_events(cfg.paths.db_path, run_id=outcome.run_id, event_type="run.stopped")
+    assert len(events) == 1
+    assert events[0].severity == "critical"
+    assert "error" in events[0].payload

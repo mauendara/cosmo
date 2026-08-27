@@ -92,4 +92,11 @@ def test_a_run_aborts_before_any_task_when_free_space_is_below_the_floor(
     assert task.worktree_path is None
 
     events = list_events(cfg.paths.db_path, run_id=outcome.run_id, event_type="run.stopped")
-    assert any(e.severity == "critical" and e.payload.get("reason") == "disk_low" for e in events)
+    # Exactly one row, not two: an earlier version emitted its own detailed
+    # `run.stopped` inline at the abort site *and* fell through to the
+    # generic post-loop emission every non-PAUSED stop gets, double-counting
+    # every disk_low/DAG-cycle abort in `cosmo events tail`.
+    assert len(events) == 1
+    assert events[0].severity == "critical"
+    assert events[0].payload.get("reason") == "disk_low"
+    assert "detail" in events[0].payload

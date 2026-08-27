@@ -10,9 +10,9 @@ rediscover.
 
 | | |
 |---|---|
-| Last updated | 2026-08-26 |
+| Last updated | 2026-08-27 |
 | Working branch | `develop` |
-| Head commit | `871092f` plus this session's Phase 10 prep work (template + two small fixes below), uncommitted as of this entry |
+| Head commit | `f721e7b` plus this session's v5 improvements plan work (see "v5 improvements plan — Implemented" below), uncommitted as of this entry |
 | Spec | [v3-cosmo-autonomous-agent-spec.md](v3-cosmo-autonomous-agent-spec.md) |
 
 **Everything in the plan except Phase 10 is implemented.** Phases 0-9 are
@@ -2528,6 +2528,15 @@ template or to Vite.
 | 47 | `store.writer.queue_retry` resets `attempt_count` to 0 (previously untouched) and gains a `clear_worktree` parameter; `cli.main.queue_retry` gains `--repo` and, when the worktree's `openspec/changes/<spec_id>/tasks.md` is already committed, does a soft reset (`git.worktree.reset_worktree_to_commit`: hard-reset to that commit + `git clean -fdx`) instead of removing the worktree outright | §3.2, §6.3 | 10 prep | Two real bugs found the same night: (1) a manually retried task carried over its already-exhausted `attempt_count`, so the very next genuine failure blocked it again with zero real retries available -- confirmed live (`attempt_count: 4` against `max_attempts: 2` after exactly one post-retry attempt); (2) the user asked directly whether a retry would re-run PROPOSING needlessly -- it would have, under the deviation 44/46 fix alone, since a full worktree wipe destroys the already-valid proposal along with the failed implementation. `find_last_commit_touching` locates the commit PROPOSING left via the same `tasks.md` file deviation 44 already keys off (a structural git fact, not a commit-message string -- spec 4's "prose parsing is prohibited" applies here too even though this is CLI convenience, not classification) |
 | 48 | `templates/harness/claude/CLAUDE.md` gains a "This call is one-shot -- there is no 'later'" section | Not named in the spec | 10 prep | Root-caused the actual `package-lock.json` failure behind deviations 43/44/46/47's real repro, via the raw session log: `IMPLEMENTING` launched `npm install` in the background, correctly reasoned it should wait, called `ScheduleWakeup`, and ended its turn assuming a later resumption that a one-shot `claude -p` call never provides -- the install was still running when the process exited, no lockfile was ever written, and the gate's `npm ci` failed on a generic error with no visible connection to the real cause. `node_modules` was ~249 packages deep (real progress, genuinely killed mid-flight), not a fabricated or skipped install |
 | 49 | `templates/harness/claude/settings.json`'s `permissions.deny` gains `ScheduleWakeup`, `ToolSearch`, `TaskOutput` (bare tool names, no path pattern); `CLAUDE.md`'s "one-shot" section rewritten to state the denial as fact and drop the old "or if it must background, poll it yourself" escape hatch | §2.5 | 10 | Deviation 48's prose alone did not hold: a later real `IMPLEMENTING` session for `scaffold-app` backgrounded `npm install` again, then followed the *other* half of the old guidance ("poll it yourself") -- a `ps -p <pid>` wait loop, `sleep 240`, then `ToolSearch` to locate `TaskOutput` and poll the background task with it -- burning 81 turns and 5.83M cached input tokens ($2.90) on waiting instead of working before hitting `error_max_turns`. That single call is the most likely real cause of the run's next event: a *confirmed* `quota_exhausted_5h` pause. Verified for real, not assumed: two headless `claude -p` invocations against a scratch repo with the updated `settings.json` (same `--setting-sources project`/`--allowedTools Write Edit Bash` flags the adapter uses) explicitly instructed the model to force a `tool_use` call for all three tools regardless of expected outcome -- zero `tool_use` blocks for any of the three appeared in either transcript, confirming `permissions.deny` removes them from the tool list entirely rather than exposing-then-rejecting them, and that this holds even though the same workspace-trust gate behind deviation 38 separately still ignores `permissions.allow` in the same file. The already-running `scaffold-app` worktree does not get a fresh `sync_harness_assets` call on resume (`run.loop._run_one_task`'s reuse branch skips it, deviation 46) so its `.agent/claude/` was re-synced by hand from the template to actually pick the fix up before the next attempt |
+| 50 | New `run.recovery` module (`acquire_run_lock`/`RunLockHeldError`, `reconcile_interrupted_tasks`), `StopReason.CRASHED`, migration 7 (`run_state.stop_reason` widened) | v5 plan part 1 | v5 | The plan's own spec; recorded here because it closes the exact "task interrupted mid-flight is lost forever" gap the plan opened with |
+| 51 | `store.failure_signature.classify_failure_signature` (and its `task_failures.failure_signature` column, migration 8) lives under `cosmo.store`, not `cosmo.task` as the plan's own prose implies | v5 plan part 5 (Class 1) | v5 | `cosmo.task.__init__` imports `task.machine`, which imports `store.writer` -- putting the classifier under `cosmo.task` and importing it from `store.writer` (its one real caller, at the `record_task_failure` chokepoint) would import a partially-initialized `store.writer` module. Moving the module one layer down avoids the cycle without reshaping either package |
+| 52 | `reconcile_interrupted_tasks` runs *after* the new/resumed run's own `run_state` row is created/transitioned, not "immediately alongside `sweep_stale_worktrees`" as the plan's own prose suggested | v5 plan part 1 | v5 | Found by a real test failure, not by inspection: `task_failures.run_id`/`task_transitions.run_id` both hold a real foreign key to `run_state(run_id)` (`PRAGMA foreign_keys=1`, enforced), and the new `run_id` doesn't exist as a row until `writer.run_create`/`run_transition` runs -- reconciling before that raises `sqlite3.IntegrityError` for every interrupted task found. `sweep_stale_worktrees` has no such constraint (it never writes task/run rows), so it can stay where the plan put it |
+| 53 | `run.loop.run_queue` split into a thin lock-acquiring wrapper plus `_run_queue_locked` (the renamed original function body), rather than wrapping the existing ~230-line function body in a `try/finally` in place | v5 plan part 1 (pidfile lock) | v5 | Avoids reindenting the whole existing loop (and its many internal `break`s) purely to guarantee `RunLock.release()` runs on every exit path, including an exception; the wrapper is the only new indentation level |
+| 54 | `QuotaDecision.status` gains `RunStatus.RUNNING` as a legal value (previously documented as "`PAUSED` or `STOPPED`, never anything else") | v5 plan part 7 | v5 | `bypass_5h_with_credits` needs `decide()` to tell the run loop "keep going, don't pause" for a confirmed `five_hour` signal -- reusing `RUNNING` (already a legal `RunStatus`) needed no new enum value, only a new legal combination and a `bypassed: bool` flag to disambiguate it from the loop's own already-`RUNNING` steady state |
+| 55 | `cosmo run` converted from a leaf `@app.command("run")` into a `typer.Typer` sub-app (`run_app`) with an `invoke_without_command=True` callback, guarded on `ctx.invoked_subcommand is None` | v5 plan part 2 | v5 | The only way to add `cosmo run resume` as a true subcommand of `run` without changing `cosmo run --task`/`cosmo run --dry-run`'s existing flag-based invocation at all -- confirmed by the full existing test suite passing unchanged after the conversion |
+| 56 | New `store.reader.list_events_after`/`latest_event_rowid`, keyed on SQLite's implicit `rowid`, not `events.sequence` | v5 plan parts 3 and 4 | v5 | `sequence` is scoped per `run_id` (one counter per scope, `event_sequence`), so it can't express "everything new since I last checked" *across* runs/scopes the way `cosmo notify watch` and `cosmo events tail --follow` both need; `rowid` is a stable, monotonic, insertion-ordered id every non-`WITHOUT ROWID` table gets for free |
+| 57 | `notify.Sink.send(event: Event)` also receives synthetic, never-persisted `Event`s (`notify.watch._stale_event`, `event_type="watch.stale"`) alongside real ones read back from the `events` table | v5 plan part 3 | v5 | The plan's own reasoning: a staleness alert has no row to read by construction (nothing is being written by a dead process) -- the watcher has to construct the message itself, and reusing the same `Event`/`Sink` shape for it (rather than a second, parallel notification path) keeps `TelegramSink` and any future sink down to one method |
+| 58 | `run.recovery.reconcile_interrupted_tasks` excludes `run_id == run_id` (the run it's reconciling *for*) from its "any `running` row is a crash" scan | v5 plan part 1 | v5 | A direct consequence of deviation 52's own ordering fix: `run.loop.run_queue` now transitions the new/resumed run's own row to `running` *before* calling this function (required by the FK constraint deviation 52 fixed), so without this guard every fresh `cosmo run` immediately marked its own brand-new run `stopped`/`crashed`. Caught by two real-invocation-shaped tests (`test_run_disk_check.py`, `test_run_loop.py`) written to verify an unrelated fix (the double-`RUN_STOPPED`-emission bug, pre-existing, also fixed this pass) -- both asserted exactly one `run.stopped` event and got two |
 
 ## Phase 10 — acceptance run (in progress)
 
@@ -2596,3 +2605,217 @@ and its dependents are actually done, not before.
   exist yet from this run alone.
 - `REVIEWING` still has zero real-`claude -p` verification -- none of the
   tasks that have run so far have reached it.
+- **New, from the v5 improvements plan work (see that section below for
+  what shipped) -- all validation/acceptance of already-implemented code,
+  not further implementation:**
+  - A real Telegram bot token/chat id actually receiving a message end to
+    end via `cosmo notify watch` (`TelegramSink.send`'s real HTTP call is
+    unverified; its message formatting is unit-tested).
+  - A real `kill -9` of a `cosmo run` process mid-`IMPLEMENTING`/
+    `VALIDATING` against a real target repo, confirming the *next*
+    `cosmo run` picks the task back up via `run.recovery.
+    reconcile_interrupted_tasks` -- proven so far only by seeding a
+    crashed-looking DB state by hand and by this session's own real
+    process-loss incident above (which predates the fix), not by an actual
+    kill against code that has the fix.
+  - A real `cosmo run resume` against a real circuit-breaker-tripped or
+    quota-paused run from this same acceptance run -- directly applicable
+    to the `bdf4ab101aee...` run above once its quota window clears.
+  - A real `bypass_5h_with_credits=true` run against an account whose
+    usage credits are actually covering calls past a confirmed 5-hour
+    window, confirming `QUOTA_BYPASSED` fires and the run keeps going.
+  - `cosmo notify watch`'s `stale_after_seconds=1800` default and the
+    severity/allowlist notification rules, confirmed or retuned against a
+    real multi-hour run with a real sink attached -- same "confirm or
+    retune against real data" posture as Open Item 2's timeout retuning.
+  - Whether `deploy/cosmo-notify.service` actually survives alongside
+    `deploy/cosmo-run.service` under the same `systemctl --user` real
+    verification the first open item above calls for.
+
+## v5 improvements plan — Implemented
+
+[v5-improvements-plan.md](v5-improvements-plan.md)'s parts 1-4, 6, and 7 are
+implemented; part 5's Class 1 (the `failure_signature` taxonomy) is
+implemented too. Part 5's Class 2 (whether `permissions.deny` actually
+gates `ScheduleWakeup`/`ToolSearch`/`TaskOutput`) was already resolved and
+shipped *before* this session, as deviation 49 above -- nothing left open
+there. This session's own new deviations are 50-57 in the cumulative table.
+
+### What exists
+
+- **Part 1 -- crash recovery.** `run.recovery.reconcile_interrupted_tasks`:
+  every `task_queue` row not `queued`/`done`/`blocked` at startup is
+  requeued (never via `queue_retry` -- `attempt_count` is left untouched,
+  since a crash must not consume the code-level retry budget), its
+  `worktree_path` cleared (the directory is already gone by the time this
+  runs -- see the ordering deviation below), a `task.interrupted` event
+  emitted, and an `environment_error` `task_failures` row recorded. Any
+  *other* `run_state` row still `running` is transitioned to `stopped`/
+  `crashed` -- the run currently being started/resumed is excluded from
+  this scan (deviation 58; its own row is legitimately `running` by the
+  time this runs). `cosmo report` surfaces recovered tasks directly:
+  "recovered from an interrupted run: N task(s) (ids...)" whenever any
+  `task.interrupted` events exist for the run.
+  `run.recovery.acquire_run_lock`/`RunLock`: a pidfile
+  (`paths.data_dir/cosmo-run.lock`) written at the top of every
+  `run_queue()` call (both a fresh run and `cosmo run resume`), holding the
+  PID; a live PID refuses a second `cosmo run` with `RunLockHeldError`
+  (surfaced by the CLI as a clean error, not a traceback); a dead PID is
+  reclaimed automatically. `run.loop.run_queue` is now a thin wrapper that
+  acquires the lock, calls the renamed `_run_queue_locked` (the original
+  function body, otherwise untouched), and releases the lock in `finally`
+  -- see deviation 53 for why it's a wrapper and not an in-place
+  `try/finally`.
+- **Part 2 -- `cosmo run resume [run_id]`.** `run_queue` gained an optional
+  `resume_run_id` parameter: when given, it reuses that `run_id` (no
+  `run_create`, `RUN_RESUMED` instead of `RUN_STARTED`) and otherwise
+  proceeds exactly like a fresh run -- cost accounting picks back up for
+  free (`run_cost`/`task_cost` are already keyed by `run_id`), and the
+  wall-clock budget is deliberately fresh from the moment of resume (decision
+  2), not an accounting of time spent paused. The CLI command resolves an
+  omitted `run_id` to the most recently *updated* `paused` run
+  (`store.reader.latest_paused_run_id`), renders the same context
+  `cosmo report` does (`cli.main._render_run_report`, factored out of
+  `report_cmd` so both share it), and prompts for confirmation unless
+  `--yes`.
+- **Part 3 -- notifications.** New `cosmo.notify` package: a `Sink`
+  protocol (`send(event: Event) -> None`), `notify.telegram.TelegramSink`
+  (stdlib `urllib`, no new dependency, best-effort on any `OSError`/
+  `URLError`), and `notify.watch.run_watch_loop`/`watch_once` -- a small,
+  independently-testable poll loop (`store.reader.list_events_after`,
+  keyed on `rowid`, not the per-run-scoped `sequence` -- deviation 56) that
+  forwards `WARNING`+ events (plus `RUN_SUMMARY`/`RUN_STOPPED` regardless
+  of severity) to the sink, and raises its own synthetic staleness alert
+  (`event_type="watch.stale"`, deviation 57) after
+  `[notify].stale_after_seconds` of silence, exactly once per silent
+  period. New `cosmo notify watch` CLI command (refuses to start if
+  `notify.enabled` is false or Telegram credentials are missing) and
+  `deploy/cosmo-notify.service`, documented in `deploy/README.md` alongside
+  `cosmo-run.service`.
+- **Part 4 -- `--follow`.** `cosmo events tail --follow` polls past the
+  last-seen `rowid` at `progress.poll_interval_seconds` and prints new rows
+  `tail -f`-style, filtered client-side by the same `--run`/`--task`/
+  `--severity`/`--type` flags; `cosmo report --follow` re-renders until the
+  run reaches `stopped`. Both exit cleanly on `KeyboardInterrupt`.
+- **Part 5, Class 1 only.** `store.failure_signature.
+  classify_failure_signature`: deterministic substring matching against
+  `error_detail` (`missing_lockfile`, `node_engine_mismatch`,
+  `enoent_node_modules`; unmatched stays `None`), computed automatically
+  inside `StoreWriter.record_task_failure` (migration 8's new nullable
+  `task_failures.failure_signature` column) -- every existing call site
+  gets it for free, no call-site changes needed. Lives under `cosmo.store`,
+  not `cosmo.task`, to avoid a real import cycle (deviation 51).
+- **Part 6 -- coarse live-terminal events.** `EventEmitter` gained an
+  optional `on_emit: Callable[[Event], None]` hook, called after the DB
+  insert succeeds. `cli.main._print_emit` (wired into `cosmo run`,
+  `cosmo run --task`, and `cosmo run resume`'s `EventEmitter` construction)
+  prints `WARNING`+ events plus a small lifecycle-`INFO` allowlist
+  (`RUN_STARTED`/`RUN_RESUMED`/`RUN_SUMMARY`), styled bold/severity-colored
+  to stay visually distinct from `_print_activity`'s dim per-tool-call
+  chatter, and renders `RUN_PAUSED`'s `resume_delay_seconds` as a computed
+  wall-clock ETA rather than a raw float.
+- **Part 7 -- quota bypass.** New `QuotaConfig.bypass_5h_with_credits`
+  (default `False`); `quota.decide()` returns a `QuotaDecision` with
+  `status=RunStatus.RUNNING, bypassed=True` for a confirmed `five_hour`
+  signal when set (`weekly` is untouched, per the plan's own decision) --
+  new legal value for `QuotaDecision.status`, deviation 54.
+  `CosmoConfig`'s own cross-section validator refuses to load when the
+  bypass is on but `cost.max_cost_per_run_usd` is left at `0.0` (decision
+  7). `run.loop._handle_quota_pause_or_stop` emits `EventType.
+  QUOTA_BYPASSED` (`WARNING`) instead of pausing when `bypassed` is set.
+
+### Real invocations this session (not just unit tests)
+
+Same discipline as every prior phase -- fake/unit coverage first, then a
+real check:
+
+- **The process lock, for real.** One process held `acquire_run_lock`
+  against a scratch `data_dir` while a concurrent `cosmo run` was invoked
+  against the same repo: the second one was refused with a clear
+  `RunLockHeldError` message naming the real holding PID, not a traceback;
+  once the holder released, the identical invocation succeeded.
+- **Crash recovery, for real, end to end through the CLI.** A task was
+  seeded directly into `task_queue` at `implementing` (via a real
+  `StoreWriter`, not the test double), alongside a `run_state` row left
+  `running` (simulating a killed prior process). The *next* real
+  `cosmo run --repo ...` invocation: emitted `task.interrupted`
+  (`previous_status: implementing`), transitioned the task
+  `implementing -> queued` (visible in `task_transitions`/`cosmo events
+  tail`), marked the seeded run `stopped`/`crashed`, and printed both
+  events live via the new `on_emit` hook (part 6) -- confirming parts 1 and
+  6 compose correctly, not just in isolation.
+- **Migrations, for real.** A fresh `cosmo init` + `cosmo run` against a
+  scratch repo applies migrations 1-8 cleanly (`schema_migrations` reaches
+  version 8) with no error, on top of the existing dev environment's
+  already-migrated database from prior phases.
+- **Not done for real, deliberately deferred** (matches the plan's own
+  "Verification" section, and this codebase's established posture of not
+  faking the one thing that can't be faked): a real Telegram bot
+  token/chat id receiving a real `TelegramSink.send` message (`notify.
+  telegram.format_event`'s own message-shaping is unit-tested; the actual
+  HTTP call is not); a real `kill -9` of a `cosmo run` process mid-`
+  IMPLEMENTING`/`VALIDATING` against a real target repo (the seeded-DB-row
+  check above exercises the same reconciliation code path but isn't a real
+  process kill); a real `bypass_5h_with_credits=true` run against an
+  account whose usage credits are actually covering calls past a real
+  5-hour window.
+
+### Two real bugs found and fixed after the first implementation pass
+
+Both found by hand running the crash-recovery smoke test above, neither by
+inspection alone -- and both are the kind of thing a fake/unit-only test
+suite would never have caught (the second one *was* actually caught by the
+first pass's own new unit tests, once written; the first was not caught by
+any test until one was added specifically to check the row count):
+
+- **A pre-existing double `RUN_STOPPED` emission, now fixed.** `run.loop.
+  run_queue`'s `disk_low` and DAG-cycle-at-startup abort branches each used
+  to emit their own detailed `RUN_STOPPED` event (severity `critical`, with
+  a `detail`/`error` field) *and* fall through to the generic post-loop
+  `RUN_STOPPED` emission every non-`PAUSED` `final_status` gets (severity
+  `info`) -- two rows in `events` for one stop. Fixed by capturing the
+  richer severity/detail in two loop-local variables (`stop_severity`,
+  `stop_extra_payload`) at the abort site instead of emitting there, and
+  merging them into the single post-loop emission. Pre-dated this
+  session's v5 work (`git diff` confirmed neither branch had been touched
+  before this fix), but fixed as part of it since it directly affects how
+  `cosmo events tail`/a Telegram sink presents a `disk_low`/DAG-cycle stop.
+  New test: `test_run_disk_check.py`'s existing disk-abort test now asserts
+  `len(events) == 1`; `test_run_loop.py` gained a dedicated DAG-cycle-abort
+  test asserting the same.
+- **A new bug this session's own reconciliation ordering fix (deviation
+  52) introduced, caught before it shipped.** Because `reconcile_
+  interrupted_tasks` now necessarily runs *after* the new/resumed run's own
+  `run_state` row is transitioned to `running` (the FK-ordering fix), its
+  own "any `running` row is a crash" scan swept up that brand-new row too
+  -- every fresh `cosmo run` was marking its own run `stopped`/`crashed` a
+  few lines after starting it, alongside its real, correct stop event
+  later. Fixed with a one-line guard: `reconcile_interrupted_tasks` skips
+  `run.run_id == run_id` (the run it's reconciling *for*) in that scan.
+  Caught by two new real-invocation-shaped tests written to verify the
+  `RUN_STOPPED` fix above (both asserted `len(events) == 1` and got `2`),
+  not by inspection -- recorded as deviation 58.
+- **`cosmo report` now surfaces recovered tasks.** The plan's own prose
+  named this as something worth adding; implemented directly rather than
+  left as an open item -- `_render_run_report` prints "recovered from an
+  interrupted run: N task(s) (ids...)" whenever any `task.interrupted`
+  events exist for the run, sourced from the same `list_events` query
+  every other summary line already uses.
+
+New deviations from this fix-up pass: 58 (the reconcile self-crash guard).
+The `RUN_STOPPED` double-emission fix and the `cosmo report` line are
+corrections/completions of this session's own v5 work, not separate spec
+deviations.
+
+### Things that will matter later
+
+- Part 5's Class 2 research (the session-management-tool audit beyond
+  `ScheduleWakeup`/`ToolSearch`/`TaskOutput`) is still exactly as open as
+  the plan itself left it -- deviation 49 closed the one diagnosed
+  instance, not a general audit of every tool with the same shape.
+- Every remaining open item from this work is a validation/acceptance
+  task, not an implementation gap -- see the new bullets added to "Open
+  items for whoever finishes Phase 10" above (Telegram send, real
+  `kill -9`, real `cosmo run resume`, real credits bypass, `cosmo
+  notify watch`'s tuning, `cosmo-notify.service` alongside `cosmo-run.
+  service`).

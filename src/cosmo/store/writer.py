@@ -31,6 +31,7 @@ from cosmo.store.enums import (
     StopReason,
     TaskStatus,
 )
+from cosmo.store.failure_signature import classify_failure_signature
 from cosmo.store.migrations import migrate
 
 WriteJob = Callable[[sqlite3.Connection], None]
@@ -262,6 +263,19 @@ class StoreWriter:
                 (str(worktree_path), now, task_id),
             )
 
+    def queue_clear_worktree_path(self, task_id: str) -> None:
+        """Nulls `worktree_path` without touching `status` -- used by
+        `run.recovery.reconcile_interrupted_tasks` (v5 improvements plan
+        part 1), where the directory is already gone (the startup worktree
+        sweep already pruned it) but the DB row still points at it."""
+        now = utcnow_iso()
+        with self._conn:
+            self._current_status(task_id)  # raises TaskNotFoundError if absent
+            self._conn.execute(
+                "UPDATE task_queue SET worktree_path = NULL, updated_at = ? WHERE task_id = ?",
+                (now, task_id),
+            )
+
     def queue_complete(self, task_id: str, *, run_id: str | None = None) -> TransitionResult:
         """`DONE`: the worktree has already been removed by the caller (spec
         3.2), so `worktree_path` is cleared here rather than left dangling."""
@@ -301,14 +315,19 @@ class StoreWriter:
         Columns match spec 9.3's `task.failed` payload shape exactly rather
         than inventing a parallel structure."""
         now = utcnow_iso()
+        # v5 improvements plan part 5 (Class 1): computed here, at the one
+        # real writer of this table, so every caller gets it for free --
+        # `error_summary` alone can't tell two build failures with different
+        # root causes apart (see the classifier's own docstring).
+        failure_signature = classify_failure_signature(error_detail)
         with self._conn:
             self._conn.execute(
                 """
                 INSERT INTO task_failures (
                     task_id, run_id, attempt_number, failure_type, failure_stage,
                     error_summary, error_detail, files_touched, will_retry,
-                    next_action, timestamp, event_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    next_action, timestamp, event_id, failure_signature
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     task_id,
@@ -323,6 +342,7 @@ class StoreWriter:
                     next_action.value,
                     now,
                     event_id,
+                    failure_signature,
                 ),
             )
 

@@ -40,6 +40,7 @@ from cosmo.run.breaker import CircuitBreaker
 from cosmo.run.cost import check_run_cost, task_cost_ceiling_reached
 from cosmo.run.dag import DagCycleError, resolve_execution_order
 from cosmo.run.quota import HeuristicTracker, QuotaSignal, decide, observe_harness_result
+from cosmo.run.recovery import acquire_run_lock, reconcile_interrupted_tasks
 from cosmo.run.types import RunOutcome, RunSummary
 from cosmo.store.enums import BlockedReason, RunStatus, Severity, StopReason, TaskStatus
 from cosmo.store.reader import (
@@ -73,6 +74,50 @@ def run_queue(
     wall_clock_now: Callable[[], datetime] = lambda: datetime.now(UTC),
     sleep: Callable[[float], None] = time.sleep,
     on_activity: Callable[[str], None] | None = None,
+    resume_run_id: str | None = None,
+) -> RunOutcome:
+    """Thin wrapper around `_run_queue_locked`: acquires the v5 improvements
+    plan part 1 process lock (only one `run_queue` may run against a given
+    `config.paths.data_dir` at a time) and guarantees its release on every
+    exit path, including an exception -- a bare `try/finally` around the
+    whole body rather than reindenting it, since `RunLock.release()` is
+    idempotent and cheap (`unlink`) either way."""
+    lock = acquire_run_lock(config.paths.data_dir)
+    try:
+        return _run_queue_locked(
+            config=config,
+            writer=writer,
+            emitter=emitter,
+            adapter=adapter,
+            repo_path=repo_path,
+            base_branch=base_branch,
+            harness_name=harness_name,
+            gate_runner=gate_runner,
+            monotonic=monotonic,
+            wall_clock_now=wall_clock_now,
+            sleep=sleep,
+            on_activity=on_activity,
+            resume_run_id=resume_run_id,
+        )
+    finally:
+        lock.release()
+
+
+def _run_queue_locked(
+    *,
+    config: CosmoConfig,
+    writer: StoreWriter,
+    emitter: EventEmitter,
+    adapter: HarnessAdapter,
+    repo_path: Path,
+    base_branch: str,
+    harness_name: str,
+    gate_runner: GateRunner,
+    monotonic: Callable[[], float],
+    wall_clock_now: Callable[[], datetime],
+    sleep: Callable[[float], None],
+    on_activity: Callable[[str], None] | None,
+    resume_run_id: str | None,
 ) -> RunOutcome:
     """Drives the whole task queue to completion, a breaker trip, a quota
     stop, or a wall-clock/cost stop -- one `cosmo run` (no `--task`)
@@ -83,9 +128,18 @@ def run_queue(
     `on_activity`, if given, is threaded straight through to each task's
     `run_task(..., on_activity=...)` (item 3) -- purely a CLI/presentation
     concern (a line to print), so this module stays as ignorant of it as it
-    is of `console`/Rich; `cli.main` is what actually builds a real one."""
+    is of `console`/Rich; `cli.main` is what actually builds a real one.
+
+    `resume_run_id` (v5 improvements plan part 2): when given, reuses that
+    `run_id` instead of minting a fresh one and skips `run_create` (the row
+    already exists, `paused`) -- `RUN_RESUMED` is emitted instead of
+    `RUN_STARTED`. Cost accounting picks back up correctly for free
+    (`run_cost`/`task_cost` are already keyed by `run_id`, spec 8's own
+    current-state schema); the wall-clock budget below is deliberately
+    *not* carried over -- a resumed run gets a fresh `timeouts.run_wall`
+    starting now (decision 2), not an accounting of time spent paused."""
     db_path = config.paths.db_path
-    run_id = uuid.uuid4().hex
+    run_id = resume_run_id if resume_run_id is not None else uuid.uuid4().hex
 
     # Spec 9.5, best-effort and run-id-independent -- prunes old
     # `raw_log_path` files under `paths.log_dir` before this run even
@@ -110,27 +164,47 @@ def run_queue(
     # inspection (spec 3.2), same as always.
     sweep_stale_worktrees(repo_path=repo_path, work_dir=config.paths.work_dir, db_path=db_path)
 
-    writer.run_create(
-        run_id=run_id,
-        harness=harness_name,
-        permission_mode=config.harness.permission_mode,
-        max_turns=config.harness.max_turns,
-        base_branch=base_branch,
-    )
-    writer.run_transition(run_id, RunStatus.RUNNING)
-    emitter.emit(
-        event_type=EventType.RUN_STARTED,
-        severity=Severity.INFO,
-        run_id=run_id,
-        payload={
-            "harness": harness_name,
-            "permission_mode": config.harness.permission_mode,
-            "max_turns": config.harness.max_turns,
-            "base_branch": base_branch,
-            "run_wall_seconds": config.timeouts.run_wall,
-            "max_cost_per_run_usd": config.cost.max_cost_per_run_usd,
-        },
-    )
+    if resume_run_id is not None:
+        writer.run_transition(run_id, RunStatus.RUNNING)
+        emitter.emit(
+            event_type=EventType.RUN_RESUMED, severity=Severity.INFO, run_id=run_id, payload={}
+        )
+    else:
+        writer.run_create(
+            run_id=run_id,
+            harness=harness_name,
+            permission_mode=config.harness.permission_mode,
+            max_turns=config.harness.max_turns,
+            base_branch=base_branch,
+        )
+        writer.run_transition(run_id, RunStatus.RUNNING)
+        emitter.emit(
+            event_type=EventType.RUN_STARTED,
+            severity=Severity.INFO,
+            run_id=run_id,
+            payload={
+                "harness": harness_name,
+                "permission_mode": config.harness.permission_mode,
+                "max_turns": config.harness.max_turns,
+                "base_branch": base_branch,
+                "run_wall_seconds": config.timeouts.run_wall,
+                "max_cost_per_run_usd": config.cost.max_cost_per_run_usd,
+            },
+        )
+
+    # v5 improvements plan part 1: the worktree sweep's own sibling for
+    # `task_queue`/`run_state` rows -- a task interrupted mid-flight by a
+    # crashed/killed process is not "restarted from scratch" (spec 3.2's
+    # own promise) without this; it's lost forever, since `run.dag.
+    # resolve_execution_order` only ever considers `queued` tasks. Runs
+    # unconditionally, on the way into a fresh run and a resumed one alike
+    # (a resume also defends against the process having been killed while
+    # paused-and-sleeping). Deliberately placed *after* the run row above
+    # exists (`run_create`/the resume branch's `run_transition`), not
+    # before: the task-level rows this writes are attributed to `run_id`,
+    # and `task_failures`/`task_transitions` both hold a real foreign key
+    # to `run_state(run_id)`.
+    reconcile_interrupted_tasks(db_path=db_path, writer=writer, emitter=emitter, run_id=run_id)
 
     breaker = CircuitBreaker(config.circuit_breaker)
     heuristic = HeuristicTracker(config.quota)
@@ -142,6 +216,14 @@ def run_queue(
 
     final_status = RunStatus.RUNNING
     stop_reason: StopReason | None = None
+    # A startup-time abort (disk_low, a DAG cycle) carries richer detail and
+    # a higher severity than the generic post-loop RUN_STOPPED emission
+    # every non-PAUSED final_status gets below -- captured here instead of
+    # emitting a second, separate RUN_STOPPED event for the same stop (a
+    # real, pre-existing duplicate-event gap found by hand and fixed as
+    # part of this session's own v5 work, not part of the plan itself).
+    stop_severity = Severity.INFO
+    stop_extra_payload: dict[str, object] = {}
     disk_checked = False
 
     while True:
@@ -157,12 +239,8 @@ def run_queue(
             disk_checked = True
             disk_check = check_disk(config)
             if disk_check.blocking:
-                emitter.emit(
-                    event_type=EventType.RUN_STOPPED,
-                    severity=Severity.CRITICAL,
-                    run_id=run_id,
-                    payload={"reason": StopReason.DISK_LOW.value, "detail": disk_check.detail},
-                )
+                stop_severity = Severity.CRITICAL
+                stop_extra_payload = {"detail": disk_check.detail}
                 final_status, stop_reason = RunStatus.STOPPED, StopReason.DISK_LOW
                 break
             watchdog_notify(ready=True)
@@ -175,12 +253,8 @@ def run_queue(
         try:
             order = resolve_execution_order(current_tasks)
         except DagCycleError as exc:
-            emitter.emit(
-                event_type=EventType.RUN_STOPPED,
-                severity=Severity.CRITICAL,
-                run_id=run_id,
-                payload={"reason": StopReason.MANUAL.value, "error": str(exc)},
-            )
+            stop_severity = Severity.CRITICAL
+            stop_extra_payload = {"error": str(exc)}
             final_status, stop_reason = RunStatus.STOPPED, StopReason.MANUAL
             break
         if not order:
@@ -337,9 +411,9 @@ def run_queue(
         )
         emitter.emit(
             event_type=EventType.RUN_STOPPED,
-            severity=Severity.INFO,
+            severity=stop_severity,
             run_id=run_id,
-            payload={"reason": stop_reason.value if stop_reason else None},
+            payload={"reason": stop_reason.value if stop_reason else None, **stop_extra_payload},
         )
 
     emitter.emit(
@@ -382,15 +456,28 @@ def _handle_quota_pause_or_stop(
     run_id: str,
     sleep: Callable[[float], None],
 ) -> StopReason | None:
-    """Applies `quota.decide`'s verdict: `None` means the run paused, slept
-    out the window, and resumed -- the caller should `continue` its loop.
-    A `StopReason` means the run should stop with that reason instead."""
+    """Applies `quota.decide`'s verdict: `None` means either the run paused,
+    slept out the window, and resumed, or (v5 improvements plan part 7) a
+    confirmed `five_hour` signal was deliberately bypassed -- either way the
+    caller should `continue` its loop. A `StopReason` means the run should
+    stop with that reason instead."""
     decision = decide(
         signal,
         config=config.quota,
         run_wall_remaining_seconds=deadline_monotonic - monotonic(),
         now=wall_clock_now(),
     )
+    if decision.bypassed:
+        emitter.emit(
+            event_type=EventType.QUOTA_BYPASSED,
+            severity=Severity.WARNING,
+            run_id=run_id,
+            payload={
+                "resets_at": signal.resets_at,
+                "run_cost_so_far_usd": get_run_cost(config.paths.db_path, run_id),
+            },
+        )
+        return None
     if decision.status is RunStatus.STOPPED:
         return decision.stop_reason
 

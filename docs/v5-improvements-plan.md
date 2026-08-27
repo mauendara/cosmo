@@ -2,19 +2,34 @@
 
 ## Status
 
-**Design record, not yet implemented — every open decision resolved
-(see "Decisions" below) for parts 1-4 and 6-7, ready to build against.**
-**Part 5 is the one exception**: it's real research/diagnosis, not a
-finished spec — it names concrete next steps but leaves their shape
-(the failure-signature taxonomy's field/schema, the scope of the
-session-management-tool audit) for a follow-up decision pass, deliberately
-not decided here. Written the same way
+**Implemented**, parts 1-4, 6, and 7, plus part 5's Class 1 (the
+`failure_signature` taxonomy). See
+[v3-implementation-state.md](v3-implementation-state.md)'s "v5 improvements
+plan — Implemented" section for what actually got built, every real
+decision/ordering constraint found along the way (most notably: the
+startup reconciliation sweep has to run *after* the run row exists, not
+"immediately alongside `sweep_stale_worktrees`" as this document's own
+prose originally suggested — a real foreign-key constraint on
+`task_failures.run_id`/`task_transitions.run_id` makes the original
+ordering fail), and every new spec deviation (50-57). This document is kept
+as the original design record — read it for the *why* behind the shape of
+the thing; read the state doc for what's real.
+
+**Part 5's Class 2 remains exactly as open as it was written here** —
+the session-management-tool audit beyond the one diagnosed
+`ScheduleWakeup`/`ToolSearch`/`TaskOutput` instance (already resolved and
+shipped *before* this implementation pass, as deviation 49) was never this
+implementation pass's job and is not done. Real-invocation verification
+this document's own "Verification" section calls for — a real Telegram
+send, a real `kill -9` mid-task, a real `bypass_5h_with_credits` run against
+an account with usage credits — is also not done; see the state doc's own
+"Real invocations this session" for exactly what *was* checked by hand
+instead, and why those three specifically were not.
+
+Written the same way
 [v4-changes-to-workflow-plan.md](v4-changes-to-workflow-plan.md) was before
 its own build started: grounded in the real code as it exists today, with
-file:line citations, not a restatement of the original spec's prose. Read
-[v3-implementation-state.md](v3-implementation-state.md) for what's
-actually real before implementing any of this — this document may already
-be stale in small ways by the time work starts.
+file:line citations, not a restatement of the original spec's prose.
 
 ## Context
 

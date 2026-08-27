@@ -111,6 +111,11 @@ class StopReason(enum.Enum):
     MANUAL = "manual"
     QUOTA_EXHAUSTED_WEEKLY = "quota_exhausted_weekly"
     DISK_LOW = "disk_low"
+    CRASHED = "crashed"
+    """v5 improvements plan part 1: a `run_state` row still `running` at the
+    next `cosmo run`'s startup reconciliation -- under Cosmo's strictly
+    serial, single-process design (spec 5), only possible if the process
+    that owned it died."""
 
 
 class HeartbeatSource(enum.Enum):

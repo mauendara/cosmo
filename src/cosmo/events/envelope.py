@@ -47,6 +47,17 @@ class EventType(enum.Enum):
     step failed. Always `severity=warning` -- FINISHING never blocks a task
     that already merged successfully, this is purely an observability
     signal for post-run review."""
+    TASK_INTERRUPTED = "task.interrupted"
+    """v5 improvements plan part 1: a task found mid-flight (any status but
+    `queued`/`done`/`blocked`) by the startup reconciliation sweep --
+    `run.recovery.reconcile_interrupted_tasks` -- because the process that
+    was driving it crashed or was killed. Always `severity=warning`;
+    emitted once per reconciled task, before it's requeued."""
+    QUOTA_BYPASSED = "quota.bypassed"
+    """v5 improvements plan part 7: a confirmed `five_hour` quota signal was
+    *not* paused on because `quota.bypass_5h_with_credits` is set -- the
+    operator has opted in to spending real usage-credit money past the
+    included subscription allowance. Always `severity=warning`."""
 
 
 @dataclass(frozen=True, slots=True)

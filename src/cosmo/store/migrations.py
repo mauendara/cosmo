@@ -384,6 +384,55 @@ _SCHEMA_V6 = """
 ALTER TABLE task_queue ADD COLUMN spec_batch_id TEXT;
 """
 
+# ============================================================================
+# Migration 7 -- v5 improvements plan part 1: `run_state.stop_reason` gains
+# 'crashed'.
+#
+# The startup reconciliation sweep (`run.recovery.reconcile_interrupted_
+# tasks`) transitions any `run_state` row still `running` at process start
+# to `stopped`/`crashed` -- under Cosmo's strictly serial, single-process
+# design (spec 5), a `running` row that outlives its own process can only
+# mean that process died. Same recreate-copy-swap recipe as migrations 3/4,
+# since SQLite has no `ALTER TABLE ... DROP CONSTRAINT`.
+# ============================================================================
+_SCHEMA_V7 = """
+CREATE TABLE run_state_v3 (
+    run_id          TEXT PRIMARY KEY,
+    status          TEXT NOT NULL CHECK (status IN ('idle', 'running', 'paused', 'stopped')),
+    harness         TEXT NOT NULL,
+    permission_mode TEXT NOT NULL,
+    max_turns       INTEGER NOT NULL,
+    base_branch     TEXT NOT NULL,
+    pause_reason    TEXT CHECK (pause_reason IN (
+                        'circuit_breaker', 'quota_exhausted_5h', 'quota_exhausted_weekly'
+                    )),
+    stop_reason     TEXT CHECK (stop_reason IN (
+                        'completed', 'max_time', 'queue_empty', 'cost_limit_reached',
+                        'manual', 'quota_exhausted_weekly', 'disk_low', 'crashed'
+                    )),
+    started_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL,
+    stopped_at      TEXT
+);
+INSERT INTO run_state_v3 SELECT * FROM run_state;
+DROP TABLE run_state;
+ALTER TABLE run_state_v3 RENAME TO run_state;
+"""
+
+# ============================================================================
+# Migration 8 -- v5 improvements plan part 5 (Class 1): `task_failures` gains
+# `failure_signature`.
+#
+# Plain nullable column, no CHECK constraint -- populated by a small
+# deterministic classifier (`store.failure_signature.
+# classify_failure_signature`), not a closed enumeration, and anything
+# unmatched is `None` on purpose. `ALTER TABLE ... ADD COLUMN` is enough,
+# same as migration 6's `spec_batch_id`.
+# ============================================================================
+_SCHEMA_V8 = """
+ALTER TABLE task_failures ADD COLUMN failure_signature TEXT;
+"""
+
 MIGRATIONS: list[Migration] = [
     Migration(1, "initial schema: events, queue, progress, run state, cost, history", _SCHEMA_V1),
     Migration(2, "task_failures.failure_stage gains secrets (gate gitleaks backstop)", _SCHEMA_V2),
@@ -396,6 +445,16 @@ MIGRATIONS: list[Migration] = [
     ),
     Migration(
         6, "task_queue gains spec_batch_id (v4 workflow changes, cosmo spec queue)", _SCHEMA_V6
+    ),
+    Migration(
+        7,
+        "run_state.stop_reason gains crashed (v5 improvements, startup reconciliation)",
+        _SCHEMA_V7,
+    ),
+    Migration(
+        8,
+        "task_failures gains failure_signature (v5 improvements, part 5 Class 1)",
+        _SCHEMA_V8,
     ),
 ]
 

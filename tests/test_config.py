@@ -77,3 +77,28 @@ def test_zero_cost_ceiling_means_disabled() -> None:
 def test_deep_merge_preserves_untouched_keys() -> None:
     base = {"a": {"x": 1, "y": 2}, "b": 3}
     assert _deep_merge(base, {"a": {"y": 9}}) == {"a": {"x": 1, "y": 9}, "b": 3}
+
+
+def test_notify_disabled_by_default() -> None:
+    cfg = load_config(config_path=Path("/nonexistent/config.toml"))
+    assert cfg.notify.enabled is False
+    assert cfg.notify.telegram_bot_token is None
+    assert cfg.notify.stale_after_seconds == 1800
+
+
+def test_quota_bypass_requires_a_nonzero_run_cost_ceiling(tmp_path: Path) -> None:
+    """v5 improvements plan part 7 (decision 7): the bypass must not exist
+    without the spend ceiling it recreates the need for."""
+    override = tmp_path / "config.toml"
+    override.write_text("[quota]\nbypass_5h_with_credits = true\n")
+    with pytest.raises(ValidationError, match="max_cost_per_run_usd"):
+        load_config(config_path=override)
+
+
+def test_quota_bypass_is_accepted_alongside_a_real_cost_ceiling(tmp_path: Path) -> None:
+    override = tmp_path / "config.toml"
+    override.write_text(
+        "[quota]\nbypass_5h_with_credits = true\n\n[cost]\nmax_cost_per_run_usd = 10.0\n"
+    )
+    cfg = load_config(config_path=override)
+    assert cfg.quota.bypass_5h_with_credits is True

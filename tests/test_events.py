@@ -34,6 +34,31 @@ def test_sequence_is_scoped_per_run(tmp_path: Path) -> None:
     writer.close()
 
 
+def test_on_emit_hook_fires_after_the_row_is_persisted(tmp_path: Path) -> None:
+    """v5 improvements plan part 6: the coarse print hook -- called after the
+    DB insert succeeds, with the same `Event` the caller gets back."""
+    writer = StoreWriter(tmp_path / "cosmo.db")
+    seen: list[EventType] = []
+    emitter = EventEmitter(writer, on_emit=lambda e: seen.append(EventType(e.event_type)))
+
+    returned = emitter.emit(
+        event_type=EventType.RUN_PAUSED, severity=Severity.WARNING, run_id="run-1"
+    )
+
+    assert seen == [EventType.RUN_PAUSED]
+    row = writer.connection.execute("SELECT * FROM events").fetchone()
+    assert row is not None  # the insert already happened by the time the hook fired
+    assert returned.event_type == EventType.RUN_PAUSED.value
+    writer.close()
+
+
+def test_no_on_emit_hook_is_the_default(tmp_path: Path) -> None:
+    writer = StoreWriter(tmp_path / "cosmo.db")
+    emitter = EventEmitter(writer)
+    emitter.emit(event_type=EventType.RUN_STARTED, severity=Severity.INFO, run_id="run-1")
+    writer.close()
+
+
 def test_run_less_events_get_their_own_scope(tmp_path: Path) -> None:
     """Project-level events like agent_assets.synced carry no run_id."""
     writer = StoreWriter(tmp_path / "cosmo.db")

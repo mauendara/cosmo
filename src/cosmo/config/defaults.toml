@@ -127,6 +127,17 @@ heuristic_max_duration_seconds = 5.0
 # resets_at ETA (the system/api_retry shape never does -- see stream.py).
 default_5h_resume_delay_seconds = 18000
 
+# v5 improvements plan part 7. Off by default; requires cost.
+# max_cost_per_run_usd > 0 (validated at config-load time) when enabled.
+bypass_5h_with_credits = false
+
+[notify]
+# v5 improvements plan part 3. Off by default; set telegram_bot_token/
+# telegram_chat_id in a user config file to actually enable delivery.
+enabled = false
+min_severity = "warning"
+stale_after_seconds = 1800
+
 [disk]
 # Spec 9.5: a full disk fails every later task in a way that reads as a code error.
 min_free_gb = 10.0

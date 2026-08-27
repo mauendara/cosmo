@@ -1,70 +1,141 @@
-# Handoff — continue at Phase 10
+# Handoff — v5 improvements plan implemented; Phase 10 acceptance run still in progress
 
-You are picking up Cosmo mid-build. **Phases 0-9 of the original plan are
-complete, and the v4 workflow-changes feature (raw-spec → enrich → propose
-→ apply → review → finish/archive, folded entirely into `cosmo` commands)
-is also complete.** Phase 10 — the original plan's last phase — is the only
-thing left. This is not a code-writing phase in the same sense as 0-9 or
-v4: acceptance — a real target repo, 5-10 genuine OpenSpec changes (or, now
-that v4 exists, real `cosmo spec add`/`cosmo spec queue` fan-outs — your
-call, see "A real decision this session left open" below), run unattended
-overnight under systemd, post-run review against the spec's own claims.
+You are picking up Cosmo mid-build. **Phases 0-9 of the original plan, the
+v4 workflow-changes feature, and now the v5 improvements plan (crash
+recovery, `cosmo run resume`, notifications, `--follow`, live-terminal
+observability, the quota-bypass flag, and part 5's Class 1
+failure-signature classifier) are all implemented.** What's left is **Phase
+10 — the original plan's last phase — and it means real validation of
+what's now built, not more implementation**: the overnight acceptance run
+itself is already underway (see below), and this session's own v5 work
+added a specific, itemized list of real-invocation checks to Phase 10's
+scope (real Telegram delivery, a real process kill, a real `cosmo run
+resume`, a real credits-bypass run — see "What still needs validating"
+below). Read [v3-implementation-state.md](v3-implementation-state.md)'s
+two newest sections in full before doing anything: "Phase 10 — acceptance
+run (in progress)" and "v5 improvements plan — Implemented" (including its
+own "Two real bugs found and fixed after the first implementation pass"
+subsection — one was a pre-existing observability bug, the other was a
+bug this same v5 pass introduced and caught before it shipped).
 
-**Multiple sessions of genuine prep happened ahead of Phase 10 itself** (not
-the acceptance run — Phase 10 proper is still not started): a new project
-template (`templates/projects/vite-react-local/`), real gate bugs it
-surfaced and fixed, a project-agnostic guardrail widening, an agent-template
-polish pass, a Claude Code attribution setting, a `cosmo init` git-identity
-step, a real headless-permissions bug (`--allowedTools`, deviation 38), a
-`cosmo spec add` idempotency fix (deviation 40), a `gate.frontend_image`
-bump to `node:24.19-bookworm` plus toolchain-pinning doc guardrails
-(deviations 41-42, 48), and — all found the same night by actually running
-`cosmo run` for real against a live target repo and reading the raw
-failures, not by inspection alone — a false-confirmed-quota-exhaustion bug
-(deviation 43), redundant re-`PROPOSING` on every task re-entry (deviation
-44), truncated live-activity-feed paths (deviation 45), a worktree-lifecycle
-bug where a fresh `cosmo run` process could silently destroy an already-
-valid `PROPOSING` result (deviations 46-47), and a `cosmo queue retry` that
-never actually reset a task's retry budget (deviation 47). None of this is
-Phase 10 scope creep — read the state doc's "Phase 10 prep" section (right
-after "v4 workflow changes — Complete") in full before doing anything; it
-has grown large across sessions, and several of its decisions (the git
-identity one, the permissions/toolchain fixes, and especially the worktree-
-retry semantics in deviations 46-47) change what "Get oriented" below used
-to say.
+## What actually happened this session (v5 improvements plan)
 
-**A real `cosmo run` has been driven against `/home/dev/delta/cosmo-tests/
-todo-frontend-app` across several sessions the same night** (run ids
-`fb254309...`, `a05dae4c...`, `e929bbb4...` — see the state doc's
-"Decisions made" prose for the full chain). As of this handoff,
-`scaffold-app` is `BLOCKED` again — `code_error @ build`, the *same*
-missing-`package-lock.json` `npm ci` failure that also hit attempts 0 and 1
-in the very first run, recurring a third time even after the lockfile
-guidance (deviation 42) was already in place. This is not yet fixed; see
-"Real research still needed" below and
-[v5-improvements-plan.md](v5-improvements-plan.md)'s new §5. The next real
-step is `cosmo queue retry scaffold-app` (now does a real, evidence-based
-soft reset — see deviation 47 — rather than either a blind full wipe or a
-no-op) + `cosmo run` against that same repo, but don't expect it to succeed
-outright: the underlying missing-lockfile pattern hasn't been fixed at the
-root, only better-diagnosed.
+Everything in [v5-improvements-plan.md](v5-improvements-plan.md) parts 1-4,
+6, and 7, plus part 5's Class 1, is now real code, not a design record:
 
-**Real research still needed, not just more point-fixes**: this session's
-real diagnoses (deviations 43-48) surfaced two recurring *classes* of
-failure, not just isolated bugs — see
-[v5-improvements-plan.md](v5-improvements-plan.md)'s new §5 "Harness
-failure-pattern research" for the evidence (queried directly from the real
-`task_failures` table, not recalled from memory) and the concrete next
-steps it names: (1) `error_summary` is too coarse to tell failure causes
-apart without reading raw npm/build output by hand every time — worth a
-real structural sub-classification; (2) a harness session starting real
-background work (e.g. a slow `npm install`) and then ending its own turn
-assuming a resumption `claude -p` never provides — one instance
-(`ScheduleWakeup`) is now named explicitly in `CLAUDE.md`, but prose alone
-already proved insufficient once this same session (the missing-lockfile
-failure recurred right after the *first* round of guidance), so denying it outright
-via `permissions.deny` is the next real fix to build, alongside auditing
-the rest of the session-management tool surface for the same risk.
+- **Crash recovery** (`src/cosmo/run/recovery.py`): a pidfile lock (one
+  `cosmo run`/`cosmo run resume` at a time per `data_dir`) and
+  `reconcile_interrupted_tasks`, which requeues any task caught mid-flight
+  by a crash without touching its retry budget, and marks orphaned
+  `run_state` rows `crashed` — carefully excluding the run currently being
+  started/resumed itself from that scan (deviation 58; this was a real bug
+  caught by a new test, not shipped broken).
+- **`cosmo run resume [run_id]`** — a real Typer subcommand (`run` is now a
+  sub-app, not a leaf command; `cosmo run --task`/`--dry-run` are
+  unchanged).
+- **Notifications** (`src/cosmo/notify/`): a `Sink` protocol, a Telegram
+  implementation (stdlib `urllib`, no new dependency), `cosmo notify
+  watch`, and `deploy/cosmo-notify.service`.
+- **`cosmo events tail --follow` / `cosmo report --follow`.**
+- **A `failure_signature` classifier** (`src/cosmo/store/failure_signature.py`,
+  migration 8) — deterministic substring matching (`missing_lockfile`,
+  `node_engine_mismatch`, `enoent_node_modules`), computed automatically
+  inside `StoreWriter.record_task_failure`.
+- **A coarse live-terminal event hook** — `EventEmitter.on_emit`, wired into
+  `cosmo run`/`cosmo run resume` so the attached terminal shows state
+  transitions/pauses, not just per-tool-call chatter.
+- **`quota.bypass_5h_with_credits`** — an opt-in flag to keep going past a
+  confirmed 5-hour quota pause when usage credits are covering calls,
+  gated by a config validator requiring a real cost ceiling.
+
+Two migrations (7, 8), 8 new spec deviations (50-58 — see the cumulative
+table in the state doc), and 465 tests passing (`./check.sh` green). Also
+found and fixed, by hand, during a real crash-recovery smoke test (not part
+of the plan's own scope, but directly affecting the same code):
+`run.loop.run_queue`'s `disk_low`/DAG-cycle-at-startup abort paths used to
+emit `RUN_STOPPED` twice for one stop — now exactly once, with the richer
+`critical`-severity detail preserved.
+
+**Not done, deliberately** (see the state doc's "v5 improvements plan —
+Implemented" section for the full reasoning): part 5's Class 2 research
+(auditing whether other session-management tools share the
+`ScheduleWakeup`/`ToolSearch`/`TaskOutput` gap — that one instance was
+already fixed *before* this v5 pass, as deviation 49, but a broader audit
+was never this pass's job); and every real-invocation verification the
+plan's own "Verification" section calls for (see next section) — those all
+need a real Telegram bot, a real process to kill, or a real usage-credits
+account, none of which exist in this dev sandbox.
+
+## What still needs validating (this is now Phase 10's own scope, not new implementation)
+
+All of the following are real-invocation checks against already-implemented
+code — nothing here should require writing new production code unless one
+of them surfaces an actual bug (in which case: fix it, record it as a new
+deviation, keep going):
+
+- **A real Telegram bot token/chat id** actually receiving a message end to
+  end via `cosmo notify watch` (`TelegramSink.send`'s real HTTP call is
+  unverified; its message *formatting* is unit-tested in
+  `tests/test_notify_telegram.py`).
+- **A real `kill -9`** of a `cosmo run` process mid-`IMPLEMENTING`/
+  `VALIDATING` against a real target repo, confirming the *next*
+  `cosmo run` picks the task back up via `reconcile_interrupted_tasks`.
+  Proven so far only by seeding a crashed-looking DB state by hand
+  (`tests/test_run_recovery.py`, plus a real CLI smoke test) — not by an
+  actual process kill.
+- **A real `cosmo run resume`** against a real paused run — directly
+  applicable to the acceptance run below once its quota window clears (or
+  whenever it's next found paused).
+- **A real `bypass_5h_with_credits=true` run** against an account whose
+  usage credits are actually covering calls past a confirmed 5-hour window,
+  confirming `QUOTA_BYPASSED` fires and the run keeps going.
+- **`cosmo notify watch`'s `stale_after_seconds=1800` default** and the
+  severity/allowlist notification rules, confirmed or retuned against a
+  real multi-hour run with a real sink attached.
+- **`deploy/cosmo-notify.service` alongside `deploy/cosmo-run.service`**
+  under the same real `systemctl --user` verification the item below calls
+  for.
+
+Plus the Phase 10 acceptance run's own pre-existing open items (unrelated
+to v5, already open before this session):
+
+- Install and actually exercise `deploy/cosmo-run.service` on this host —
+  still not done; this is the gap that let the acceptance run's own
+  `cosmo run` process die silently (see next section) with nothing to
+  restart it.
+- `use-local-storage-hook` sits `blocked` (`reason: cost`) — needs a
+  `cosmo queue retry` once upstream tasks clear.
+- Open Item 2 (§3.3 timeout retuning against real p95 data) — still open,
+  not enough real `IMPLEMENTING`/`VALIDATING`/`REVIEWING` duration data
+  exists yet.
+- `REVIEWING` still has zero real-`claude -p` verification.
+
+## The acceptance run itself: real, in progress, currently paused
+
+A real `cosmo run` (run_id `bdf4ab101aee484b98c7a833c014714d`, started
+2026-08-27T02:26:04Z) has been driven against `/home/dev/delta/cosmo-tests/
+todo-frontend-app` — `cosmo run` invoked directly, not yet under systemd
+(see the open item above). `scaffold-app` reached real `IMPLEMENTING`, hit
+`error_max_turns` after a session spent polling a backgrounded `npm
+install` instead of blocking on it (deviation 49's root cause — already
+fixed at the harness-policy level, see `templates/harness/claude/
+settings.json`'s `permissions.deny`), then the run correctly detected a
+real, **confirmed** `quota_exhausted_5h` signal and paused
+(`resume_delay_seconds` ~8716s). **The `cosmo run` process then died
+silently during that pause's in-process `sleep()`** — SIGTERM, not a
+crash, no OOM, no reboot, cause not conclusively identified (WSL2
+memory-pressure signature is the best lead, not proven). See the state
+doc's Phase 10 section for the full forensic trail.
+
+**This is now directly actionable with what shipped this session**: the
+*next* `cosmo run` (or, better, `cosmo run resume`) against this same
+target repo will run `reconcile_interrupted_tasks` on startup and requeue
+`scaffold-app` cleanly instead of leaving it stuck — confirm with the user
+before resuming (per project memory, they asked to drive this resumption
+themselves; don't do it unprompted). Once genuinely ready to resume: `cosmo
+run resume` (not a fresh `cosmo run`) is now the correct tool — it reuses
+the paused run's own `run_id`, so cost accounting and history stay
+attached to the same run rather than starting a new one.
 
 ## Read these first, in this order
 
@@ -72,109 +143,65 @@ the rest of the session-management tool surface for the same risk.
 |---|---|---|
 | [v3-cosmo-autonomous-agent-spec.md](v3-cosmo-autonomous-agent-spec.md) | The authoritative specification | **Source of truth** for the original 0-10 plan. v1 and v2 are superseded — read them only for history |
 | [v3-implementation-plan.md](v3-implementation-plan.md) | 11-phase build plan | The map for Phase 10 (its own section, near the end). **Do not edit** — it's the agreed scope; record decisions in `v3-implementation-state.md` instead |
-| [v3-implementation-state.md](v3-implementation-state.md) | What actually exists, plus decisions and gotchas | Read the "Phase 9 — Complete" **and** "v4 workflow changes — Complete" sections in full before doing anything — several of their decisions and open items are load-bearing for Phase 10 |
+| [v3-implementation-state.md](v3-implementation-state.md) | What actually exists, plus decisions and gotchas | Read the "Phase 10 — acceptance run (in progress)" and "v5 improvements plan — Implemented" sections in full before doing anything — both are load-bearing for what's left |
 | [v4-changes-to-workflow-plan.md](v4-changes-to-workflow-plan.md) | The raw-spec-workflow feature design | Implemented — see its own Status line. Read it for *why* the `REVIEWING`/`FINISHING` states and `cosmo spec` commands are shaped the way they are; read the state doc's v4 section for what's actually real |
-| [v5-improvements-plan.md](v5-improvements-plan.md) | Crash/pause resume, Telegram notifications, `cosmo events tail --follow`, the harness failure-pattern research (§5), the live-terminal observability gap (§6, newest), and an opt-in usage-credits quota-bypass flag (§7, newest) | **Not started.** All open decisions in §1-4 and §6-7 are already resolved (see its own "Decisions" section, now 8 items) — ready to build against whenever this is picked up. §5 is the one exception: its Class 1 (failure-signature taxonomy) is now decided too, but Class 2 (the `ScheduleWakeup`/session-tool gap) isn't — a real test this session found `--allowedTools` doesn't actually gate `ScheduleWakeup`/`ToolSearch`/`TaskOutput`, so the originally-proposed `permissions.deny` fix is unverified, not decided; read §5's own "Decided" notes before assuming otherwise |
+| [v5-improvements-plan.md](v5-improvements-plan.md) | Crash/pause resume, Telegram notifications, `--follow`, live-terminal observability, an opt-in usage-credits quota-bypass flag, and the harness failure-pattern research (§5) | **Implemented**, parts 1-4/6-7 plus part 5's Class 1 — see its own Status line. Part 5's Class 2 (the broader session-management-tool audit) remains open, exactly as the plan itself left it |
 
 `v1-*` and `v2-*` in this folder are earlier spec drafts. v3 is a superset of
 both. Do not implement from them.
 
-Two more files in this folder are historical, already fully consumed —
+Three more files in this folder are historical, already fully consumed —
 don't re-read them looking for open work: [simple-template-handoff.md](simple-template-handoff.md)
-scoped the `vite-react-local` template, now built (see the state doc's
-"Phase 10 prep"); `old-agents-skills/` is the user's pre-Cosmo Claude Code
-skill/agent files, mined once for ideas that fit Cosmo's headless model
-(see the same state-doc section for what was kept vs. discarded).
+scoped the `vite-react-local` template, now built; `old-agents-skills/` is
+the user's pre-Cosmo Claude Code skill/agent files, mined once for ideas
+that fit Cosmo's headless model; both are described further in the state
+doc's older "Phase 10 prep" section if you need the history.
 
 ## Where things are
 
 ```
 /home/dev/delta/cosmo/          # working branch: develop
-├── docs/                       # the four documents above
-├── deploy/                     # Phase 9: cosmo-run.service, README (install notes, WSL2 caveat)
+├── docs/                       # the five documents above
+├── deploy/                     # cosmo-run.service (Phase 9) + cosmo-notify.service (v5), README
 ├── templates/                  # harness + project templates (source of truth)
-│   ├── harness/claude/
-│   │   ├── CLAUDE.md                         # 10 prep: polished, attribution.commit note added
-│   │   ├── settings.json                     # 10 prep: attribution.commit="" -- no Claude co-author trailer
-│   │   ├── agents/{implementer,reviewer}.md  # v4 + 10 prep: reviewer.md gains tools: (no Edit) + technique bullets
-│   │   ├── hooks/test_path_guard.py          # 10 prep: PROTECTED_PATTERNS gains .tsx/.jsx
-│   │   └── skills/spec-enrichment/SKILL.md   # v4 + 10 prep: cosmo spec add's own harness call
-│   └── projects/
-│       ├── _blank/, java-spring-react/       # pre-existing
-│       └── vite-react-local/                 # 10 prep: new -- frontend-only, localStorage, no backend
+│   └── projects/{_blank,java-spring-react,vite-react-local}/
 ├── src/cosmo/
 │   ├── checks.py, doctor.py, config/, harness/
-│   ├── bootstrap/git_identity.py # 10 prep: new -- cosmo init's target-repo git identity step
-│   ├── watchdog.py               # Phase 9: sd_notify, hand-rolled, no dependency
-│   ├── retention.py              # Phase 9: paths.log_dir rotation (7d done / 30d blocked)
-│   ├── git/merge.py              # Phase 5: worktree lifecycle, merge ladder -- 10 prep: author: tuple|None
-│   ├── gate/runner.py            # Phase 6: the Docker validation gate -- 10 prep: e2e no longer needs backend_dir
-│   ├── task/                     # Phase 7: the per-task state machine
-│   │   ├── machine.py               # v4: _do_reviewing/_do_finishing; 10 prep: unified_identity branch
-│   │   └── review.py                # v4: new -- the .cosmo/review-result.json verdict-file contract
-│   ├── spec/                     # v4: new -- *-task.md frontmatter parsing (taskfile.py)
+│   ├── bootstrap/                # cosmo init: openspec/docs/symlinks/git-identity/git-branch
+│   ├── watchdog.py                 # Phase 9: sd_notify, hand-rolled, no dependency
+│   ├── retention.py                # Phase 9: paths.log_dir rotation
+│   ├── git/{merge,worktree,secrets}.py
+│   ├── gate/                     # Phase 6: the Docker validation gate
+│   ├── task/                     # Phase 7/v4: the per-task state machine
+│   ├── spec/                     # v4: *-task.md frontmatter parsing
 │   ├── knowledge/                # Phase 7: spec 11's COMMITTING-step guardrails
 │   ├── run/                      # Phase 8/9: run-level state machine, DAG, breaker, quota, cost
-│   │   └── loop.py                 # unchanged by v4 (plan's own "zero changes needed" argument, confirmed true)
+│   │   ├── loop.py                 # v5: run_queue is now a thin lock-acquiring wrapper around
+│   │   │                             _run_queue_locked; reconcile_interrupted_tasks wired in;
+│   │   │                             resume_run_id param; QUOTA_BYPASSED emission
+│   │   ├── recovery.py             # v5: new -- acquire_run_lock/RunLock, reconcile_interrupted_tasks
+│   │   └── quota.py                # v5: QuotaDecision gains bypassed: bool, RunStatus.RUNNING legal
+│   ├── notify/                   # v5: new -- Sink protocol, TelegramSink, cosmo notify watch's loop
 │   ├── store/                    # SQLite schema, StoreWriter, reader queries
-│   │   ├── migrations.py            # 6 migrations now -- 4-6 are v4 (task_queue.status widened,
-│   │   │                              task_failures.failure_stage widened, spec_batch_id column)
-│   │   └── enums.py                 # v4: TaskStatus.REVIEWING/FINISHING, FailureStage.ADVERSARIAL_REVIEW
-│   ├── events/                   # envelope + EventEmitter + emit_state_changed
+│   │   ├── migrations.py            # 8 migrations now -- 7-8 are v5 (stop_reason gains 'crashed',
+│   │   │                              task_failures gains failure_signature)
+│   │   ├── failure_signature.py     # v5: new -- deterministic classifier, lives here (not
+│   │   │                              cosmo.task) to avoid a real import cycle -- see deviation 51
+│   │   └── enums.py                 # v5: StopReason.CRASHED
+│   ├── events/                   # v5: EventEmitter gains an optional on_emit hook
 │   ├── proc/                     # ManagedProcess, WallClockTimer/StallTimer/LivenessTimers, orphan sweep
-│   └── cli/main.py               # `cosmo` command -- v4 added `cosmo spec add`/`cosmo spec queue`;
-│                                    10 prep added the git-identity step to `init`
-├── tests/                       # 387 passing + 8 opt-in real-Docker/real-openspec
+│   └── cli/main.py               # v5: `run` is now a sub-app (adds `run resume`); `notify watch`;
+│                                    `events tail --follow`; `report --follow`; _print_emit
+├── tests/                       # 465 passing + 8 opt-in real-Docker/real-openspec
 │   └── fixtures/gate_repo/        # real Spring Boot + Vite/React fixture, reusable for your own tests too
 └── check.sh                     # ruff + format + mypy --strict + pytest
 ```
-
-Nothing empty is waiting for you the way `cosmo.run` was for Phase 8, or
-`deploy/` was for Phase 9 — Phase 10 is not a code-writing phase in the same
-sense as 0-9/v4. It is: seed real work into a real target repo, run the
-thing for real, unattended, overnight, then write down what actually
-happened. Whatever code changes *do* come out of it should be small and
-targeted — a real bug the overnight run surfaces, or Open Item 2's timeout
-retuning, not new features.
-
-## A real decision this session left open
-
-The plan's own Phase 10 scope (below, carried over verbatim from before v4
-existed) says "5-10 genuine OpenSpec changes, queued the old way." Now that
-`cosmo spec add`/`cosmo spec queue` exist and are the *documented* front
-door (`cosmo queue add` still works, but is no longer what a real user is
-pointed at), running Phase 10 entirely through the old direct-OpenSpec path
-would prove the overnight loop but never actually exercise `REVIEWING`/
-`FINISHING` for real — both still have **zero real-`claude -p`
-verification** (see the state doc's v4 "Things that will matter later"). The
-raw-spec fan-out half (`cosmo spec add`) *is* now verified for real, same
-session as the git-identity work: it uncovered and fixed a real bug where
-`dontAsk` mode could never write files at all in a headless worktree
-(Claude Code's workspace-trust gate silently discards `permissions.allow`
-from `.claude/settings.json`; fixed via `--allowedTools` on the adapter's
-own argv — see the state doc's "Phase 10 prep" deviation 38). A mixed run — some tasks via `cosmo spec add`/`spec
-queue`, some via direct `cosmo queue add` — would cover more real ground in
-one overnight shot than either alone. This is a real, unresolved call for
-whoever runs Phase 10, not a decision already made on your behalf — confirm
-with the user before assuming an approach, especially since `review.
-enabled=true` by default means every task in the run will hit a real
-reviewer session regardless of which front door queued it.
-
-A ready-made source for the target repo's units of work, if you want one
-that doesn't require inventing scope from scratch: [simple-template-handoff.md](simple-template-handoff.md)'s
-Part 2 lists six small greenfield app ideas (todo list, habit tracker,
-Pomodoro timer, Memory game, Snake/2048, expense tracker), each scoped to a
-small task count and designed to isolate Cosmo's own loop behavior from
-stack complexity. They all target the now-built `vite-react-local` template
--- `cosmo init <target> --project-template vite-react-local` is real and
-verified this session. Using them isn't mandatory, but they're there if
-useful.
 
 ## Get oriented (2 minutes)
 
 ```bash
 cd /home/dev/delta/cosmo
-git log --oneline           # v4 workflow changes + this session's Phase 10 prep should be at HEAD
+git log --oneline           # this session's v5 improvements plan commit should be at HEAD
 git branch --show-current   # should say develop
 ./check.sh                  # must be green before you change anything
 cosmo doctor                # core checks + harness checks in two tables
@@ -184,77 +211,59 @@ cosmo doctor                # core checks + harness checks in two tables
 prior phase broke, don't chase it): `cosmo doctor` may show `disk space:
 FAIL` — this WSL2 box runs close to the 10 GB floor at the *test* data path
 it checks (`/tmp` is a small tmpfs on this box); the real filesystem has
-hundreds of GB free. This box still has no *global* git identity (only this
-repo's own local config has one), and that's now less of a trap than it
-used to be: `cosmo init` against your real target repo seeds one
-automatically (`bootstrap.git_identity`, "Phase 10 prep" in the state doc —
-`Cosmo <cosmo@entropiainversa.com>` by default, or it'll prompt if the
-target already has an identity). It's still true for a *test fixture* your
-own work adds directly (not through `cosmo init`) — any such fixture that
-calls `git commit` still needs `-c user.name=...`/`-c user.email=...`
-passed explicitly, same as every existing test in this repo does. `gitleaks`
-is on PATH, `docker` works, and so is the real `openspec` CLI (confirmed for
-real this session — `openspec new change`/`openspec archive --yes` both work
-against a scratch repo, see the state doc's v4 "Real invocations"
-subsection).
+hundreds of GB free. It may also show `event/state store: schema at version
+N, this build expects 8` if this shell's own `XDG_DATA_HOME` sandbox
+predates migrations 7-8 — harmless, self-resolving the next time any
+command opens a `StoreWriter` (migrations are additive and applied
+automatically). This box still has no *global* git identity (only this
+repo's own local config has one); `cosmo init` against a real target repo
+seeds one automatically (`bootstrap.git_identity`). `gitleaks` is on PATH,
+`docker` works, and so is the real `openspec` CLI.
 
 **This host's WSL2 genuinely has systemd enabled** (`/etc/wsl.conf`'s
-`[boot] systemd=true`, confirmed for real in Phase 9 — `ps -p 1 -o comm=`
-reports `systemd`, `systemctl --user` works). This is exactly what Phase
-10's "run unattended overnight under systemd" exit criterion needs — it is
-testable here, not just on a real droplet. See `deploy/README.md` before
-installing the unit; it documents the exact `Restart=`/
-`RestartPreventExitStatus=` reasoning and how it was verified for real in
-Phase 9 (throwaway `systemctl --user` units, not just read the docs).
+`[boot] systemd=true` — `ps -p 1 -o comm=` reports `systemd`, `systemctl
+--user` works). This is exactly what "run unattended overnight under
+systemd" needs, and it's still not actually been exercised on this host
+(see "What still needs validating" above) — the acceptance run's own
+silent process death is the direct consequence of that gap. See
+`deploy/README.md` before installing either unit.
 
-**One real environment gotcha from Phase 6 remains, one is now fixed** —
-read Phase 6's state-doc section for the full diagnosis before you touch
-anything Docker- or npm-related. Still true: **`npm install` can hang
-indefinitely on this host if a previous run was killed mid-install** (fix:
-verified-clean `rm -rf node_modules package-lock.json` first, not waiting
-longer). Fixed by the Phase 9 fast-follow: **Docker containers write
-bind-mounted build artifacts as root**, which used to block a later
-unprivileged `rm -rf` and was worked around by hand with a throwaway
-`alpine` container every time — `git.worktree.remove_worktree` now does
-that itself (see the state doc's Phase 9 "Fast-follow" decision 9).
+**One real environment gotcha remains from early phases**: **`npm install`
+can hang indefinitely on this host if a previous run was killed
+mid-install** (fix: verified-clean `rm -rf node_modules package-lock.json`
+first, not waiting longer). Docker containers writing bind-mounted build
+artifacts as root is already handled — `git.worktree.remove_worktree` falls
+back to a throwaway root container automatically.
 
 One more: **this session's shell may have `XDG_DATA_HOME=/tmp/cosmo-test/data`
 set** (sandboxing `cosmo`'s own runtime state away from the real home
-directory). `uv run cosmo ...` (this project's own `.venv`) is unaffected by
-this and is the more reliable invocation for anything scripted; if you ever
-need `uv tool install --editable .` again, run it as `env -u XDG_DATA_HOME
-uv tool install --editable --force .` or it will reinstall into the wrong
-place and leave `~/.local/bin/cosmo` dangling.
+directory, and separate from the acceptance run's own real store — see the
+state doc's project-memory note on this). `uv run cosmo ...` is the more
+reliable invocation for anything scripted. To inspect/drive the *real*
+acceptance-run store, unset both `XDG_DATA_HOME` and `COSMO_CONFIG`
+explicitly (`env -u XDG_DATA_HOME -u COSMO_CONFIG cosmo ...`) rather than
+assuming the default env is already clean — verify which data path you're
+actually hitting before trusting what you see.
 
-**From Phase 9, worth knowing before an overnight run:**
+**Worth knowing before touching the acceptance run or an overnight retry:**
 
-- `git.worktree.sweep_stale_worktrees` is wired into `run.loop.run_queue`'s
-  startup section; `cosmo events tail` has `--payload`/`--type`; `cosmo
-  queue failures <task-id>` exists for diagnosing a blocked task through the
-  CLI alone — use these for the overnight run's own post-run review, not
+- `cosmo events tail --payload`/`--follow`, `cosmo report --follow`, and
+  `cosmo queue failures <task-id>` are your tools for post-run review — not
   raw sqlite queries.
 - **`WatchdogSec` in the shipped unit is 10800s (3h), task-boundary
-  granularity, not task-internal** (Phase 9 decision 7/8) — a single
-  wedged `IMPLEMENTING`/`VALIDATING`/`REVIEWING` attempt is only caught at
-  the *next* task-boundary ping, not immediately. If the overnight run
-  needs tighter detection, that's a real Phase 10 finding to record.
+  granularity, not task-internal** — a single wedged attempt is only caught
+  at the *next* task-boundary ping. If tighter detection is needed, that's
+  a real Phase 10 finding to record.
 - **The circuit breaker's tally and quota heuristic's consecutive-failure
-  count still live in-memory inside one `run.loop.run_queue` call** —
-  unchanged since Phase 8. A systemd-restarted run (post-watchdog-kill or
-  a clean `on-failure` case) starts these counters from zero again, same
-  as a hand-restarted one.
-- **No CLI command to resume a `PAUSED` run** — still true. `cosmo report`
-  makes a paused run's state legible after the fact but doesn't add a
-  resume path; re-running `cosmo run` starts a fresh `run_id`.
+  count still live in-memory inside one `run.loop.run_queue`/
+  `_run_queue_locked` call** — a systemd-restarted or `cosmo run resume`d
+  run starts these counters from zero again.
 - **Quota heuristic and secondary-signal config values are still
   unverified guesses** (`quota.heuristic_consecutive_threshold`/
-  `heuristic_max_duration_seconds`/`result_error_subtypes`, Phase 8
-  decisions 4/5) — an overnight run is specifically positioned to confirm
-  or falsify these for real.
-- **`review.enabled`/`timeouts.reviewing_wall` (v4) are equally unverified
-  guesses**, same posture — no real `claude -p` review-call duration data
-  exists yet. If the overnight run is the first time `REVIEWING` actually
-  runs for real, this is exactly the data Phase 10 should capture.
+  `heuristic_max_duration_seconds`/`result_error_subtypes`) — an overnight
+  run is specifically positioned to confirm or falsify these for real.
+- **`review.enabled`/`timeouts.reviewing_wall` are equally unverified
+  guesses** — no real `claude -p` review-call duration data exists yet.
 
 ## Conventions this codebase follows
 
@@ -271,51 +280,45 @@ place and leave `~/.local/bin/cosmo` dangling.
   repo or a real target repo. Retry-driven tests should override
   `retries.delay_min`/`delay_max` to `0` via `cfg.model_copy(...)`. Any test
   exercising `run.loop.run_queue`/`task.machine.run_task` for real must also
-  override `disk.min_free_gb` down near zero (Phase 9) **and
-  `review.enabled=False` unless it's specifically testing `REVIEWING`** (v4)
-  — see `_fast_config` in `test_run_loop.py`/`test_task_machine.py` for both.
+  override `disk.min_free_gb` down near zero **and `review.enabled=False`**
+  unless it's specifically testing `REVIEWING` — see `_fast_config` in
+  `test_run_loop.py`/`test_task_machine.py` for both.
 - **Fake the external process, test the mechanics — except where "check by
   hand, then use the real thing" already proved out.** `FakeHarnessAdapter`
   and `FakeGate` are the two test doubles later phases should target
   directly. Real-process/real-Docker/real-`openspec` tests exist but are
-  skip-guarded (`COSMO_GATE_DOCKER_E2E=1`, or a `which openspec` check) because
-  they take real time or need a real binary on PATH. Phase 10's own overnight
-  run is the largest instance of this pattern in the whole project — there is
-  no way to fake your way through an acceptance phase.
+  skip-guarded because they take real time or need a real binary on PATH.
+  Phase 10's own overnight run — and now the v5-validation checklist above
+  — is the largest instance of this pattern in the whole project: there is
+  no way to fake your way through it.
 - **Boundary tests are load-bearing, not optional.** `test_harness_boundary.py`,
   `test_store_boundary.py`, `test_git_boundary.py`, `test_gate_boundary.py`.
 - **Run `./check.sh` before committing.** All four must pass.
 - **When something fails, check with a real invocation before trusting a
   unit test's green.** This has found a real bug or made a real design
-  decision correctly in every phase so far, v4 included (see its own state-
-  doc section's "Decisions made during this work" — several were only found
-  by writing the real code, not by re-reading the plan more carefully).
+  decision correctly in every phase so far, including this v5 pass — a
+  real crash-recovery smoke test caught a self-crash bug this same session
+  introduced (deviation 58), which no fake/unit test alone would have hit
+  until one was specifically written to check the row count.
 
-## Phase 10 scope
-
-Per the plan's own "Acceptance: unattended overnight run" section:
+## Phase 10 scope (unchanged from the original plan)
 
 1. Point Cosmo at a real target repo initialized by `cosmo init`. Queue
-   5-10 genuine units of work with real `depends_on` edges (see "A real
-   decision this session left open" above for which front door(s) to use).
-2. Run unattended overnight under systemd (`deploy/cosmo-run.service`,
-   Phase 9) with production config (a real `COSMO_CONFIG` pointing at
-   non-XDG paths, not the dev defaults).
-3. Post-run review against the spec's own claims: did anything reach
-   `DONE` without a passing gate; did any test get weakened; were any
-   orphan processes/containers left; did quota handling behave; are the
-   p95 gate numbers consistent with §3.3's defaults; if `REVIEWING` ran for
-   real, did it produce usable verdicts (both accept and at least one real
-   reject, if the run's own tasks happen to produce one) rather than
-   degrading to the "no usable verdict" environment-error path every time.
+   5-10 genuine units of work with real `depends_on` edges. Already done —
+   see "The acceptance run itself" above.
+2. Run unattended overnight under systemd (`deploy/cosmo-run.service`) with
+   production config. **Not yet done** — the unit is still not installed on
+   this host; the acceptance run so far has been driven by hand.
+3. Post-run review against the spec's own claims: did anything reach `DONE`
+   without a passing gate; did any test get weakened; were any orphan
+   processes/containers left; did quota handling behave; are the p95 gate
+   numbers consistent with §3.3's defaults; if `REVIEWING` ran for real, did
+   it produce usable verdicts.
 
 ### Exit criteria (from the plan)
 
 - A full night's run completes with a coherent `run.summary` and an event
-  log sufficient to reconstruct every decision without reading a raw log
-  (`cosmo report` and `cosmo events tail`, both already built, are your
-  tools for this — if either turns out insufficient for real post-run
-  review, that's a real Phase 10 finding).
+  log sufficient to reconstruct every decision without reading a raw log.
 - **Open Item 2** closed: §3.3 timeouts retuned against real p95 data (and,
   if `REVIEWING` ran for real, `timeouts.reviewing_wall` alongside them), or
   explicitly confirmed as-is with real data behind the confirmation.
@@ -326,13 +329,11 @@ Per the plan's own "Acceptance: unattended overnight run" section:
 2. Update `v3-implementation-state.md`: mark Phase 10 complete, record the
    overnight run's real findings (not a summary of what was *supposed* to
    happen — what actually did), and append any new spec deviation to the
-   cumulative table (next number is 39 — this session's prep work used
-   34-38).
-3. Commit to `develop` with a message explaining *why*, in the style of
-   the Phase 0-9/v4 commits.
+   cumulative table (next number is 59).
+3. Commit to `develop` with a message explaining *why*, in the style of the
+   Phase 0-9/v4/v5 commits.
 4. This is the last phase in the original plan — there is likely no further
-   handoff to write. If real work remains (the worktree sweep, watchdog
-   granularity, a resume-paused-run command, the still-unverified `REVIEWING`
-   real-invocation gap, or anything the overnight run itself surfaced),
-   record it as an open item in the state doc rather than inventing a new
-   phase number the plan never named.
+   handoff to write once Phase 10's exit criteria are actually met. If real
+   work remains beyond the checklist above, record it as an open item in
+   the state doc rather than inventing a new phase number the plan never
+   named.

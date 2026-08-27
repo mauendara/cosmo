@@ -93,3 +93,52 @@ def test_report_on_an_unknown_run_id_fails_cleanly(tmp_path: Path) -> None:
     result = runner.invoke(app, ["report", "--run", "nope"])
     assert result.exit_code == 1
     assert "no such run" in result.output.lower()
+
+
+def test_report_surfaces_tasks_recovered_from_an_interrupted_run(tmp_path: Path) -> None:
+    """v5 improvements plan part 1: `run.recovery.reconcile_interrupted_
+    tasks` emits `task.interrupted`; `cosmo report` surfaces a one-line
+    summary rather than leaving it visible only through a targeted
+    `cosmo events tail`."""
+    cfg = load_config()
+    _seed_run(cfg.paths.db_path, run_id="run-1")
+    writer = StoreWriter(cfg.paths.db_path)
+    EventEmitter(writer).emit(
+        event_type=EventType.TASK_INTERRUPTED,
+        severity=Severity.WARNING,
+        run_id="run-1",
+        task_id="scaffold-app",
+        payload={"previous_status": "implementing"},
+    )
+    writer.close()
+
+    result = runner.invoke(app, ["report", "--run", "run-1"])
+
+    assert result.exit_code == 0, result.output
+    assert "recovered from an interrupted run" in result.output
+    assert "scaffold-app" in result.output
+
+
+def test_report_omits_the_recovered_line_when_nothing_was_interrupted(tmp_path: Path) -> None:
+    cfg = load_config()
+    _seed_run(cfg.paths.db_path, run_id="run-1")
+
+    result = runner.invoke(app, ["report", "--run", "run-1"])
+
+    assert result.exit_code == 0, result.output
+    assert "recovered from an interrupted run" not in result.output
+
+
+def test_follow_stops_as_soon_as_the_run_is_already_stopped(tmp_path: Path) -> None:
+    """v5 improvements plan part 4: `--follow` polls until the run reaches a
+    terminal status -- already `stopped` here, so the loop must break
+    before its first `sleep`, meaning this test needs no monkeypatching to
+    stay fast."""
+    cfg = load_config()
+    _seed_run(cfg.paths.db_path)
+
+    result = runner.invoke(app, ["report", "--run", "run-1", "--follow"])
+
+    assert result.exit_code == 0, result.output
+    assert "run-1" in result.output
+    assert "completed:     2" in result.output

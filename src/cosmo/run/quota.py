@@ -81,11 +81,17 @@ class HeuristicTracker:
 @dataclass(frozen=True, slots=True)
 class QuotaDecision:
     status: RunStatus
-    """`PAUSED` or `STOPPED` -- never anything else."""
+    """`PAUSED` or `STOPPED`, or `RUNNING` for the one case a confirmed
+    `five_hour` signal is deliberately bypassed (v5 improvements plan part
+    7, `bypassed=True` below) -- never anything else."""
     pause_reason: PauseReason | None
     stop_reason: StopReason | None
     resume_delay_seconds: float
     """Only meaningful when `status is RunStatus.PAUSED`."""
+    bypassed: bool = False
+    """`True` only when `config.bypass_5h_with_credits` skipped a confirmed
+    `five_hour` pause -- the caller should emit `EventType.QUOTA_BYPASSED`
+    and keep running rather than pause or stop."""
 
 
 def decide(
@@ -107,6 +113,12 @@ def decide(
     A signal with no `resets_at` falls back to `config.
     default_5h_resume_delay_seconds` (the `system/api_retry` wire shape
     never carries one -- see `harness.claude.stream.extract_quota_signal`).
+
+    `config.bypass_5h_with_credits` (v5 improvements plan part 7) skips the
+    `five_hour` pause entirely, an explicit opt-in for an account whose
+    usage credits keep calls succeeding past the included subscription
+    allowance -- `weekly` is deliberately untouched by this flag (nothing
+    confirms credits ride through a weekly cap the same way).
     """
     if signal.resets_at is not None:
         resets = datetime.fromisoformat(signal.resets_at)
@@ -117,6 +129,14 @@ def decide(
         eta_known = False
 
     if signal.window == "five_hour":
+        if config.bypass_5h_with_credits:
+            return QuotaDecision(
+                status=RunStatus.RUNNING,
+                pause_reason=None,
+                stop_reason=None,
+                resume_delay_seconds=0.0,
+                bypassed=True,
+            )
         return QuotaDecision(
             status=RunStatus.PAUSED,
             pause_reason=PauseReason.QUOTA_EXHAUSTED_5H,
