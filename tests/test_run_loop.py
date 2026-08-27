@@ -409,15 +409,92 @@ def test_run_wall_clock_expiry_requeues_the_in_flight_task_and_stops(tmp_path: P
     assert solo.status == "queued"  # returned to QUEUED, not blocked
 
 
+def test_a_gracefully_requeued_task_reuses_its_worktree_in_a_later_run(tmp_path: Path) -> None:
+    """Found by hand against a real overnight run: a task requeued mid-run
+    by a run guard (wall clock or quota) keeps its `worktree_path` --
+    `run.loop._requeue` never touches that column. An earlier version of
+    `_run_one_task`'s reuse check was scoped to the *current* run_id only,
+    so a later `cosmo run` process (a fresh run_id) wiped that worktree and
+    re-did already-completed PROPOSING work from scratch, even though the
+    task was never actually `BLOCKED` -- only interrupted. This must not
+    happen: the worktree_path (and everything in it) survives into a
+    second, separate `run_queue()` call."""
+    short_wall_timeouts = load_config(config_path=NO_USER_CONFIG).timeouts.model_copy(
+        update={"run_wall": 3}
+    )
+    cfg = _fast_config(tmp_path, timeouts=short_wall_timeouts)
+    repo = _repo_on_develop(tmp_path)
+    writer = StoreWriter(cfg.paths.db_path)
+    writer.queue_add(task_id="solo", spec_path="openspec/changes/solo", max_attempts=2)
+    emitter = EventEmitter(writer)
+    adapter = FakeHarnessAdapter(cfg, script=ScriptedCall(outcome=FakeOutcome.SUCCESS))
+    gate = FakeGate(ScriptedGateResult(passed=True))
+    clock = _FakeClock(start=0.0, step=1.0)
+
+    try:
+        first_outcome = run_queue(
+            config=cfg,
+            writer=writer,
+            emitter=emitter,
+            adapter=adapter,
+            repo_path=repo,
+            base_branch="develop",
+            harness_name="claude",
+            gate_runner=_gate_runner(gate),
+            monotonic=clock,
+        )
+    finally:
+        writer.close()
+
+    assert first_outcome.status is RunStatus.STOPPED
+    assert first_outcome.stop_reason is StopReason.MAX_TIME
+    requeued = get_task(cfg.paths.db_path, "solo")
+    assert requeued is not None
+    assert requeued.status == "queued"
+    first_run_worktree = requeued.worktree_path
+    assert first_run_worktree is not None
+
+    writer = StoreWriter(cfg.paths.db_path)
+    try:
+        emitter = EventEmitter(writer)
+        second_outcome = run_queue(
+            config=cfg,
+            writer=writer,
+            emitter=emitter,
+            adapter=adapter,
+            repo_path=repo,
+            base_branch="develop",
+            harness_name="claude",
+            gate_runner=_gate_runner(gate),
+        )
+    finally:
+        writer.close()
+
+    assert second_outcome.run_id != first_outcome.run_id
+    assert second_outcome.summary.completed == 1
+
+    done = get_task(cfg.paths.db_path, "solo")
+    assert done is not None
+    assert done.status == "done"
+
+    # `sync_harness_assets` (and therefore `agent_assets.synced`) only fires
+    # from inside `create_worktree` -- exactly one event across both runs
+    # proves the worktree was reused in the second run, not recreated.
+    synced_events = list_events(cfg.paths.db_path, event_type="agent_assets.synced", limit=200)
+    assert len(synced_events) == 1
+    assert synced_events[0].payload["target_path"] == first_run_worktree
+
+
 def test_a_task_blocked_in_one_run_and_retried_in_a_later_run_gets_a_fresh_worktree(
     tmp_path: Path,
 ) -> None:
-    # Regression: worktree reuse (the wall-clock/quota requeue case above)
-    # must only apply *within* the run that created it. A task blocked in
-    # run 1, then `queue retry`'d and driven by a brand new `cosmo run`
-    # (run 2), still carries run 1's `worktree_path` in the DB -- reusing
-    # that path blindly would either point at a stale/removed directory or,
-    # worse, silently resurrect run 1's leftover state under run 2.
+    # Regression: worktree reuse (the graceful-requeue case above) must
+    # never apply to a task that was actually `BLOCKED` and manually
+    # retried -- `queue_retry` (`store.writer`) is what draws that line: it
+    # clears `worktree_path` (and the caller physically removes the
+    # worktree first), so run 2 always gets a genuinely fresh one here,
+    # unlike the requeue case where `worktree_path` is deliberately left
+    # alone.
     cfg = _fast_config(tmp_path)
     repo = _repo_on_develop(tmp_path)
     writer = StoreWriter(cfg.paths.db_path)

@@ -26,7 +26,7 @@ from cosmo.git.worktree import (
     sweep_stale_worktrees,
 )
 from cosmo.store import StoreWriter
-from cosmo.store.enums import BlockedReason
+from cosmo.store.enums import BlockedReason, TaskStatus
 from cosmo.store.reader import get_task
 
 AUTHOR = ("Test", "test@example.com")
@@ -156,12 +156,23 @@ def test_remove_worktree_deletes_directory_and_branch(tmp_path: Path) -> None:
     assert branches.strip() == ""
 
 
-def test_sweep_retains_blocked_worktrees_and_prunes_everything_else(tmp_path: Path) -> None:
+def test_sweep_retains_blocked_and_queued_worktrees_and_prunes_everything_else(
+    tmp_path: Path,
+) -> None:
+    """A `QUEUED` task with `worktree_path` still set is retained alongside
+    a `BLOCKED` one -- found by hand: a run guard (wall clock or quota) can
+    send a task back to `QUEUED` mid-run without touching `worktree_path`
+    (`run.loop._requeue`), and a later `cosmo run` picking it back up under
+    a *different* run_id needs that worktree intact, not pruned out from
+    under it before `_run_one_task` ever gets a chance to reuse it. A task
+    genuinely interrupted mid-state (stuck in `IMPLEMENTING`, not `QUEUED`)
+    is still pruned -- that's a real crash artifact, not a graceful pause."""
     repo = _repo_on_develop(tmp_path)
     db_path = tmp_path / "cosmo.db"
     writer = StoreWriter(db_path)
     writer.queue_add(task_id="blocked-task", spec_path="p1", max_attempts=2)
-    writer.queue_add(task_id="stale-task", spec_path="p2", max_attempts=2)
+    writer.queue_add(task_id="queued-task", spec_path="p2", max_attempts=2)
+    writer.queue_add(task_id="crashed-task", spec_path="p3", max_attempts=2)
     emitter = EventEmitter(writer)
     work_dir = tmp_path / "work"
 
@@ -176,12 +187,23 @@ def test_sweep_retains_blocked_worktrees_and_prunes_everything_else(tmp_path: Pa
         writer=writer,
         emitter=emitter,
     )
-    stale_info = create_worktree(
+    queued_info = create_worktree(
         repo_path=repo,
         work_dir=work_dir,
         run_id="run-1",
-        task_id="stale-task",
-        spec_id="stale-task",
+        task_id="queued-task",
+        spec_id="queued-task",
+        base_branch="develop",
+        harness="claude",
+        writer=writer,
+        emitter=emitter,
+    )
+    crashed_info = create_worktree(
+        repo_path=repo,
+        work_dir=work_dir,
+        run_id="run-1",
+        task_id="crashed-task",
+        spec_id="crashed-task",
         base_branch="develop",
         harness="claude",
         writer=writer,
@@ -189,14 +211,18 @@ def test_sweep_retains_blocked_worktrees_and_prunes_everything_else(tmp_path: Pa
     )
 
     writer.queue_block("blocked-task", BlockedReason.MERGE_CONFLICT)
+    # queued-task: left exactly as `create_worktree` set it -- still
+    # `queued`, `worktree_path` set, simulating a graceful mid-run requeue.
+    writer.queue_transition("crashed-task", TaskStatus.IMPLEMENTING)
     writer.close()
 
     outcome = sweep_stale_worktrees(repo_path=repo, work_dir=work_dir, db_path=db_path)
 
-    assert outcome.retained == [blocked_info.path]
-    assert outcome.removed == [stale_info.path]
+    assert set(outcome.retained) == {blocked_info.path, queued_info.path}
+    assert outcome.removed == [crashed_info.path]
     assert blocked_info.path.is_dir()
-    assert not stale_info.path.exists()
+    assert queued_info.path.is_dir()
+    assert not crashed_info.path.exists()
 
 
 def test_sweep_on_an_empty_or_missing_work_dir_is_a_noop(tmp_path: Path) -> None:

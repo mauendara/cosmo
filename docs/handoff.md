@@ -15,26 +15,56 @@ the acceptance run — Phase 10 proper is still not started): a new project
 template (`templates/projects/vite-react-local/`), real gate bugs it
 surfaced and fixed, a project-agnostic guardrail widening, an agent-template
 polish pass, a Claude Code attribution setting, a `cosmo init` git-identity
-step, a real headless-permissions bug (`--allowedTools`, deviation 38) found
-running `cosmo spec add` for real, a `cosmo spec add` idempotency fix
-(deviation 40), and a `gate.frontend_image` bump to `node:24.19-bookworm`
-plus toolchain-version-pinning doc guardrails (deviations 41-42) found by
-the user's own real `cosmo run` against `vite-react-local`. None of this is
+step, a real headless-permissions bug (`--allowedTools`, deviation 38), a
+`cosmo spec add` idempotency fix (deviation 40), a `gate.frontend_image`
+bump to `node:24.19-bookworm` plus toolchain-pinning doc guardrails
+(deviations 41-42, 48), and — all found the same night by actually running
+`cosmo run` for real against a live target repo and reading the raw
+failures, not by inspection alone — a false-confirmed-quota-exhaustion bug
+(deviation 43), redundant re-`PROPOSING` on every task re-entry (deviation
+44), truncated live-activity-feed paths (deviation 45), a worktree-lifecycle
+bug where a fresh `cosmo run` process could silently destroy an already-
+valid `PROPOSING` result (deviations 46-47), and a `cosmo queue retry` that
+never actually reset a task's retry budget (deviation 47). None of this is
 Phase 10 scope creep — read the state doc's "Phase 10 prep" section (right
 after "v4 workflow changes — Complete") in full before doing anything; it
-has grown across sessions and is no longer short, and several of its
-decisions (especially the git identity one, and the permissions/toolchain
-fixes) change what "Get oriented" below used to say.
+has grown large across sessions, and several of its decisions (the git
+identity one, the permissions/toolchain fixes, and especially the worktree-
+retry semantics in deviations 46-47) change what "Get oriented" below used
+to say.
 
-**A real `cosmo run` already happened against `/home/dev/delta/cosmo-tests/
-todo-frontend-app` (run `fb254309566b4de0817847e29b455ab6`, real cost
-$4.66) before deviations 41-42 landed** — `scaffold-app` is `BLOCKED`
-(`code_failure`, 3 failed attempts) and 4 more tasks are stalled behind it;
-see the state doc's "Decisions made" prose for the full failure chain. Once
-the Docker gate image bump is confirmed (real opt-in `COSMO_GATE_DOCKER_E2E=1`
-suite, in progress as this was written), `cosmo queue retry scaffold-app`
-+ `cosmo run` against that same repo is the natural next real-world check —
-worth doing before Phase 10 proper, not folded silently into it.
+**A real `cosmo run` has been driven against `/home/dev/delta/cosmo-tests/
+todo-frontend-app` across several sessions the same night** (run ids
+`fb254309...`, `a05dae4c...`, `e929bbb4...` — see the state doc's
+"Decisions made" prose for the full chain). As of this handoff,
+`scaffold-app` is `BLOCKED` again — `code_error @ build`, the *same*
+missing-`package-lock.json` `npm ci` failure that also hit attempts 0 and 1
+in the very first run, recurring a third time even after the lockfile
+guidance (deviation 42) was already in place. This is not yet fixed; see
+"Real research still needed" below and
+[v5-improvements-plan.md](v5-improvements-plan.md)'s new §5. The next real
+step is `cosmo queue retry scaffold-app` (now does a real, evidence-based
+soft reset — see deviation 47 — rather than either a blind full wipe or a
+no-op) + `cosmo run` against that same repo, but don't expect it to succeed
+outright: the underlying missing-lockfile pattern hasn't been fixed at the
+root, only better-diagnosed.
+
+**Real research still needed, not just more point-fixes**: this session's
+real diagnoses (deviations 43-48) surfaced two recurring *classes* of
+failure, not just isolated bugs — see
+[v5-improvements-plan.md](v5-improvements-plan.md)'s new §5 "Harness
+failure-pattern research" for the evidence (queried directly from the real
+`task_failures` table, not recalled from memory) and the concrete next
+steps it names: (1) `error_summary` is too coarse to tell failure causes
+apart without reading raw npm/build output by hand every time — worth a
+real structural sub-classification; (2) a harness session starting real
+background work (e.g. a slow `npm install`) and then ending its own turn
+assuming a resumption `claude -p` never provides — one instance
+(`ScheduleWakeup`) is now named explicitly in `CLAUDE.md`, but prose alone
+already proved insufficient once this same session (the missing-lockfile
+failure recurred right after the *first* round of guidance), so denying it outright
+via `permissions.deny` is the next real fix to build, alongside auditing
+the rest of the session-management tool surface for the same risk.
 
 ## Read these first, in this order
 
@@ -44,6 +74,7 @@ worth doing before Phase 10 proper, not folded silently into it.
 | [v3-implementation-plan.md](v3-implementation-plan.md) | 11-phase build plan | The map for Phase 10 (its own section, near the end). **Do not edit** — it's the agreed scope; record decisions in `v3-implementation-state.md` instead |
 | [v3-implementation-state.md](v3-implementation-state.md) | What actually exists, plus decisions and gotchas | Read the "Phase 9 — Complete" **and** "v4 workflow changes — Complete" sections in full before doing anything — several of their decisions and open items are load-bearing for Phase 10 |
 | [v4-changes-to-workflow-plan.md](v4-changes-to-workflow-plan.md) | The raw-spec-workflow feature design | Implemented — see its own Status line. Read it for *why* the `REVIEWING`/`FINISHING` states and `cosmo spec` commands are shaped the way they are; read the state doc's v4 section for what's actually real |
+| [v5-improvements-plan.md](v5-improvements-plan.md) | Crash/pause resume, Telegram notifications, `cosmo events tail --follow`, and (§5, newest) the harness failure-pattern research this handoff points at above | **Not started.** All open decisions in §1-4 are already resolved (see its own "Decisions" section) — ready to build against whenever this is picked up. §5 is research/next-steps, not yet even designed |
 
 `v1-*` and `v2-*` in this folder are earlier spec drafts. v3 is a superset of
 both. Do not implement from them.

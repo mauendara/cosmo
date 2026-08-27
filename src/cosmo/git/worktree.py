@@ -90,6 +90,32 @@ def create_worktree(
     return WorktreeInfo(task_id=task_id, branch=branch, path=worktree_path)
 
 
+def find_last_commit_touching(worktree_path: Path, relative_path: str) -> str | None:
+    """The SHA of the most recent commit on `worktree_path`'s current
+    branch that touched `relative_path`, or `None` if it was never
+    committed. Used by `cli.main.queue_retry` to find the commit PROPOSING
+    left behind (`openspec/changes/<spec_id>/tasks.md`) -- a structural git
+    fact, not a commit-message string, so this stays consistent with spec
+    4's "prose parsing is prohibited as a signal" even though it's a CLI
+    convenience rather than a classification decision."""
+    result = _run_git(worktree_path, "log", "--format=%H", "-1", "--", relative_path)
+    if result.returncode != 0:
+        return None
+    sha = result.stdout.strip()
+    return sha or None
+
+
+def reset_worktree_to_commit(worktree_path: Path, commit: str) -> None:
+    """Hard-resets `worktree_path` to `commit`, then discards every
+    untracked file/directory -- used by a genuine retry that wants to
+    discard a failed `IMPLEMENTING` attempt (committed or not, tracked or
+    not -- e.g. a scaffolded `frontend/` never `git add`ed) while keeping
+    an already-valid `PROPOSING` commit intact, rather than removing the
+    whole worktree and starting over from `base_branch`."""
+    _run_git(worktree_path, "reset", "--hard", commit)
+    _run_git(worktree_path, "clean", "-fdx")
+
+
 _CLEANUP_IMAGE = "alpine:3.21"
 
 
@@ -177,31 +203,49 @@ def sweep_stale_worktrees(*, repo_path: Path, work_dir: Path, db_path: Path) -> 
 
     Nothing is "running" at startup by definition, so every worktree
     currently on disk under `work_dir` belongs to a run that already ended
-    (cleanly or by crash) -- the only distinction that matters is per-task:
-    a `BLOCKED` task's worktree is retained for inspection (spec 3.2/3.4);
-    everything else -- a `DONE` task whose teardown didn't finish, or a
-    worktree left mid-task by a crash (spec 3.2: "no mid-state resumption",
-    so that task restarts from a fresh worktree next time it runs) -- is
-    pruned. `run_state` is deliberately not consulted: nothing writes to it
-    yet (Phase 8), and at startup every one of its rows would read
-    non-running anyway.
+    (cleanly, by crash, or by pause) -- the only distinction that matters is
+    per-task:
+
+    - A `BLOCKED` task's worktree is retained for inspection (spec 3.2/3.4).
+    - A `QUEUED` task that still carries a `worktree_path` is *also*
+      retained: found by hand -- a run guard (wall clock or quota) can send
+      a task back to `QUEUED` mid-run without touching `worktree_path` at
+      all (`run.loop._requeue`), and if the process that paused later gets
+      killed and a fresh `cosmo run` picks the task back up, this sweep used
+      to delete that worktree before `run.loop._run_one_task` ever got a
+      chance to reuse it -- destroying a fully-proposed (or partially
+      implemented) attempt for a task that was never actually blocked, only
+      interrupted. This is safe now specifically because `cli.main.queue_
+      retry` is the *only* place that clears `worktree_path` (and does so
+      by physically removing the worktree itself, synchronously, before
+      writing that) -- a `QUEUED` task's `worktree_path` being set is
+      therefore unambiguous evidence of "safe to resume," never "abandoned
+      by a human who asked to start over."
+    - Everything else -- a `DONE` task whose teardown didn't finish, or a
+      worktree left mid-task by a crash (a task stuck in `PROPOSING`/
+      `IMPLEMENTING`/etc., not `QUEUED` -- spec 3.2: "no mid-state
+      resumption") -- is pruned.
+
+    `run_state` is deliberately not consulted: nothing writes to it yet
+    (Phase 8), and at startup every one of its rows would read non-running
+    anyway.
     """
     removed: list[Path] = []
     retained: list[Path] = []
     if not work_dir.is_dir():
         return SweepOutcome(removed=removed, retained=retained)
 
-    blocked_paths = {
+    retained_paths = {
         Path(t.worktree_path).resolve()
-        for t in list_tasks(db_path, status="blocked")
-        if t.worktree_path
+        for t in list_tasks(db_path)
+        if t.worktree_path and t.status in ("blocked", "queued")
     }
     branches = _worktree_branches(repo_path)
 
     for run_dir in sorted(p for p in work_dir.iterdir() if p.is_dir()):
         for task_dir in sorted(p for p in run_dir.iterdir() if p.is_dir()):
             resolved = task_dir.resolve()
-            if resolved in blocked_paths:
+            if resolved in retained_paths:
                 retained.append(task_dir)
                 continue
             remove_worktree(

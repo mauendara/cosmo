@@ -135,19 +135,48 @@ class StoreWriter:
                 task_id, run_id=None, from_state=None, to_state="queued", now=now
             )
 
-    def queue_retry(self, task_id: str, *, run_id: str | None = None) -> TransitionResult:
-        """Reset a `blocked` or `failed_retry` task back to `queued`."""
+    def queue_retry(
+        self, task_id: str, *, run_id: str | None = None, clear_worktree: bool = True
+    ) -> TransitionResult:
+        """Reset a `blocked` or `failed_retry` task back to `queued` -- a
+        genuine fresh start, not a continuation: `attempt_count` resets to 0
+        (found by hand: leaving it as-is meant a task retried after
+        exhausting `max_attempts` was already back over budget on its very
+        next real failure, retry in name only) regardless of `clear_
+        worktree`.
+
+        `clear_worktree=True` (the default) also clears `worktree_path` --
+        the caller (`cli.main.queue_retry`) is responsible for physically
+        removing the worktree first, same convention `queue_complete`
+        already uses for the same column. Pass `clear_worktree=False` when
+        the caller instead did a soft reset (`git.worktree.
+        reset_worktree_to_commit`, discarding a failed implementation
+        attempt back to PROPOSING's own commit) and kept the worktree at
+        the same path -- `worktree_path` must stay exactly as it was so the
+        next `run_task` reuses it rather than creating a redundant one."""
         now = utcnow_iso()
         with self._conn:
             from_state = self._current_status(task_id)
-            self._conn.execute(
-                """
-                UPDATE task_queue
-                SET status = 'queued', blocked_reason = NULL, updated_at = ?
-                WHERE task_id = ?
-                """,
-                (now, task_id),
-            )
+            if clear_worktree:
+                self._conn.execute(
+                    """
+                    UPDATE task_queue
+                    SET status = 'queued', blocked_reason = NULL, attempt_count = 0,
+                        worktree_path = NULL, updated_at = ?
+                    WHERE task_id = ?
+                    """,
+                    (now, task_id),
+                )
+            else:
+                self._conn.execute(
+                    """
+                    UPDATE task_queue
+                    SET status = 'queued', blocked_reason = NULL, attempt_count = 0,
+                        updated_at = ?
+                    WHERE task_id = ?
+                    """,
+                    (now, task_id),
+                )
             return self._record_transition(
                 task_id, run_id=run_id, from_state=from_state, to_state="queued", now=now
             )

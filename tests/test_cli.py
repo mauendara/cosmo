@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -10,8 +11,11 @@ from typer.testing import CliRunner
 from cosmo import __version__
 from cosmo.cli.main import app
 from cosmo.config import load_config
+from cosmo.events import EventEmitter
+from cosmo.git.worktree import create_worktree
 from cosmo.store import StoreWriter, find_project_by_path
-from cosmo.store.enums import FailureStage, FailureType, NextAction
+from cosmo.store.enums import BlockedReason, FailureStage, FailureType, NextAction
+from cosmo.store.reader import get_task
 
 runner = CliRunner()
 
@@ -153,6 +157,141 @@ def test_queue_block_then_retry_round_trips_status() -> None:
     retried = runner.invoke(app, ["queue", "retry", "t1"])
     assert retried.exit_code == 0
     assert "requeued t1" in retried.stdout
+
+
+def _repo_on_develop(tmp_path: Path) -> Path:
+    repo = tmp_path / "target-repo"
+    repo.mkdir()
+    run = lambda *a: subprocess.run(  # noqa: E731
+        ["git", "-C", str(repo), *a], check=True, capture_output=True, text=True
+    )
+    run("-c", "user.name=t", "-c", "user.email=t@example.com", "init", "-q")
+    (repo / "README.md").write_text("hello\n")
+    run("add", "README.md")
+    run("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "base")
+    run("branch", "-M", "develop")
+    return repo
+
+
+def test_queue_retry_on_a_blocked_task_with_a_worktree_removes_it_for_real(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: `queue retry` used to only flip `status` back to
+    `queued`, leaving `attempt_count` over budget and `worktree_path`
+    pointing at whatever the blocked attempt left behind -- a later
+    `cosmo run` would either silently reuse stale state or, worse, be
+    unable to retry at all since `attempt_count` was already >=
+    `max_attempts`. The CLI command now physically removes the worktree
+    and resets both columns."""
+    repo = _repo_on_develop(tmp_path)
+    monkeypatch.chdir(repo)
+    db_path = load_config().paths.db_path
+    writer = StoreWriter(db_path)
+    writer.register_project(target_path=str(repo.resolve()), harness="claude")
+    writer.queue_add(task_id="t1", spec_path="openspec/changes/t1", max_attempts=2)
+    emitter = EventEmitter(writer)
+    info = create_worktree(
+        repo_path=repo,
+        work_dir=tmp_path / "work",
+        run_id="run-1",
+        task_id="t1",
+        spec_id="t1",
+        base_branch="develop",
+        harness="claude",
+        writer=writer,
+        emitter=emitter,
+    )
+    writer.queue_begin_attempt("t1")
+    writer.queue_begin_attempt("t1")
+    writer.queue_block("t1", BlockedReason.CODE_FAILURE)
+    writer.close()
+    assert info.path.is_dir()
+
+    result = runner.invoke(app, ["queue", "retry", "t1"])
+
+    assert result.exit_code == 0, result.stderr
+    assert not info.path.exists()
+    task = get_task(db_path, "t1")
+    assert task is not None
+    assert task.status == "queued"
+    assert task.attempt_count == 0
+    assert task.worktree_path is None
+
+
+def test_queue_retry_with_an_already_proposed_change_keeps_the_worktree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A worktree whose `openspec/changes/<spec_id>/tasks.md` is already
+    committed (PROPOSING finished) should not be nuked on retry -- only the
+    failed `IMPLEMENTING` attempt's mess (committed or, as here, merely
+    untracked) is discarded, so the next `cosmo run` doesn't pay for
+    PROPOSING a second time (see `task.machine._do_proposing`'s own skip
+    check, which this exists to feed a worktree it can actually use)."""
+    repo = _repo_on_develop(tmp_path)
+    monkeypatch.chdir(repo)
+    db_path = load_config().paths.db_path
+    writer = StoreWriter(db_path)
+    writer.register_project(target_path=str(repo.resolve()), harness="claude")
+    writer.queue_add(task_id="t1", spec_path="openspec/changes/t1", max_attempts=2)
+    emitter = EventEmitter(writer)
+    info = create_worktree(
+        repo_path=repo,
+        work_dir=tmp_path / "work",
+        run_id="run-1",
+        task_id="t1",
+        spec_id="t1",
+        base_branch="develop",
+        harness="claude",
+        writer=writer,
+        emitter=emitter,
+    )
+
+    def _git(*args: str) -> None:
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(info.path),
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@example.com",
+                *args,
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+    change_dir = info.path / "openspec" / "changes" / "t1"
+    change_dir.mkdir(parents=True)
+    (change_dir / "tasks.md").write_text("- [x] 1.1 Done\n", encoding="utf-8")
+    _git("add", "openspec")
+    _git("commit", "-q", "-m", "Propose t1 OpenSpec change")
+
+    # The failed implementation attempt's leftover mess: untracked, never
+    # committed -- exactly what a killed/abandoned IMPLEMENTING session
+    # leaves behind.
+    (info.path / "frontend").mkdir()
+    (info.path / "frontend" / "package.json").write_text("{}\n", encoding="utf-8")
+
+    writer.queue_begin_attempt("t1")
+    writer.queue_begin_attempt("t1")
+    writer.queue_block("t1", BlockedReason.CODE_FAILURE)
+    writer.close()
+
+    result = runner.invoke(app, ["queue", "retry", "t1"])
+
+    assert result.exit_code == 0, result.stderr
+    assert "kept the already-proposed" in result.stdout
+    assert info.path.is_dir()
+    assert (change_dir / "tasks.md").is_file()
+    assert not (info.path / "frontend").exists()
+    task = get_task(db_path, "t1")
+    assert task is not None
+    assert task.status == "queued"
+    assert task.attempt_count == 0
+    assert task.worktree_path == str(info.path)
 
 
 def test_queue_block_rejects_an_invalid_reason() -> None:

@@ -16,6 +16,25 @@ there is no incentive to make output *look* successful; there is only an
 incentive to make the code actually pass the gate. Padding a summary,
 skipping a step, or declaring victory early only wastes your own turn budget.
 
+## This call is one-shot -- there is no "later"
+
+`claude -p` returns exactly once, the moment this turn ends, however it
+ends -- a final text response, or a tool call that implicitly assumes
+you'll be resumed. Nothing schedules a second call into this same session;
+Cosmo's adapter is done listening the instant this process exits.
+Concretely: **a tool like `ScheduleWakeup` does nothing useful here.** It
+exists for interactive/managed sessions with a host that keeps running --
+found by hand: a real `IMPLEMENTING` session launched `npm install` in the
+background, correctly reasoned it should wait rather than poll, called
+`ScheduleWakeup`, and ended its own turn on the assumption it would resume
+once notified. It never did. The install was still running when the
+process exited; `package-lock.json` was never written; the next state's
+gate run failed on a confusing `npm ci` error that had nothing to do with
+the actual code. If a command takes a while, wait on it synchronously in
+this same turn -- foreground it, or if it must background, poll it
+yourself until it actually finishes -- before doing anything that depends
+on its result, and before ending the turn.
+
 ## How to drive OpenSpec
 
 Do not guess OpenSpec's workflow -- ask it directly, every time:

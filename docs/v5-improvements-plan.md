@@ -300,6 +300,67 @@ one HTTP call" reasoning `watchdog.py` already uses for `sd_notify`.
 - `cosmo report --follow` (poll until the run reaches a terminal status)
   is a natural, cheap analog worth adding alongside.
 
+### 5. Harness failure-pattern research — new, added after real diagnoses
+
+Not part of the original four problem areas above. While debugging the
+crash-resumption/pause gaps for real (a live `scaffold-app` task, one
+target repo, across several real runs the same night), two *classes* of
+recurring failure surfaced by hand, each with enough repetition already to
+be a pattern rather than a one-off. Both got a point fix already (deviations
+44-48 in `docs/v3-implementation-state.md`), but neither fix is provably
+*complete* — this section is the research/hardening work worth doing next,
+not a re-description of what already shipped.
+
+**Class 1: `error_summary` is too coarse to tell failures apart without
+reading raw npm/build output by hand every time.** The real `task_failures`
+history for this one task (5 rows total, queried directly from the live DB)
+has exactly two `error_summary` values ever recorded for a build failure:
+`"frontend build failed"` (4 of 5 rows) and `"error_max_turns"` (1 row, an
+`environment_error`, unrelated). Of those 4 build failures, **3 were the
+identical missing-`package-lock.json` `npm ci` error** (attempts 0 and 1 in
+the first real run, *and* attempt 3 in a later run — recurring even after
+`CLAUDE.md`'s "commit the real lockfile" guidance was already in place, see
+deviation 42/48) and 1 was the Node/Vite version mismatch (deviation 41,
+since fixed). Nothing in `error_summary` — the only field `cosmo events
+tail`/`cosmo report` show without a targeted `cosmo queue failures <id>`
+lookup — distinguishes these. A human (or Cosmo itself) has no way to ask
+"how many of our build failures are actually the same root cause" without
+reading every `error_detail` blob by hand, which is exactly how both of
+tonight's real root causes got found. Worth doing next: a lightweight,
+structural (not prose-parsed — spec 4's rule applies) sub-classification of
+common `code_error @ build` signatures — "no package-lock.json", the
+`EBADENGINE`/native-binding shape deviation 41 hit, `ENOENT` on
+`node_modules`, etc. — surfaced as a real field on the failure record or
+event payload, not left buried in free-text `error_detail`.
+
+**Class 2: a harness session that starts real background work, then ends
+its own turn assuming a resumption that a one-shot `claude -p` call never
+provides.** Deviation 48's fix (a new CLAUDE.md section) targets the one
+diagnosed instance — `ScheduleWakeup` — by naming it explicitly and
+explaining why it does nothing here. That's necessary but not sufficient:
+prose guidance has already been shown not to reliably prevent a recurring
+mistake once in this exact session (Class 1's own history — the lockfile
+guidance was added, then the identical failure recurred on the very next
+real attempt, for the *unrelated* reason of the session ending mid-install
+rather than forgetting to commit). Two concrete next steps worth real
+investigation, not just more prose:
+- **Deny `ScheduleWakeup` outright** via `permissions.deny` in
+  `templates/harness/claude/settings.json`, the same enforcement-over-
+  reminder posture already used for test-path/annotation/commit-integrity
+  guardrails (`CLAUDE.md`'s own "Guardrails" table) — a headless `claude
+  -p` session has no legitimate use for a tool whose entire purpose is
+  "resume me later," so there's no cost to blocking it outright rather than
+  hoping the model reads and follows a paragraph about it.
+- **Audit the rest of the session-management tool surface**
+  (`Monitor`, `TaskOutput`, `TaskStop`, backgrounded `Bash` calls generally)
+  for the same headless-safety question before denying anything else --
+  unlike `ScheduleWakeup`, some of these (e.g. `Monitor`) may be legitimately
+  useful *within* the same turn to actively wait on a background command
+  without ending it, and denying those would remove the correct way to
+  handle a slow install, not just the broken one. This needs checking
+  against the real tool surface (`claude --help` / the harness's own tool
+  list in a real `stream-json` `system/init` event), not guessed.
+
 ## What does not change
 
 Mirroring v4's own "what does not need to change" framing: the DAG

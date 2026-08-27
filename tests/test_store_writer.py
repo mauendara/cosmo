@@ -62,6 +62,33 @@ def test_queue_block_then_retry_round_trips_status(tmp_path: Path) -> None:
     writer.close()
 
 
+def test_queue_retry_resets_attempt_count_and_clears_worktree_path(tmp_path: Path) -> None:
+    """Found by hand: a task retried after exhausting `max_attempts` was
+    left carrying its old, already-over-budget `attempt_count` -- the very
+    next genuine code-level failure blocked it again immediately, no
+    retries actually available despite `cosmo queue retry` supposedly
+    meaning "try again." `worktree_path` clears too (the caller physically
+    removes the worktree first, same convention `queue_complete` already
+    uses) so a later pick-up never silently reuses what the blocked attempt
+    left behind."""
+    db_path = tmp_path / "cosmo.db"
+    writer = StoreWriter(db_path)
+    writer.queue_add(task_id="add-foo", spec_path="p1", max_attempts=2)
+    writer.queue_begin_attempt("add-foo")
+    writer.queue_begin_attempt("add-foo")
+    writer.queue_begin_attempt("add-foo")
+    writer.queue_set_worktree_path("add-foo", Path("/some/worktree"))
+    writer.queue_block("add-foo", BlockedReason.CODE_FAILURE)
+
+    writer.queue_retry("add-foo")
+    requeued = get_task(db_path, "add-foo")
+    assert requeued is not None
+    assert requeued.status == "queued"
+    assert requeued.attempt_count == 0
+    assert requeued.worktree_path is None
+    writer.close()
+
+
 def test_queue_retry_unknown_task_raises(tmp_path: Path) -> None:
     writer = StoreWriter(tmp_path / "cosmo.db")
     with pytest.raises(TaskNotFoundError):

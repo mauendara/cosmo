@@ -34,7 +34,12 @@ from cosmo.doctor import core_checks
 from cosmo.events import EventEmitter, EventType, Severity, emit_state_changed
 from cosmo.gate.runner import run_validation_gate
 from cosmo.gate.types import GateResult
-from cosmo.git.worktree import create_worktree
+from cosmo.git.worktree import (
+    create_worktree,
+    find_last_commit_touching,
+    remove_worktree,
+    reset_worktree_to_commit,
+)
 from cosmo.harness import (
     UnknownHarnessError,
     available_harnesses,
@@ -1247,11 +1252,61 @@ def queue_failures(
 
 
 @queue_app.command("retry")
-def queue_retry(task_id: str, config: ConfigOption = None) -> None:
+def queue_retry(
+    task_id: str,
+    repo: Annotated[
+        Path | None,
+        typer.Option(
+            help="Target repo the task's worktree lives in, if it has one. "
+            "Defaults to the current directory."
+        ),
+    ] = None,
+    config: ConfigOption = None,
+) -> None:
+    """Reset a `blocked` task back to `queued` for a genuine fresh start:
+    `attempt_count` resets to 0 always. If the task's worktree still has the
+    commit `PROPOSING` made (`openspec/changes/<spec_id>/tasks.md`), only
+    the failed `IMPLEMENTING` attempt is discarded (`git reset --hard` to
+    that commit, then `git clean -fdx`) -- the worktree and the already-
+    valid OpenSpec change survive, so the next `cosmo run` picks up at
+    `IMPLEMENTING` instead of paying for `PROPOSING` again (found by hand:
+    the propose step doesn't need re-running unless the spec/docs it was
+    based on actually changed, which a same-worktree retry never does).
+    Only when that commit can't be found -- the task never got past
+    `PROPOSING`, or the worktree is gone -- does this fall back to removing
+    the worktree and branch entirely, matching `git.worktree.
+    sweep_stale_worktrees`'s own "start over" posture for a task that
+    genuinely never produced anything worth keeping."""
     cfg = _load(config)
+    task = get_task(cfg.paths.db_path, task_id)
+    if task is None:
+        err_console.print(f"[red]no such task: {task_id!r}[/red]")
+        raise typer.Exit(code=1)
+
+    clear_worktree = True
+    if task.worktree_path is not None:
+        worktree_path = Path(task.worktree_path)
+        spec_id = Path(task.spec_path).stem
+        propose_commit = (
+            find_last_commit_touching(worktree_path, f"openspec/changes/{spec_id}/tasks.md")
+            if worktree_path.is_dir()
+            else None
+        )
+        if propose_commit is not None:
+            reset_worktree_to_commit(worktree_path, propose_commit)
+            clear_worktree = False
+            console.print(
+                "[dim]kept the already-proposed OpenSpec change, discarded the "
+                "failed implementation attempt[/dim]"
+            )
+        else:
+            resolved_repo, _project_harness = _resolve_project_repo(repo, cfg)
+            remove_worktree(
+                repo_path=resolved_repo, worktree_path=worktree_path, branch=f"task/{spec_id}"
+            )
     writer = StoreWriter(cfg.paths.db_path)
     try:
-        result = writer.queue_retry(task_id)
+        result = writer.queue_retry(task_id, clear_worktree=clear_worktree)
         emit_state_changed(EventEmitter(writer), result)
     except TaskNotFoundError:
         err_console.print(f"[red]no such task: {task_id!r}[/red]")

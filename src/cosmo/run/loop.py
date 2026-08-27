@@ -32,7 +32,6 @@ from cosmo.gate.validate import GateRunner
 from cosmo.git.worktree import (
     WorktreeInfo,
     create_worktree,
-    remove_worktree,
     sweep_stale_worktrees,
 )
 from cosmo.harness.base import HarnessAdapter, HarnessResult
@@ -458,35 +457,26 @@ def _run_one_task(
     spec_id = Path(task.spec_path).stem
 
     branch = f"task/{spec_id}"
-    current_run_worktree = config.paths.work_dir / run_id / task_id
-    if task.worktree_path is not None and Path(task.worktree_path) == current_run_worktree:
-        # A run guard (wall clock or quota) already requeued this task
-        # earlier in *this* run -- `queue_transition` back to `QUEUED`
-        # deliberately leaves `worktree_path` alone (unlike `queue_
-        # complete`/`queue_block`, spec 3.2's terminal-state cleanup), so
-        # the worktree `create_worktree` made on the first attempt is still
-        # there. Reuse it: a second `git worktree add` at the same path
-        # would fail outright (branch and directory both already exist).
+    if task.worktree_path is not None and Path(task.worktree_path).is_dir():
+        # This worktree is still mid-lifecycle, not abandoned: either a run
+        # guard (wall clock or quota) requeued this task earlier in *this*
+        # run (`queue_transition` back to `QUEUED` deliberately leaves
+        # `worktree_path` alone), or a previous `cosmo run` process paused
+        # or was killed and a later one is now picking the task back up
+        # under a *different* run_id. Either way it's safe to reuse
+        # regardless of which run_id originally created it:
+        # `cli.main.queue_retry` is the only place that ever clears
+        # `worktree_path`, and it does so by physically removing the
+        # worktree first -- so a `QUEUED` task whose `worktree_path` is
+        # still set is unambiguous evidence nothing here was ever abandoned
+        # by a human asking to start over. Found by hand: an earlier
+        # version of this function scoped reuse to the *current* run_id
+        # only, wiping -- and re-proposing from scratch -- a task's already
+        # -complete PROPOSING work purely because a quota pause outlived
+        # the process that triggered it (see this phase's own state-doc
+        # section).
         info = WorktreeInfo(task_id=task_id, branch=branch, path=Path(task.worktree_path))
     else:
-        if task.worktree_path is not None:
-            # A task retried (`cosmo queue retry`) after being `BLOCKED`
-            # in a *previous* `cosmo run` invocation: it still carries
-            # that old run's `worktree_path`, a different run_id and a
-            # different path -- reusing it would be wrong. Spec 3.2
-            # retains a BLOCKED task's worktree *and branch* for
-            # inspection, but `git worktree add` below needs `branch`
-            # (task-scoped, not run-scoped) to not already exist -- a
-            # retry means starting over, not resurrecting the abandoned
-            # attempt, so both are removed first. Found by hand: an
-            # earlier version of this function reused the stale path
-            # unconditionally and either pointed at a removed directory
-            # or, once that was fixed, still collided on the branch name
-            # `git worktree add` tried to create fresh (see this phase's
-            # own state-doc section).
-            remove_worktree(
-                repo_path=repo_path, worktree_path=Path(task.worktree_path), branch=branch
-            )
         info = create_worktree(
             repo_path=repo_path,
             work_dir=config.paths.work_dir,
