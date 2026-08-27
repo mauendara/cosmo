@@ -11,6 +11,7 @@ import os
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -18,7 +19,13 @@ from cosmo.checks import CheckResult, check_executable, fail, ok, warn
 from cosmo.config import CosmoConfig
 from cosmo.events import EventEmitter
 from cosmo.harness.base import HarnessAdapter, HarnessCapabilities, HarnessResult
-from cosmo.harness.claude.stream import ClassifiedEvent, StreamReader, extract_quota_signal
+from cosmo.harness.claude.stream import (
+    ClassifiedEvent,
+    ClassifiedKind,
+    StreamReader,
+    describe_tool_call,
+    extract_quota_signal,
+)
 from cosmo.proc import ManagedProcess, cancel_and_reap
 from cosmo.task.review import REVIEW_RESULT_RELATIVE_PATH
 
@@ -125,10 +132,18 @@ class ClaudeCodeAdapter(HarnessAdapter):
 
         return results
 
-    def probe(self, prompt: str) -> HarnessResult:
-        return self._invoke(task_id="probe", prompt=prompt)
+    def probe(
+        self, prompt: str, *, on_activity: Callable[[str], None] | None = None
+    ) -> HarnessResult:
+        return self._invoke(task_id="probe", prompt=prompt, on_activity=on_activity)
 
-    def propose(self, spec_path: Path, context: dict[str, Any]) -> HarnessResult:
+    def propose(
+        self,
+        spec_path: Path,
+        context: dict[str, Any],
+        *,
+        on_activity: Callable[[str], None] | None = None,
+    ) -> HarnessResult:
         # The exact OpenSpec-facing prompt -- and how much of it leans on the
         # harness-facing CLAUDE.md operating policy vs. being spelled out here
         # -- is deliberately left thin. That policy doc is Phase 4's job
@@ -139,20 +154,29 @@ class ClaudeCodeAdapter(HarnessAdapter):
             f"Run OpenSpec's propose workflow for the change at {spec_path}. "
             f"Follow this repository's operating policy for how to invoke OpenSpec."
         )
-        return self._invoke(task_id=task_id, prompt=prompt)
+        return self._invoke(task_id=task_id, prompt=prompt, on_activity=on_activity)
 
     def implement(
         self,
         task_id: str,
         spec_path: Path,
         retry_context: str | None = None,
+        *,
+        on_activity: Callable[[str], None] | None = None,
     ) -> HarnessResult:
         prompt = f"Implement the OpenSpec change at {spec_path} (task {task_id})."
         if retry_context:
             prompt += f"\n\nThe previous attempt failed:\n{retry_context}"
-        return self._invoke(task_id=task_id, prompt=prompt)
+        return self._invoke(task_id=task_id, prompt=prompt, on_activity=on_activity)
 
-    def review(self, task_id: str, spec_path: Path, base_branch: str) -> HarnessResult:
+    def review(
+        self,
+        task_id: str,
+        spec_path: Path,
+        base_branch: str,
+        *,
+        on_activity: Callable[[str], None] | None = None,
+    ) -> HarnessResult:
         # No `retry_context`, no session resumption -- a fresh `claude -p`
         # call with no memory of the implementation session (v4 workflow
         # changes: "the review is real rather than the same session grading
@@ -172,7 +196,7 @@ class ClaudeCodeAdapter(HarnessAdapter):
             f'`{{"verdict": "approved"}}` or `{{"verdict": "rejected", "reason": "<why, '
             f'specific enough to act on>"}}`.'
         )
-        return self._invoke(task_id=task_id, prompt=prompt)
+        return self._invoke(task_id=task_id, prompt=prompt, on_activity=on_activity)
 
     def get_progress(self, task_id: str) -> tuple[int, int]:
         raise NotImplementedError(
@@ -226,6 +250,27 @@ class ClaudeCodeAdapter(HarnessAdapter):
             # PreToolUse guardrail hooks still do.
             "--setting-sources",
             "project",
+            # Spec 2.3/2.5: `dontAsk` only executes calls matching
+            # `permissions.allow` (plus read-only Bash). The project's own
+            # `.claude/settings.json` already declares that allow list, but
+            # Claude Code has a separate, undocumented-in-spec "workspace
+            # trust" gate: for a directory that's never been through the
+            # interactive trust dialog -- which a headless worktree, created
+            # fresh per task, never can be -- it silently *ignores every
+            # permissions.allow entry from settings.json* and denies Write/
+            # Edit/Bash outright, even though the CLI never surfaces this as
+            # an error the adapter can see (it's a stderr note, not part of
+            # the stream-json output). Verified by a real invocation: with
+            # only settings.json's allow list, a genuinely fresh directory
+            # denied Write/Bash every time; passing the same list here too,
+            # as a CLI flag, is unaffected by workspace trust and executes
+            # normally. Kept in settings.json as well for the interactive-
+            # use-outside-Cosmo case, where a human accepts the trust dialog
+            # once and that allow list applies on its own.
+            "--allowedTools",
+            "Write",
+            "Edit",
+            "Bash",
         ]
         # Spec 2.3: bypassPermissions / --dangerously-skip-permissions is
         # never used -- the droplet has real credentials, blast radius isn't
@@ -245,13 +290,19 @@ class ClaudeCodeAdapter(HarnessAdapter):
         env[DB_PATH_ENV_VAR] = str(self.config.paths.db_path)
         return env
 
-    def _invoke(self, *, task_id: str, prompt: str) -> HarnessResult:
+    def _invoke(
+        self,
+        *,
+        task_id: str,
+        prompt: str,
+        on_activity: Callable[[str], None] | None = None,
+    ) -> HarnessResult:
         argv = self._build_argv(prompt)
         env = self._build_env(task_id)
         raw_log_path = (
             self.config.paths.log_dir / "harness" / task_id / f"{uuid.uuid4().hex}.ndjson"
         )
-        reader = StreamReader()
+        reader = StreamReader(on_event=_relay_activity(on_activity) if on_activity else None)
 
         process = ManagedProcess(
             argv,
@@ -303,6 +354,34 @@ class ClaudeCodeAdapter(HarnessAdapter):
             quota_resets_at=quota_resets_at,
             tool_call_count=reader.tool_call_count,
         )
+
+
+def _relay_activity(on_activity: Callable[[str], None]) -> Callable[[ClassifiedEvent], None]:
+    """Bridges `StreamReader`'s Claude-specific `ClassifiedEvent`s to the
+    harness-agnostic `on_activity(line: str)` hook (item 3) -- only tool
+    calls and the one session-start heartbeat are worth a human's attention
+    live; every other heartbeat is already accounted for by `task.progress`
+    (spec 4's liveness signal), not repeated here."""
+    seen_session_start = False
+
+    def _on_event(event: ClassifiedEvent) -> None:
+        nonlocal seen_session_start
+        if event.kind is ClassifiedKind.TOOL_CALL:
+            line = describe_tool_call(event.payload)
+            if line is not None:
+                on_activity(line)
+            return
+        if (
+            not seen_session_start
+            and event.kind is ClassifiedKind.HEARTBEAT
+            and event.payload.get("type") == "system"
+            and event.payload.get("subtype") == "init"
+        ):
+            seen_session_start = True
+            model = event.payload.get("model")
+            on_activity(f"session started (model={model})" if model else "session started")
+
+    return _on_event
 
 
 def _extract(terminal: ClassifiedEvent | None, key: str) -> Any:

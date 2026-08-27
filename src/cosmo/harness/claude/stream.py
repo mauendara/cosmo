@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import enum
 import json
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -122,6 +123,51 @@ def classify_line(raw_line: bytes) -> ClassifiedEvent:
     )
 
 
+_MAX_ACTIVITY_LINE = 100
+
+# Structured-field extraction only, same discipline as `_has_tool_call`
+# above (spec 4's "prose parsing is prohibited as a signal") -- this is
+# display, not classification, but it stays keyed off the same `name`/
+# `input` fields Claude Code itself defines, never off free text.
+_TOOL_INPUT_KEYS: dict[str, str] = {
+    "Bash": "command",
+    "Edit": "file_path",
+    "Write": "file_path",
+    "Read": "file_path",
+    "Glob": "pattern",
+    "Grep": "pattern",
+}
+
+
+def describe_tool_call(payload: dict[str, Any]) -> str | None:
+    """A short, human-readable line for a `ClassifiedKind.TOOL_CALL` event's
+    payload -- live terminal feedback during `cosmo run` (item 3), never a
+    decision signal. Returns `None` if the payload has no `tool_use` block
+    to describe (e.g. a `tool_result`-only turn)."""
+    message = payload.get("message")
+    if not isinstance(message, dict):
+        return None
+    content = message.get("content")
+    if not isinstance(content, list):
+        return None
+
+    for block in content:
+        if not (isinstance(block, dict) and block.get("type") == "tool_use"):
+            continue
+        name = block.get("name")
+        if not isinstance(name, str):
+            continue
+        tool_input = block.get("input")
+        key = _TOOL_INPUT_KEYS.get(name)
+        detail = tool_input.get(key) if key and isinstance(tool_input, dict) else None
+        if not isinstance(detail, str) or not detail:
+            return name
+        line = f"{name}: {detail}"
+        return line if len(line) <= _MAX_ACTIVITY_LINE else line[: _MAX_ACTIVITY_LINE - 1] + "…"
+
+    return None
+
+
 def _has_tool_call(obj: dict[str, Any]) -> bool:
     message = obj.get("message")
     if not isinstance(message, dict):
@@ -142,11 +188,15 @@ class StreamReader:
     `feed()` runs on `ManagedProcess`'s stdout-drain thread (see the comment
     there); the adapter reads `.events` / `.terminal_result` / `.session_id`
     only after joining that thread (via `ManagedProcess.cancel()`'s
-    `_finalize`), so no lock is needed here either.
+    `_finalize`), so no lock is needed here either. `on_event`, if given, is
+    therefore also called from that same thread, live as each line arrives
+    -- item 3's live activity feed, purely a display hook, never consulted
+    for any classification/retry decision.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, on_event: Callable[[ClassifiedEvent], None] | None = None) -> None:
         self._lines = NdjsonLineBuffer()
+        self._on_event = on_event
         self.events: list[ClassifiedEvent] = []
         self.terminal_result: ClassifiedEvent | None = None
         self.latest_rate_limit: ClassifiedEvent | None = None
@@ -174,6 +224,8 @@ class StreamReader:
             self.latest_rate_limit = event
         elif event.kind is ClassifiedKind.TOOL_CALL:
             self.tool_call_count += 1
+        if self._on_event is not None:
+            self._on_event(event)
         return event
 
 

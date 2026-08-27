@@ -103,6 +103,12 @@ from cosmo.task.types import FailureClassification, RunGuardAction, TaskContext
 
 OnHarnessResult = Callable[[HarnessResult], None]
 CheckRunGuard = Callable[[], RunGuardAction | None]
+OnActivity = Callable[[str], None]
+"""Item 3's live-activity hook: one short human-readable line per notable
+live event during a harness call (a tool call, session start) -- purely
+display, threaded straight through to `HarnessAdapter.propose`/`implement`/
+`review`'s own `on_activity` param, never consulted for any retry/
+classification decision this module makes."""
 
 _PROPOSING_MAX_LOCAL_ATTEMPTS = 2  # spec 3.3: "retry once, then BLOCKED"
 
@@ -125,6 +131,7 @@ def run_task(
     run_id: str | None = None,
     on_harness_result: OnHarnessResult | None = None,
     check_run_guard: CheckRunGuard | None = None,
+    on_activity: OnActivity | None = None,
 ) -> TaskStatus:
     """`run_id` defaults to `None`, preserving Phase 7's "no run tracking"
     posture for any caller that doesn't have one -- `cosmo run --task`
@@ -149,6 +156,7 @@ def run_task(
         run_id=run_id,
         on_harness_result=on_harness_result,
         check_run_guard=check_run_guard,
+        on_activity=on_activity,
     )
     if proposed is not TaskStatus.PROPOSED:
         # BLOCKED (an ordinary PROPOSING failure) or QUEUED (`check_run_
@@ -190,6 +198,7 @@ def run_task(
             adapter=adapter,
             run_id=run_id,
             on_harness_result=on_harness_result,
+            on_activity=on_activity,
         )
 
         if not implemented.success:
@@ -302,6 +311,7 @@ def run_task(
                 adapter=adapter,
                 run_id=run_id,
                 on_harness_result=on_harness_result,
+                on_activity=on_activity,
                 attempt_count=attempt_count,
                 will_retry=will_retry,
                 validating_env_retries=validating_env_retries,
@@ -402,6 +412,7 @@ def _do_proposing(
     run_id: str | None,
     on_harness_result: OnHarnessResult | None,
     check_run_guard: CheckRunGuard | None,
+    on_activity: OnActivity | None,
 ) -> TaskStatus:
     task_id = ctx.task_id
     emit_state_changed(
@@ -424,7 +435,9 @@ def _do_proposing(
                 )
 
         result = run_with_wall_clock_timeout(
-            lambda: adapter.propose(Path(ctx.spec_path), {"task_id": task_id}),
+            lambda: adapter.propose(
+                Path(ctx.spec_path), {"task_id": task_id}, on_activity=on_activity
+            ),
             wall_s=float(config.timeouts.proposing_wall),
             cancel=lambda: adapter.cancel(task_id),
             kill_grace_s=float(config.timeouts.kill_grace),
@@ -483,6 +496,7 @@ def _do_implementing(
     adapter: HarnessAdapter,
     run_id: str | None,
     on_harness_result: OnHarnessResult | None,
+    on_activity: OnActivity | None,
 ) -> _ImplementOutcome:
     """Runs one `implement()` attempt under the wall/stall timeout and
     returns its outcome -- deliberately no side effects on `attempt_count`
@@ -497,7 +511,15 @@ def _do_implementing(
     ]
     retry_context = build_retry_context(failures)
 
-    tasks_md_path = ctx.worktree_path / ctx.spec_path / "tasks.md"
+    # `ctx.spec_path` is not always the OpenSpec change directory itself --
+    # true for the direct `queue add` front door (spec_path is literally
+    # `openspec/changes/<name>`), but for a v4 spec-queued task it's the
+    # raw `*-task.md` file PROPOSING read to create the change. The change
+    # directory's actual name is `Path(spec_path).stem` either way -- same
+    # derivation `_do_finishing` already uses for `openspec archive` -- so
+    # locate `tasks.md` there rather than under `spec_path` directly.
+    spec_id = Path(ctx.spec_path).stem
+    tasks_md_path = ctx.worktree_path / "openspec" / "changes" / spec_id / "tasks.md"
     watch_path: Path | None
     if adapter.capabilities.reports_native_progress:
 
@@ -535,7 +557,9 @@ def _do_implementing(
     watcher.start()
     try:
         timeout_result = run_with_liveness_timeout(
-            lambda: adapter.implement(task_id, Path(ctx.spec_path), retry_context),
+            lambda: adapter.implement(
+                task_id, Path(ctx.spec_path), retry_context, on_activity=on_activity
+            ),
             timers=timers,
             wall_s=float(config.timeouts.implementing_wall),
             cancel=lambda: adapter.cancel(task_id),
@@ -586,6 +610,7 @@ def _do_reviewing(
     adapter: HarnessAdapter,
     run_id: str | None,
     on_harness_result: OnHarnessResult | None,
+    on_activity: OnActivity | None,
     attempt_count: int,
     will_retry: bool,
     validating_env_retries: int,
@@ -621,7 +646,9 @@ def _do_reviewing(
     )
 
     timeout_result = run_with_wall_clock_timeout(
-        lambda: adapter.review(task_id, Path(ctx.spec_path), ctx.base_branch),
+        lambda: adapter.review(
+            task_id, Path(ctx.spec_path), ctx.base_branch, on_activity=on_activity
+        ),
         wall_s=float(config.timeouts.reviewing_wall),
         cancel=lambda: adapter.cancel(task_id),
         kill_grace_s=float(config.timeouts.kill_grace),

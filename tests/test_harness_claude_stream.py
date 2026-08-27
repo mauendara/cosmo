@@ -12,10 +12,12 @@ from __future__ import annotations
 from pathlib import Path
 
 from cosmo.harness.claude.stream import (
+    ClassifiedEvent,
     ClassifiedKind,
     NdjsonLineBuffer,
     StreamReader,
     classify_line,
+    describe_tool_call,
 )
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "stream_json"
@@ -127,3 +129,56 @@ def test_ndjson_line_buffer_reassembles_a_line_split_across_feeds() -> None:
     assert buf.feed(b'{"type":"r') == []
     assert buf.feed(b'esult"}\n{"ty') == [b'{"type":"result"}']
     assert buf.feed(b'pe":"x"}\n') == [b'{"type":"x"}']
+
+
+def _tool_use_payload(name: str, tool_input: dict[str, object]) -> dict[str, object]:
+    block = {"type": "tool_use", "id": "toolu_1", "name": name, "input": tool_input}
+    return {"type": "assistant", "message": {"content": [block]}}
+
+
+def test_describe_tool_call_summarizes_a_bash_command() -> None:
+    reader = _replay("tool_call.ndjson")
+    bash_event = next(e for e in reader.events if e.kind is ClassifiedKind.TOOL_CALL)
+
+    assert describe_tool_call(bash_event.payload) == "Bash: echo hi"
+
+
+def test_describe_tool_call_summarizes_an_edit_by_file_path() -> None:
+    payload = _tool_use_payload("Edit", {"file_path": "src/App.tsx", "old_string": "a"})
+
+    assert describe_tool_call(payload) == "Edit: src/App.tsx"
+
+
+def test_describe_tool_call_falls_back_to_the_tool_name_for_an_unrecognized_tool() -> None:
+    payload = _tool_use_payload("SomeFutureTool", {"whatever": "shape"})
+
+    assert describe_tool_call(payload) == "SomeFutureTool"
+
+
+def test_describe_tool_call_truncates_a_long_detail() -> None:
+    long_path = "src/" + ("x" * 200) + ".tsx"
+    payload = _tool_use_payload("Write", {"file_path": long_path})
+
+    line = describe_tool_call(payload)
+
+    assert line is not None
+    assert len(line) == 100
+    assert line.endswith("…")
+
+
+def test_describe_tool_call_returns_none_for_a_tool_result_only_event() -> None:
+    block = {"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"}
+    payload = {"type": "user", "message": {"content": [block]}}
+
+    assert describe_tool_call(payload) is None
+
+
+def test_stream_reader_on_event_fires_for_every_classified_line_including_heartbeats() -> None:
+    seen: list[ClassifiedEvent] = []
+    reader = StreamReader(on_event=seen.append)
+    raw = (FIXTURES / "tool_call.ndjson").read_bytes()
+
+    reader.feed(raw)
+
+    assert [e.kind for e in seen] == [e.kind for e in reader.events]
+    assert len(seen) == 4  # system/init heartbeat, 2 tool-call turns, result

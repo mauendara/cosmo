@@ -19,8 +19,8 @@ from rich.table import Table
 
 from cosmo import __version__
 from cosmo.bootstrap import (
+    GitBranchOutcome,
     GitIdentity,
-    NotAGitRepoError,
     OpenSpecInitError,
     TemplatesRootNotFoundError,
     list_templates,
@@ -88,6 +88,16 @@ app.add_typer(templates_app)
 
 console = Console()
 err_console = Console(stderr=True)
+
+
+def _print_activity(line: str) -> None:
+    """`on_activity` sink for `cosmo run` (item 3) -- called from the
+    harness adapter's stdout-drain thread, not the main thread; `rich.
+    Console.print` serializes internally so this is safe to call
+    cross-thread. Purely a live foreground terminal cue, never written to
+    the events DB (spec 4's event log stays as sparse as it already is)."""
+    console.print(f"[dim]  · {line}[/dim]")
+
 
 ConfigOption = Annotated[
     Path | None,
@@ -488,6 +498,7 @@ def run_cmd(
             emitter=emitter,
             adapter=adapter,
             repo_path=resolved_repo,
+            on_activity=_print_activity,
         )
     finally:
         writer.close()
@@ -521,7 +532,16 @@ def _run_queue_cmd(
             err_console.print(f"[red]{exc}[/red]")
             raise typer.Exit(code=1) from None
         if not order:
-            console.print("[yellow]no eligible queued tasks[/yellow]")
+            stalled = sorted(
+                t.task_id for t in list_tasks(cfg.paths.db_path) if t.status == "queued"
+            )
+            if stalled:
+                console.print(
+                    "[yellow]no eligible queued tasks[/yellow] -- "
+                    f"queued but unschedulable (unmet dependencies): {', '.join(stalled)}"
+                )
+            else:
+                console.print("[yellow]no eligible queued tasks[/yellow]")
             return
         for i, tid in enumerate(order, start=1):
             console.print(f"{i}. {tid}")
@@ -544,6 +564,7 @@ def _run_queue_cmd(
             repo_path=repo,
             base_branch=resolved_base,
             harness_name=name,
+            on_activity=_print_activity,
         )
     finally:
         writer.close()
@@ -556,6 +577,11 @@ def _run_queue_cmd(
         f"completed={outcome.summary.completed} blocked={outcome.summary.blocked} "
         f"requeued={outcome.summary.requeued} retried={outcome.summary.retried}"
     )
+    if outcome.summary.stalled_queued_tasks:
+        console.print(
+            "[yellow]queued but unschedulable (unmet dependencies):[/yellow] "
+            + ", ".join(outcome.summary.stalled_queued_tasks)
+        )
     if not ok:
         raise typer.Exit(code=1)
 
@@ -626,7 +652,10 @@ _SYMLINK_STYLE = {
 @app.command()
 def init(
     target_path: Annotated[
-        Path, typer.Argument(help="Path to the target repo (must be git-managed).")
+        Path,
+        typer.Argument(
+            help="Path to the target repo. Runs `git init` itself if not already a git repo."
+        ),
     ],
     harness: HarnessOption = None,
     project_template: Annotated[
@@ -650,7 +679,8 @@ def init(
     ] = None,
     config: ConfigOption = None,
 ) -> None:
-    """Bootstrap a target repo: openspec/, docs/, .agent/<harness>/, root symlinks (spec 10.4)."""
+    """Bootstrap a target repo: git init + base_branch if needed, openspec/,
+    docs/, .agent/<harness>/, root symlinks (spec 10.4)."""
     cfg = _load(config)
     resolved_harness, source = resolve_harness_name(harness, None, cfg.harness.name)
     resolved_template = project_template or "_blank"
@@ -672,19 +702,32 @@ def init(
             target_path,
             harness=resolved_harness,
             project_template=resolved_template,
+            base_branch=cfg.git.base_branch,
             force_docs=force,
             writer=writer,
             db_path=cfg.paths.db_path,
         )
-    except NotAGitRepoError as exc:
-        err_console.print(f"[red]{exc}[/red]")
-        raise typer.Exit(code=2) from None
     except (TemplatesRootNotFoundError, OpenSpecInitError) as exc:
         err_console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=1) from None
     finally:
         writer.close()
 
+    _GIT_BRANCH_MESSAGES = {
+        GitBranchOutcome.REPO_INITIALIZED_AND_BRANCH_CREATED: (
+            f"[green]git init[/green], then created and checked out {cfg.git.base_branch!r}"
+        ),
+        GitBranchOutcome.BRANCH_CREATED: (
+            f"[green]created and checked out[/green] {cfg.git.base_branch!r}"
+        ),
+        GitBranchOutcome.ALREADY_ON_BASE_BRANCH: f"already has {cfg.git.base_branch!r}",
+        GitBranchOutcome.SKIPPED_DIRTY: (
+            f"[yellow]not on {cfg.git.base_branch!r} and the working tree has uncommitted "
+            f"changes -- commit or stash first, then create it yourself "
+            f"(`git checkout -b {cfg.git.base_branch}`)[/yellow]"
+        ),
+    }
+    console.print(f"git branch: {_GIT_BRANCH_MESSAGES[result.git_branch]}")
     console.print(
         "[green]openspec/[/green] created" if result.openspec.ran else "openspec/ already present"
     )
@@ -727,13 +770,27 @@ def _ensure_git_identity(
         console.print(f"git identity: [green]set[/green] {override_name} <{override_email}>")
         return
 
+    def _prompt_for_identity() -> None:
+        name = typer.prompt("Git author name")
+        email = typer.prompt("Git author email")
+        set_local_identity(target, GitIdentity(name=name, email=email))
+        console.print(f"git identity: [green]set[/green] {name} <{email}>")
+
     existing = read_configured_identity(target)
     if existing is None:
         default = GitIdentity(name=cfg.git.commit_author_name, email=cfg.git.commit_author_email)
-        set_local_identity(target, default)
-        console.print(
-            f"git identity: [green]set[/green] {default.name} <{default.email}> (config default)"
-        )
+        if typer.confirm(
+            f"No git identity configured for this repo. Use the default -- "
+            f"{default.name} <{default.email}>?",
+            default=True,
+        ):
+            set_local_identity(target, default)
+            console.print(
+                f"git identity: [green]set[/green] {default.name} <{default.email}> "
+                f"(config default)"
+            )
+            return
+        _prompt_for_identity()
         return
 
     console.print(
@@ -745,10 +802,7 @@ def _ensure_git_identity(
     ):
         console.print("git identity: [dim]left as-is[/dim]")
         return
-    name = typer.prompt("Git author name")
-    email = typer.prompt("Git author email")
-    set_local_identity(target, GitIdentity(name=name, email=email))
-    console.print(f"git identity: [green]set[/green] {name} <{email}>")
+    _prompt_for_identity()
 
 
 @templates_app.command("list")
@@ -980,11 +1034,34 @@ def spec_add(
         spec_path.parent.mkdir(parents=True, exist_ok=True)
         spec_path.write_text(from_file.read_text(encoding="utf-8"), encoding="utf-8")
 
+    tasks_dir = _spec_tasks_dir(resolved_repo, name)
+    try:
+        existing_task_files = list_task_files(tasks_dir)
+    except TaskFileError as exc:
+        err_console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from None
+
+    if existing_task_files:
+        console.print(
+            f"[yellow]{len(existing_task_files)} task file(s) already exist[/yellow] under "
+            f"{tasks_dir}"
+        )
+        if not typer.confirm(
+            "Re-run the harness to regenerate them? (Not free -- reuses the existing files "
+            "otherwise.)",
+            default=False,
+        ):
+            _render_spec_preview(name, existing_task_files)
+            console.print(
+                f"[green]preview ready[/green] (existing files, harness not run) -- edit the "
+                f"files above, then `cosmo spec queue {name}`"
+            )
+            return
+
     resolved_name, source = resolve_harness_name(harness, project_harness, cfg.harness.name)
     console.print(f"harness: [bold]{resolved_name}[/bold] (from {source})")
     adapter = get_adapter(resolved_name)(cfg, cwd=resolved_repo)
 
-    tasks_dir = _spec_tasks_dir(resolved_repo, name)
     prompt = (
         f"Follow the spec-enrichment skill against the raw spec at "
         f"docs/specs/{name}-spec.md. Enrich it against this project's own "
@@ -1345,4 +1422,10 @@ def report_cmd(
     if isinstance(near_cap, list) and near_cap:
         console.print(
             f"[yellow]knowledge files near cap:[/yellow] {', '.join(str(f) for f in near_cap)}"
+        )
+    stalled = payload.get("stalled_queued_tasks") or []
+    if isinstance(stalled, list) and stalled:
+        console.print(
+            "[yellow]queued but unschedulable (unmet dependencies):[/yellow] "
+            f"{', '.join(str(t) for t in stalled)}"
         )

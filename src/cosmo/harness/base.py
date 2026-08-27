@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, ClassVar
@@ -102,16 +103,32 @@ class HarnessAdapter(ABC):
         """
 
     @abstractmethod
-    def probe(self, prompt: str) -> HarnessResult:
+    def probe(
+        self, prompt: str, *, on_activity: Callable[[str], None] | None = None
+    ) -> HarnessResult:
         """Run a single raw prompt through the harness and return the uniform
         result. A second extension to spec 2.2 (see `preflight()` above):
         `cosmo harness probe` (plan Phase 3 exit criterion) needs a
         harness-agnostic smoke-test entry point that doesn't presuppose an
         OpenSpec change on disk the way `propose`/`implement` do.
+
+        `on_activity`, if given, is called with one short human-readable
+        line per notable live event (a tool call, session start) -- a
+        display-only hook for a foreground `cosmo run`'s otherwise-blank
+        terminal (item 3), never a signal any classification/retry decision
+        reads. Deliberately a plain string here, not a harness-specific
+        event type: keeps `task.machine`/`run.loop` harness-agnostic, same
+        reasoning as `HarnessResult` itself.
         """
 
     @abstractmethod
-    def propose(self, spec_path: Path, context: dict[str, Any]) -> HarnessResult: ...
+    def propose(
+        self,
+        spec_path: Path,
+        context: dict[str, Any],
+        *,
+        on_activity: Callable[[str], None] | None = None,
+    ) -> HarnessResult: ...
 
     @abstractmethod
     def implement(
@@ -119,10 +136,19 @@ class HarnessAdapter(ABC):
         task_id: str,
         spec_path: Path,
         retry_context: str | None = None,
+        *,
+        on_activity: Callable[[str], None] | None = None,
     ) -> HarnessResult: ...
 
     @abstractmethod
-    def review(self, task_id: str, spec_path: Path, base_branch: str) -> HarnessResult:
+    def review(
+        self,
+        task_id: str,
+        spec_path: Path,
+        base_branch: str,
+        *,
+        on_activity: Callable[[str], None] | None = None,
+    ) -> HarnessResult:
         """v4 workflow changes (`docs/v4-changes-to-workflow-plan.md`): a
         genuinely fresh, separate call -- no session resumption, no
         `retry_context` -- so the review is real rather than the same

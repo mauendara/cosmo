@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import enum
 import threading
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar
@@ -90,10 +90,24 @@ class FakeHarnessAdapter(HarnessAdapter):
     def preflight(self) -> list[CheckResult]:
         return [ok("fake harness", "always ready")]
 
-    def probe(self, prompt: str) -> HarnessResult:
+    # `on_activity` is accepted on every method below for signature parity
+    # with `HarnessAdapter`/the real Claude adapter, and deliberately never
+    # called: this adapter has no real NDJSON stream to relay (item 3's
+    # live activity feed is Claude-specific display glue, nothing a script
+    # here needs to fake).
+
+    def probe(
+        self, prompt: str, *, on_activity: Callable[[str], None] | None = None
+    ) -> HarnessResult:
         return self._run("probe", "probe", None)
 
-    def propose(self, spec_path: Path, context: dict[str, Any]) -> HarnessResult:
+    def propose(
+        self,
+        spec_path: Path,
+        context: dict[str, Any],
+        *,
+        on_activity: Callable[[str], None] | None = None,
+    ) -> HarnessResult:
         task_id = str(context.get("task_id", spec_path.stem))
         return self._run("propose", task_id, None)
 
@@ -102,10 +116,19 @@ class FakeHarnessAdapter(HarnessAdapter):
         task_id: str,
         spec_path: Path,
         retry_context: str | None = None,
+        *,
+        on_activity: Callable[[str], None] | None = None,
     ) -> HarnessResult:
         return self._run("implement", task_id, retry_context)
 
-    def review(self, task_id: str, spec_path: Path, base_branch: str) -> HarnessResult:
+    def review(
+        self,
+        task_id: str,
+        spec_path: Path,
+        base_branch: str,
+        *,
+        on_activity: Callable[[str], None] | None = None,
+    ) -> HarnessResult:
         # The verdict itself is a file `task.review.read_review_verdict`
         # reads back from the worktree (`HarnessAdapter.review`'s own
         # docstring) -- a script here only needs to control whether this

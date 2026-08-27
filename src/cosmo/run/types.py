@@ -34,6 +34,12 @@ class RunSummary:
     """Spec 11: `docs/**/*.md` files at or above 80% of
     `knowledge.max_file_lines`, checked once at run end against `repo_path`
     (compaction itself is never automated -- spec 11's own rule)."""
+    stalled_queued_tasks: list[str] = field(default_factory=list)
+    """Only set when the run stops with `QUEUE_EMPTY`: task_ids still in
+    `queued` status whose `depends_on` never resolved (a dependency that is
+    `blocked`, stuck in a non-`queued`/non-`done` status, or missing
+    entirely) -- distinguishes "genuinely nothing left to do" from "work is
+    queued but unschedulable" for anyone reading just the summary line."""
     total_duration_seconds: float = 0.0
     total_cost_usd: float = 0.0
 

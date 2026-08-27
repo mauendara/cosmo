@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from cosmo.bootstrap.init import NotAGitRepoError, run_init
+from cosmo.bootstrap.init import GitBranchOutcome, run_init
 from cosmo.config import CosmoConfig, load_config
 from cosmo.store import StoreWriter
 from cosmo.store.reader import find_project_by_path
@@ -41,22 +41,61 @@ def _git_repo(tmp_path: Path) -> Path:
     return target
 
 
-def test_refuses_a_directory_that_is_not_a_git_repo(tmp_path: Path) -> None:
+def test_auto_inits_a_directory_that_is_not_a_git_repo(tmp_path: Path) -> None:
     target = tmp_path / "not-a-repo"
     target.mkdir()
     cfg = _config(tmp_path)
     writer = StoreWriter(cfg.paths.db_path)
 
-    with pytest.raises(NotAGitRepoError):
-        run_init(
-            target,
-            harness="claude",
-            project_template="_blank",
-            force_docs=False,
-            writer=writer,
-            db_path=cfg.paths.db_path,
-        )
+    result = run_init(
+        target,
+        harness="claude",
+        project_template="_blank",
+        base_branch="develop",
+        force_docs=False,
+        writer=writer,
+        db_path=cfg.paths.db_path,
+    )
     writer.close()
+
+    assert result.git_branch is GitBranchOutcome.REPO_INITIALIZED_AND_BRANCH_CREATED
+    assert (target / ".git").is_dir()
+    current_branch = subprocess.run(
+        ["git", "-C", str(target), "branch", "--show-current"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert current_branch == "develop"
+
+
+def test_leaves_a_dirty_repo_missing_the_base_branch_alone(tmp_path: Path) -> None:
+    target = tmp_path / "dirty-repo"
+    target.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=target, check=True)
+    (target / "untracked.txt").write_text("uncommitted\n")
+    cfg = _config(tmp_path)
+    writer = StoreWriter(cfg.paths.db_path)
+
+    result = run_init(
+        target,
+        harness="claude",
+        project_template="_blank",
+        base_branch="develop",
+        force_docs=False,
+        writer=writer,
+        db_path=cfg.paths.db_path,
+    )
+    writer.close()
+
+    assert result.git_branch is GitBranchOutcome.SKIPPED_DIRTY
+    branches = subprocess.run(
+        ["git", "-C", str(target), "branch", "--list", "develop"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert branches.strip() == ""
 
 
 def test_full_init_produces_every_documented_artifact(tmp_path: Path) -> None:
@@ -68,11 +107,13 @@ def test_full_init_produces_every_documented_artifact(tmp_path: Path) -> None:
         target,
         harness="claude",
         project_template="java-spring-react",
+        base_branch="develop",
         force_docs=False,
         writer=writer,
         db_path=cfg.paths.db_path,
     )
 
+    assert result.git_branch is GitBranchOutcome.BRANCH_CREATED
     assert (target / "openspec" / "changes").is_dir()
     assert (target / "docs" / "backend" / "architecture.md").is_file()
     assert (target / ".agent" / "claude" / "settings.json").is_file()
@@ -101,6 +142,7 @@ def test_rerun_skips_registration_and_reports_skipped_docs(tmp_path: Path) -> No
         target,
         harness="claude",
         project_template="_blank",
+        base_branch="develop",
         force_docs=False,
         writer=writer,
         db_path=cfg.paths.db_path,
@@ -110,11 +152,13 @@ def test_rerun_skips_registration_and_reports_skipped_docs(tmp_path: Path) -> No
         target,
         harness="claude",
         project_template="_blank",
+        base_branch="develop",
         force_docs=False,
         writer=writer,
         db_path=cfg.paths.db_path,
     )
 
+    assert second.git_branch is GitBranchOutcome.ALREADY_ON_BASE_BRANCH
     assert second.already_registered is True
     assert len(second.docs.skipped) > 0
     assert second.docs.created == []

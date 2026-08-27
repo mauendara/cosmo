@@ -316,6 +316,59 @@ def test_per_task_cost_ceiling_blocks_one_task_and_the_queue_continues(tmp_path:
     assert cheap.status == "done"
 
 
+def test_queue_empty_reports_queued_tasks_stalled_on_an_unmet_dependency(tmp_path: Path) -> None:
+    """A task can be `queued` yet permanently unschedulable -- its
+    `depends_on` names a task that will never reach `done` (here, one
+    `blocked` by the per-task cost ceiling). `QUEUE_EMPTY` alone doesn't
+    distinguish that from a genuinely empty queue; `stalled_queued_tasks`
+    is what lets a caller tell the two apart without a separate `queue ls`."""
+    cfg = _fast_config(
+        tmp_path,
+        cost=CostConfig(max_cost_per_run_usd=0.0, max_cost_per_task_usd=1.0, warn_at_fraction=0.8),
+    )
+    repo = _repo_on_develop(tmp_path)
+    writer = StoreWriter(cfg.paths.db_path)
+    writer.queue_add(task_id="expensive", spec_path="openspec/changes/expensive", max_attempts=2)
+    writer.queue_add(
+        task_id="downstream",
+        spec_path="openspec/changes/downstream",
+        depends_on=["expensive"],
+        max_attempts=2,
+    )
+    emitter = EventEmitter(writer)
+    adapter = FakeHarnessAdapter(
+        cfg,
+        # "expensive" is blocked on cost before "downstream" is ever
+        # attempted -- it stays `queued`, stuck behind a dependency that
+        # will never become `done`.
+        script=ScriptedCall(outcome=FakeOutcome.SUCCESS, total_cost_usd=2.0),
+    )
+    gate = FakeGate(ScriptedGateResult(passed=True))
+
+    try:
+        outcome = run_queue(
+            config=cfg,
+            writer=writer,
+            emitter=emitter,
+            adapter=adapter,
+            repo_path=repo,
+            base_branch="develop",
+            harness_name="claude",
+            gate_runner=_gate_runner(gate),
+        )
+    finally:
+        writer.close()
+
+    assert outcome.status is RunStatus.STOPPED
+    assert outcome.stop_reason is StopReason.QUEUE_EMPTY
+    assert outcome.summary.completed == 0
+    assert outcome.summary.stalled_queued_tasks == ["downstream"]
+
+    downstream = get_task(cfg.paths.db_path, "downstream")
+    assert downstream is not None
+    assert downstream.status == "queued"
+
+
 def test_run_wall_clock_expiry_requeues_the_in_flight_task_and_stops(tmp_path: Path) -> None:
     short_wall_timeouts = load_config(config_path=NO_USER_CONFIG).timeouts.model_copy(
         update={"run_wall": 3}

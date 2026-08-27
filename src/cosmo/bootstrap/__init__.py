@@ -20,7 +20,7 @@ from cosmo.bootstrap.discover import (
 from cosmo.bootstrap.docs import DocsCopyResult, copy_project_docs
 from cosmo.bootstrap.git_identity import GitIdentity, read_configured_identity, set_local_identity
 from cosmo.bootstrap.hashing import compute_template_version
-from cosmo.bootstrap.init import InitResult, NotAGitRepoError, run_init
+from cosmo.bootstrap.init import GitBranchOutcome, InitResult, run_init
 from cosmo.bootstrap.openspec import (
     OpenSpecInitError,
     OpenSpecResult,
@@ -31,9 +31,9 @@ from cosmo.bootstrap.symlinks import SymlinkResult, create_root_symlinks
 
 __all__ = [
     "DocsCopyResult",
+    "GitBranchOutcome",
     "GitIdentity",
     "InitResult",
-    "NotAGitRepoError",
     "OpenSpecInitError",
     "OpenSpecResult",
     "SymlinkResult",

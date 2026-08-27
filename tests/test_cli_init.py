@@ -47,14 +47,26 @@ def test_templates_list_shows_the_real_shipped_templates() -> None:
     assert "java-spring-react" in result.stdout
 
 
-def test_init_refuses_a_non_git_directory(tmp_path: Path) -> None:
+@pytest.mark.skipif(
+    subprocess.run(["which", "openspec"], capture_output=True, check=False).returncode != 0,
+    reason="real openspec CLI not on PATH",
+)
+def test_init_auto_inits_a_non_git_directory(tmp_path: Path) -> None:
     target = tmp_path / "plain-dir"
     target.mkdir()
-    result = runner.invoke(app, ["init", str(target)])
-    assert result.exit_code == 2
-    # Rich may wrap the message across lines, so match on collapsed whitespace.
-    combined = " ".join((result.stdout + result.stderr).split())
-    assert "is not a git repository" in combined
+    # "\n" accepts the (now-interactive) default git-identity prompt below.
+    result = runner.invoke(app, ["init", str(target)], input="\n")
+    assert result.exit_code == 0, result.stdout
+    assert (target / ".git").is_dir()
+    current_branch = subprocess.run(
+        ["git", "-C", str(target), "branch", "--show-current"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert current_branch == "develop"
+    combined = " ".join(result.stdout.split())
+    assert "git init" in combined and "develop" in combined
 
 
 @pytest.mark.skipif(
@@ -66,7 +78,9 @@ def test_init_against_a_scratch_git_repo_produces_every_documented_artifact(
 ) -> None:
     target = _git_repo(tmp_path)
 
-    result = runner.invoke(app, ["init", str(target), "--project-template", "java-spring-react"])
+    result = runner.invoke(
+        app, ["init", str(target), "--project-template", "java-spring-react"], input="\n"
+    )
 
     assert result.exit_code == 0, result.stdout
     assert (target / "openspec" / "changes").is_dir()
@@ -82,7 +96,7 @@ def test_init_against_a_scratch_git_repo_produces_every_documented_artifact(
 )
 def test_rerunning_init_reports_skipped_docs_and_refreshes_agent_dir(tmp_path: Path) -> None:
     target = _git_repo(tmp_path)
-    runner.invoke(app, ["init", str(target)])
+    runner.invoke(app, ["init", str(target)], input="\n")
     stale = target / ".agent" / "claude" / "no-longer-in-the-template.txt"
     stale.write_text("stale")
 
@@ -101,12 +115,29 @@ def test_rerunning_init_reports_skipped_docs_and_refreshes_agent_dir(tmp_path: P
 def test_init_seeds_the_config_default_identity_when_none_exists(tmp_path: Path) -> None:
     target = _git_repo(tmp_path)
 
-    result = runner.invoke(app, ["init", str(target)])
+    # "\n" accepts the default via the (now-interactive) prompt's own default=True.
+    result = runner.invoke(app, ["init", str(target)], input="\n")
 
     assert result.exit_code == 0, result.stdout
+    assert "No git identity configured" in result.stdout
     assert "git identity" in result.stdout and "config default" in result.stdout
     assert read_configured_identity(target) == GitIdentity(
         name="Cosmo", email="cosmo@entropiainversa.com"
+    )
+
+
+@pytest.mark.skipif(
+    subprocess.run(["which", "openspec"], capture_output=True, check=False).returncode != 0,
+    reason="real openspec CLI not on PATH",
+)
+def test_init_declining_the_default_identity_prompts_for_one_instead(tmp_path: Path) -> None:
+    target = _git_repo(tmp_path)
+
+    result = runner.invoke(app, ["init", str(target)], input="n\nJane Dev\njane@example.com\n")
+
+    assert result.exit_code == 0, result.stdout
+    assert read_configured_identity(target) == GitIdentity(
+        name="Jane Dev", email="jane@example.com"
     )
 
 
@@ -118,7 +149,7 @@ def test_init_declining_to_replace_an_existing_identity_leaves_it_untouched(
     tmp_path: Path,
 ) -> None:
     target = _git_repo(tmp_path)
-    runner.invoke(app, ["init", str(target)])  # seeds the config default
+    runner.invoke(app, ["init", str(target)], input="\n")  # seeds the config default
 
     result = runner.invoke(app, ["init", str(target)], input="n\n")
 
@@ -136,7 +167,7 @@ def test_init_confirming_replaces_an_existing_identity_with_the_prompted_one(
     tmp_path: Path,
 ) -> None:
     target = _git_repo(tmp_path)
-    runner.invoke(app, ["init", str(target)])  # seeds the config default
+    runner.invoke(app, ["init", str(target)], input="\n")  # seeds the config default
 
     result = runner.invoke(app, ["init", str(target)], input="y\nJane Dev\njane@example.com\n")
 

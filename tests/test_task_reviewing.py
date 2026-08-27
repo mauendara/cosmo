@@ -168,11 +168,17 @@ def test_rejected_review_retries_then_a_second_approval_reaches_done(tmp_path: P
     call_count = {"n": 0}
     real_review = adapter.review
 
-    def scripted_review(task_id: str, spec_path: Path, base_branch: str) -> HarnessResult:
+    def scripted_review(
+        task_id: str,
+        spec_path: Path,
+        base_branch: str,
+        *,
+        on_activity: Callable[[str], None] | None = None,
+    ) -> HarnessResult:
         call_count["n"] += 1
         if call_count["n"] == 2:
             _write_verdict(ctx.worktree_path, approved=True)
-        return real_review(task_id, spec_path, base_branch)
+        return real_review(task_id, spec_path, base_branch, on_activity=on_activity)
 
     adapter.review = scripted_review  # type: ignore[method-assign]
 

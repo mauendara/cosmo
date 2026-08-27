@@ -73,12 +73,18 @@ def run_queue(
     monotonic: Callable[[], float] = time.monotonic,
     wall_clock_now: Callable[[], datetime] = lambda: datetime.now(UTC),
     sleep: Callable[[float], None] = time.sleep,
+    on_activity: Callable[[str], None] | None = None,
 ) -> RunOutcome:
     """Drives the whole task queue to completion, a breaker trip, a quota
     stop, or a wall-clock/cost stop -- one `cosmo run` (no `--task`)
     invocation. `monotonic`/`wall_clock_now`/`sleep` are injectable
     (matching `task.timeouts`'s own testing posture) so a test exercising
-    the 5-hour auto-resume path never actually sleeps for real."""
+    the 5-hour auto-resume path never actually sleeps for real.
+
+    `on_activity`, if given, is threaded straight through to each task's
+    `run_task(..., on_activity=...)` (item 3) -- purely a CLI/presentation
+    concern (a line to print), so this module stays as ignorant of it as it
+    is of `console`/Rich; `cli.main` is what actually builds a real one."""
     db_path = config.paths.db_path
     run_id = uuid.uuid4().hex
 
@@ -166,8 +172,9 @@ def run_queue(
             final_status, stop_reason = RunStatus.STOPPED, StopReason.MAX_TIME
             break
 
+        current_tasks = list_tasks(db_path)
         try:
-            order = resolve_execution_order(list_tasks(db_path))
+            order = resolve_execution_order(current_tasks)
         except DagCycleError as exc:
             emitter.emit(
                 event_type=EventType.RUN_STOPPED,
@@ -178,6 +185,16 @@ def run_queue(
             final_status, stop_reason = RunStatus.STOPPED, StopReason.MANUAL
             break
         if not order:
+            # Every `queued` task at this point (if any) has an unmet
+            # `depends_on` edge -- `resolve_execution_order` would have
+            # returned it otherwise (its own Kahn's-algorithm pass already
+            # accounts for every dependency chain resolvable from the
+            # current `done` set). Surfaced separately from `blocked_by_
+            # reason` since these tasks are still `queued`, not `blocked` --
+            # nothing failed, the DAG is just stuck.
+            summary.stalled_queued_tasks = sorted(
+                t.task_id for t in current_tasks if t.status == "queued"
+            )
             final_status, stop_reason = RunStatus.STOPPED, StopReason.QUEUE_EMPTY
             break
 
@@ -199,6 +216,7 @@ def run_queue(
             gate_runner=gate_runner,
             deadline_monotonic=deadline_monotonic,
             monotonic=monotonic,
+            on_activity=on_activity,
         )
 
         run_total_cost = get_run_cost(db_path, run_id)
@@ -338,6 +356,7 @@ def run_queue(
             "flaky_detected": summary.flaky_detected,
             "repeated_merge_conflict_tasks": summary.repeated_merge_conflict_tasks,
             "knowledge_files_near_cap": summary.knowledge_files_near_cap,
+            "stalled_queued_tasks": summary.stalled_queued_tasks,
             "total_duration_seconds": summary.total_duration_seconds,
             "total_cost_usd": summary.total_cost_usd,
         },
@@ -428,6 +447,7 @@ def _run_one_task(
     gate_runner: GateRunner,
     deadline_monotonic: float,
     monotonic: Callable[[], float],
+    on_activity: Callable[[str], None] | None = None,
 ) -> _TaskRunResult:
     """One `task.machine.run_task` call, wired to the run loop's cost/quota
     observation via its two hooks. `box` is the closure state
@@ -521,6 +541,7 @@ def _run_one_task(
         run_id=run_id,
         on_harness_result=on_harness_result,
         check_run_guard=check_run_guard,
+        on_activity=on_activity,
     )
 
     confirmed = box["quota_signal"]
