@@ -22,18 +22,23 @@ skipping a step, or declaring victory early only wastes your own turn budget.
 ends -- a final text response, or a tool call that implicitly assumes
 you'll be resumed. Nothing schedules a second call into this same session;
 Cosmo's adapter is done listening the instant this process exits.
-Concretely: **a tool like `ScheduleWakeup` does nothing useful here.** It
-exists for interactive/managed sessions with a host that keeps running --
-found by hand: a real `IMPLEMENTING` session launched `npm install` in the
-background, correctly reasoned it should wait rather than poll, called
-`ScheduleWakeup`, and ended its own turn on the assumption it would resume
-once notified. It never did. The install was still running when the
-process exited; `package-lock.json` was never written; the next state's
-gate run failed on a confusing `npm ci` error that had nothing to do with
-the actual code. If a command takes a while, wait on it synchronously in
-this same turn -- foreground it, or if it must background, poll it
-yourself until it actually finishes -- before doing anything that depends
-on its result, and before ending the turn.
+Concretely: **`ScheduleWakeup`, `ToolSearch`, and `TaskOutput` are all
+denied in this project's `settings.json` -- not just discouraged.** Found
+twice by hand, not just reasoned about: a real `IMPLEMENTING` session
+launched `npm install` in the background, called `ScheduleWakeup`, and
+ended its turn assuming it would resume once notified. It never did --
+`package-lock.json` was never written, and the next state's gate run failed
+on a confusing `npm ci` error unrelated to the actual code. The prose
+warning alone didn't stop the *next* recurrence either: a later session
+backgrounded `npm install` again and, instead of `ScheduleWakeup`, spent
+most of an 80-turn budget polling it (`ps -p <pid>` loops, `sleep`, then
+`ToolSearch`+`TaskOutput` to check the background task) -- burning real
+turns and real token cost on waiting instead of working, before the call
+ran out of turns entirely. There is no correct way to use a background
+task from inside this one-shot call, so don't reach for one: run the
+command in the foreground, in a single `Bash` call, and let it block for
+as long as it actually takes. A `Bash` call that takes ten minutes because
+`npm install` is slow costs one turn; polling it costs dozens.
 
 ## How to drive OpenSpec
 

@@ -2527,3 +2527,72 @@ template or to Vite.
 | 46 | `sweep_stale_worktrees` (`git/worktree.py`) retains a `QUEUED` task's worktree, not only a `BLOCKED` one; `_run_one_task` (`run/loop.py`) reuses any existing `worktree_path` regardless of which run_id created it | §3.2 | 10 prep | Deviation 44's fix never got a chance to help on a real overnight retry: the user killed a falsely-paused `cosmo run` and started a fresh one, whose startup sweep deleted scaffold-app's `QUEUED`-but-not-`BLOCKED` worktree (only `BLOCKED` was ever retained) before `_run_one_task` could reuse it, wiping an already-complete PROPOSING pass. Safe now specifically because deviation 47 makes `cli.main.queue_retry` the *only* place that ever discards a worktree deliberately -- a `QUEUED` task's `worktree_path` being set is therefore unambiguous evidence of "safe to resume," never "abandoned" |
 | 47 | `store.writer.queue_retry` resets `attempt_count` to 0 (previously untouched) and gains a `clear_worktree` parameter; `cli.main.queue_retry` gains `--repo` and, when the worktree's `openspec/changes/<spec_id>/tasks.md` is already committed, does a soft reset (`git.worktree.reset_worktree_to_commit`: hard-reset to that commit + `git clean -fdx`) instead of removing the worktree outright | §3.2, §6.3 | 10 prep | Two real bugs found the same night: (1) a manually retried task carried over its already-exhausted `attempt_count`, so the very next genuine failure blocked it again with zero real retries available -- confirmed live (`attempt_count: 4` against `max_attempts: 2` after exactly one post-retry attempt); (2) the user asked directly whether a retry would re-run PROPOSING needlessly -- it would have, under the deviation 44/46 fix alone, since a full worktree wipe destroys the already-valid proposal along with the failed implementation. `find_last_commit_touching` locates the commit PROPOSING left via the same `tasks.md` file deviation 44 already keys off (a structural git fact, not a commit-message string -- spec 4's "prose parsing is prohibited" applies here too even though this is CLI convenience, not classification) |
 | 48 | `templates/harness/claude/CLAUDE.md` gains a "This call is one-shot -- there is no 'later'" section | Not named in the spec | 10 prep | Root-caused the actual `package-lock.json` failure behind deviations 43/44/46/47's real repro, via the raw session log: `IMPLEMENTING` launched `npm install` in the background, correctly reasoned it should wait, called `ScheduleWakeup`, and ended its turn assuming a later resumption that a one-shot `claude -p` call never provides -- the install was still running when the process exited, no lockfile was ever written, and the gate's `npm ci` failed on a generic error with no visible connection to the real cause. `node_modules` was ~249 packages deep (real progress, genuinely killed mid-flight), not a fabricated or skipped install |
+| 49 | `templates/harness/claude/settings.json`'s `permissions.deny` gains `ScheduleWakeup`, `ToolSearch`, `TaskOutput` (bare tool names, no path pattern); `CLAUDE.md`'s "one-shot" section rewritten to state the denial as fact and drop the old "or if it must background, poll it yourself" escape hatch | §2.5 | 10 | Deviation 48's prose alone did not hold: a later real `IMPLEMENTING` session for `scaffold-app` backgrounded `npm install` again, then followed the *other* half of the old guidance ("poll it yourself") -- a `ps -p <pid>` wait loop, `sleep 240`, then `ToolSearch` to locate `TaskOutput` and poll the background task with it -- burning 81 turns and 5.83M cached input tokens ($2.90) on waiting instead of working before hitting `error_max_turns`. That single call is the most likely real cause of the run's next event: a *confirmed* `quota_exhausted_5h` pause. Verified for real, not assumed: two headless `claude -p` invocations against a scratch repo with the updated `settings.json` (same `--setting-sources project`/`--allowedTools Write Edit Bash` flags the adapter uses) explicitly instructed the model to force a `tool_use` call for all three tools regardless of expected outcome -- zero `tool_use` blocks for any of the three appeared in either transcript, confirming `permissions.deny` removes them from the tool list entirely rather than exposing-then-rejecting them, and that this holds even though the same workspace-trust gate behind deviation 38 separately still ignores `permissions.allow` in the same file. The already-running `scaffold-app` worktree does not get a fresh `sync_harness_assets` call on resume (`run.loop._run_one_task`'s reuse branch skips it, deviation 46) so its `.agent/claude/` was re-synced by hand from the template to actually pick the fix up before the next attempt |
+
+## Phase 10 — acceptance run (in progress)
+
+The overnight acceptance run itself, not more prep, is now underway against
+`/home/dev/delta/cosmo-tests/todo-frontend-app` -- run_id
+`bdf4ab101aee484b98c7a833c014714d`, started 2026-08-27T02:26:04Z, `cosmo
+run` invoked directly (systemd was never installed on this host; see "Open
+items" below). Real, useful data has already come out of it even though the
+queue is far from drained.
+
+**A real, confirmed quota exhaustion happened and was handled correctly by
+the run-level state machine.** `scaffold-app` reached real `IMPLEMENTING`,
+its harness call hit `error_max_turns` (see deviation 49's root cause),
+`run_task` graceful-requeued it (`implementing -> failed_retry -> queued`,
+`attempt_number` untouched -- not a code failure), and the *next* thing the
+run loop saw was a genuine `rate_limit_info` signal confirming 5h exhaustion
+(not the deviation-43 false positive this session's earlier work fixed).
+`run.loop._handle_quota_pause_or_stop` did exactly what §6.5/the code
+comments say: wrote `run.paused` (`reason: quota_exhausted_5h`, `confirmed:
+true`, `resume_delay_seconds` ~8716s), then called a real, uninterrupted
+`sleep()` in-process intending to wake itself and continue the same loop --
+this is a genuine in-process self-resume, not "no resume path exists" (an
+earlier read of this same session got that wrong before checking the code).
+
+**The process died silently during that sleep, before ever resuming.** By
+the time anyone next looked (~6h after the pause), the `cosmo run` process
+was gone from `ps -ef` on the same host, in the same still-open terminal,
+with the same terminal reporting a bare `Terminated` (SIGTERM, not
+`Killed`/SIGKILL, not a crash) -- no reboot (`uptime -s` predates the run
+start), no OOM in `dmesg`, no docker container, nothing holding `cosmo.db`
+open. `cosmo`'s own source has no code path that signals its own PID --
+`os.killpg`/`SIGTERM`/`SIGKILL` only ever target a harness subprocess's
+*group*, confirmed by reading `proc/managed.py` end to end. The only
+anomaly in `journalctl` in that window is a `Clock change detected.
+Flushing caches.` burst plus three `mini_init: drop_caches` events between
+03:37-03:55Z -- WSL2's own signature for the VM being asked to shed memory
+under host pressure -- but WSL2 doesn't surface the actual kill decision to
+the Linux side, so this is the best available lead, not a proven cause.
+**Open item, not yet fixed**: an unattended run that can be silently
+SIGTERM'd by the host with zero record of why, and no supervisor to notice
+or restart it, defeats the entire "survives overnight, unattended" premise
+Phase 9's systemd unit exists for -- this is exactly the gap installing and
+using `deploy/cosmo-run.service` for real (still not done on this host)
+would close, since `Restart=on-failure` catches a signal-based kill even
+though it deliberately does *not* catch a clean `PAUSED`/`STOPPED` exit
+(see `deploy/README.md`). Worth deliberately testing (`systemctl --user`,
+no sudo needed per the Phase 9 verification) before trusting an unattended
+run on this host again.
+
+**`use-local-storage-hook` sits `blocked` (`reason: cost`) with zero
+`task_failures` rows** -- never actually attempted, just marked blocked
+when a ceiling was hit while it was next in the DAG during an earlier
+attempt at this same run. Worth `cosmo queue retry` once `scaffold-app`
+and its dependents are actually done, not before.
+
+### Open items for whoever finishes Phase 10
+
+- Install and actually exercise `deploy/cosmo-run.service` on this host
+  (`systemctl --user`, verified viable in Phase 9) so a host-level kill of
+  `cosmo run` gets a real restart instead of silent death -- the gap this
+  session's process-loss finding exposes.
+- `use-local-storage-hook`'s `cost`-blocked state needs a `queue retry`
+  once upstream tasks clear.
+- Open Item 2 (§3.3 timeout retuning against real p95 data) is still open
+  -- not enough real `IMPLEMENTING`/`VALIDATING`/`REVIEWING` durations
+  exist yet from this run alone.
+- `REVIEWING` still has zero real-`claude -p` verification -- none of the
+  tasks that have run so far have reached it.
