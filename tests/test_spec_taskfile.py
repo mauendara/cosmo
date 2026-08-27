@@ -47,6 +47,33 @@ def test_defaults_depends_on_priority_and_title(tmp_path: Path) -> None:
     assert tf.depends_on == []
     assert tf.priority == 0
     assert tf.title == "only-id"  # falls back to task_id
+    assert tf.allow_test_edits is False
+
+
+def test_allow_test_edits_true_parses(tmp_path: Path) -> None:
+    """Found live: a spec-batch task whose whole deliverable was Playwright
+    specs under a guardrailed `e2e/` path had no way to request the flag at
+    all -- `cosmo spec queue` always inserted `allow_test_edits=False`,
+    IMPLEMENTING correctly refused every write under the guard, and review
+    rejected the resulting empty submission three times running before a
+    human traced it back to the missing flag."""
+    path = _write(
+        tmp_path / "t.md",
+        "---\ntask_id: e2e-suite\nallow_test_edits: true\n---\n\nbody\n",
+    )
+
+    tf = parse_task_file(path)
+
+    assert tf.allow_test_edits is True
+
+
+def test_non_bool_allow_test_edits_raises(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path / "t.md",
+        "---\ntask_id: x\nallow_test_edits: yes-please\n---\n\nbody\n",
+    )
+    with pytest.raises(TaskFileError, match="allow_test_edits"):
+        parse_task_file(path)
 
 
 def test_missing_frontmatter_raises(tmp_path: Path) -> None:

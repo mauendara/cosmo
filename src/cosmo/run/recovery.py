@@ -54,7 +54,7 @@ class ReconcileOutcome:
 
 
 def reconcile_interrupted_tasks(
-    *, db_path: Path, writer: StoreWriter, emitter: EventEmitter, run_id: str
+    *, db_path: Path, writer: StoreWriter, emitter: EventEmitter, run_id: str | None
 ) -> ReconcileOutcome:
     """Requeues every task not in `queued`/`done`/`blocked` (crash-orphaned
     by a prior process) and marks every `run_state` row still `running` as
@@ -62,7 +62,15 @@ def reconcile_interrupted_tasks(
     resume) -- the task-level failure/transition/event rows this writes are
     attributed to it, not to whichever run originally owned the task,
     matching this being a startup fact discovered by the new run, not a
-    historical correction of the old one.
+    historical correction of the old one. `None` for `cosmo run --task`'s
+    single-task CLI path (found live: that path never called this at all,
+    so a killed `--task` invocation left its task stuck forever -- outside
+    `queued`, so invisible to `run.dag.resolve_execution_order`, and the
+    next `cosmo run --task <same-id>` refused outright with "not queued"),
+    preserving Phase 7's own "no run tracking" posture (`task_failures.
+    run_id`/`task_transitions.run_id` are nullable for exactly this reason
+    -- there is no `run_state` row for this caller's own work to attribute
+    anything to).
 
     Idempotent and cheap to call unconditionally: a healthy startup finds
     nothing to reconcile (every task is `queued`/`done`/`blocked`, every run

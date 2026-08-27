@@ -2546,15 +2546,67 @@ template or to Vite.
 | 65 | New `store.failure_signature.detect_repeat_block`/`RepeatBlock`, two new taxonomy entries (`secrets_stray_backup_artifact`, `playwright_image_version_mismatch`), `retries.repeat_block_threshold` config (default 2); `cli.main.queue_retry` refuses (reports every prior occurrence, requires `--force`) once a task's most recent terminal block repeats a prior one's class key (`failure_signature`, or `failure_stage:error_summary` when no signature classified) more than that many times | Not named in the spec | 10 | `attempt_count` resetting to 0 on every `queue retry` (deviation 47) has no memory of *why* a task kept blocking across separate runs — real evidence: `scaffold-app`'s own `error_max_turns` block recurred 3 times across 3 different runs in this project's real acceptance-run history, each time silently handed 2 more attempts. User's own framing: Cosmo should "halt and report instead of just keep on trying" once it recognizes a repeat |
 | 66 | Migration 9 (`task_queue.resume_at_stage`), `store.writer.queue_resume_at`, `task.machine.run_task(resume_at: TaskStatus = IMPLEMENTING)`; `cli.main.queue_retry` sets `resume_at_stage` instead of resetting the worktree when the most recent block was an `environment_error` at `commit`/`merge`; `queue_transition` clears the column unconditionally on every real transition (consumed exactly once) | Not named in the spec | 10 | `COMMITTING`/`MERGING` are the only two states whose own `environment_error` gets no in-run retry at all (`_do_committing`/`_do_merging` always `will_retry=False`) — every earlier stage already retries its own `environment_error` in place (deviation 19 and `_do_reviewing`'s own dual-budget design). `queue retry`'s only recovery mechanism used to discard everything back to the `PROPOSING` commit regardless, which for these two stages meant throwing away a fully `IMPLEMENTING`+`VALIDATING`+`REVIEWING`-passed candidate to redo it identically — confirmed live: a real task's `MERGING` block (target repo had unrelated uncommitted changes) was retried the old way before this existed, discarding a build/unit/e2e-green implementation for nothing. User's own framing, generalized correctly past the original single-stage report: "should this work for all states completed on retry, to not retry the ones that finished correctly" |
 | 67 | `gate.playwright_image`/`playwright_npm_version` moved from `v1.50.0-noble`/`1.50.0` down to `v1.49.0-noble`/`1.49.0` | §1.1 | 10 | Not a permanent fix by itself — see `docs/v6-project-template-aware-stuff-plan.md` for why chasing this value in Cosmo's own global config is the wrong axis long-term. Made to match what `scaffold-app`'s own `frontend/package.json` actually had pinned at the time (`docs/testing.md` in the target repo now pins `1.49.0` explicitly, closing the real gap: nothing previously told a fresh scaffold attempt which exact version to converge on, so different attempts resolved different npm versions and flip-flopped against whichever image tag was configured) |
+| 68 | `cli.main._EMIT_LIFECYCLE_INFO_TYPES` gains `TASK_STATE_CHANGED`; `_print_emit` gains a `from_state -> to_state` detail line (with `task_id` and an `HH:MM:SSZ` time prefix from `event.timestamp`) for that event type, and the interpolated detail is now passed through `rich.markup.escape` | v5 plan part 6 | 10 | v5 part 6's own stated goal was to make `TASK_STATE_CHANGED`/`RUN_PAUSED`/etc. visible in the one live terminal an operator already has open — but the shipped `_EMIT_LIFECYCLE_INFO_TYPES` allowlist only ever had `RUN_STARTED`/`RUN_RESUMED`/`RUN_SUMMARY`, so `TASK_STATE_CHANGED` (always `Severity.INFO`) was silently dropped by the `WARNING`+ filter — a live `cosmo run` showed harness tool-call chatter but never which task, what state, or when it last changed, exactly the gap the user reported live. Fixing it live surfaced a second real bug: the first version interpolated `[{task_id}]` unescaped into a Rich-markup string, which Rich silently swallows as a bogus style tag (verified by hand: the task id vanished from the printed line entirely) — fixed with `rich.markup.escape`. Two new tests in `test_cli.py` call `_print_emit` directly against a captured `Console` to guard both the filter and the escaping |
+| 69 | `task.machine._do_finishing` now commits `openspec archive`'s own output in `repo_path` (new `_git_commit_archive` helper, mirrors `_git_commit_decisions_log`'s scoped `git add`); separately, `cli.main.init` now calls a new `bootstrap.git_branch.commit_bootstrap_output` after `_ensure_git_identity`, committing whatever `openspec/`/`docs/`/`.agent/<harness>/`/root-symlink steps just wrote — skipped when `git_branch == SKIPPED_DIRTY` (a human's own pre-existing dirty tree, not Cosmo's to commit). Also: `deploy/cosmo-run.service`/`cosmo-notify.service` move `StartLimitIntervalSec`/`StartLimitBurst` from `[Service]` to `[Unit]` | §3.4 (finishing), §10.4 (init), §9.5 (deploy) | 10 | Found live, end to end, driving this session's acceptance-run queue to full completion (all 6 `todo-frontend-app` tasks reached `done`) and then deliberately exercising every item `docs/handoff.md` still listed as unvalidated. `_do_finishing`'s bug: confirmed by real `git status` on the target repo after `scaffold-app` completed -- `openspec archive` moved files but never committed them, so `todo-data-model`'s own `MERGING` immediately refused ("has uncommitted changes"); fixed and then confirmed clean across 4 more real task completions in the same run. `cosmo init`'s bug is a different, more fundamental instance of the identical symptom, found by deliberately reproducing `docs/handoff.md`'s finding-#7 mystery ("how did `.agent/claude/CLAUDE.md` go uncommitted") in a fresh scratch repo: `cosmo init` itself never committed anything it wrote -- confirmed by hand (`git status` immediately after a real `cosmo init` showed `openspec/`, `docs/`, `.agent/`, and every root symlink as untracked), and the very first task ever queued against that scratch repo hit the exact same `MERGING` refusal on its first attempt, before any task-level bug had a chance to dirty anything. A background investigation (see this table's own finding #7 note) additionally traced *one* recurrence of the original CLAUDE.md instance to `run_init`'s unconditional `sync_harness_assets` re-sync on an already-registered repo after the template moved on (`f3460b1`/`4b31b65` in the target repo's own history) -- `commit_bootstrap_output` closes both causes at once, since both leave real, committable diffs in the same working tree it already scans. The `[Service]`/`[Unit]` systemd bug was found installing both units for real as `systemctl --user` unit (no system-wide `sudo` available in this session) -- `journalctl` showed "Unknown key 'StartLimitIntervalSec' in section [Service], ignoring" on systemd 259 for *both* shipped units, meaning the documented restart-storm cap was silently inert; `cosmo-run.service` itself otherwise worked correctly for real (`Type=notify`'s `sd_notify` STATUS= string `"stopped: queue_empty"` visible in `systemctl status`, no restart on the clean `queue_empty` exit), and `cosmo-notify.service` refused to start exactly as documented (`notify.enabled is false -- nothing to watch`) with no Telegram credentials configured. Also confirmed for real this session, no code change needed: `task.machine.run_task(resume_at=MERGING)` resuming a real blocked task with zero new harness/gate calls; the Docker `--user`/`HOME` fix producing zero root-owned files across 5 more real full gate runs; `cli.main.queue_retry`'s repeat-block guard actually refusing a real retry and `--force` actually overriding it (exercised against a real blocked task with 3 seeded `task_failures` rows replaying `scaffold-app`'s own real `error_max_turns` history, since no task in this session's real queue happened to repeat-block 3 times on its own); and `run.recovery.reconcile_interrupted_tasks` requeuing a real `kill -9`-crashed task (`task.interrupted` event, `environment_error @ propose` failure row, `proposing -> queued -> proposing` in one real next `cosmo run`) -- confirmed only for the queue-driving `cosmo run` path, since `run.loop.acquire_run_lock`/`reconcile_interrupted_tasks` are never called from `cosmo run --task`'s single-task path at all, which a first attempt at this test surfaced by accident (a crashed `--task` invocation leaves both the task stuck and its harness subprocess orphaned, with nothing to recover either automatically) |
+| 70 | `cli.main.run_cmd`'s single-`--task` path now acquires the same v5 `acquire_run_lock`, calls `git.worktree.sweep_stale_worktrees` then `run.recovery.reconcile_interrupted_tasks(run_id=None)` before its own `task.status != "queued"` check -- in that order, matching `run.loop._run_queue_locked`'s own ordering exactly. `reconcile_interrupted_tasks`'s `run_id` parameter is now `str \| None` (was `str`) so this caller can pass `None`, preserving Phase 7's "no run tracking" posture for a task-level failure/transition row with no `run_state` row to attribute to (`task_failures.run_id`/`task_transitions.run_id` are both nullable for exactly this reason) | Not named in the spec | 10 | Deviation 69's own real `kill -9` test surfaced this by accident: a crashed `cosmo run --task` process left its task stuck at a non-`queued` status forever (invisible to `run.dag.resolve_execution_order`, which only considers `queued` tasks) -- the *next* `cosmo run --task <same-id>` hit the `not queued` check and refused outright, a genuine dead end with no recovery path except `queue retry` (a full fresh start, discarding the worktree). Fixing it surfaced a second, real bug on the very next real re-run: `reconcile_interrupted_tasks` alone nulls `task_queue.worktree_path` in the DB but never touches the actual git worktree/branch the crashed attempt created, so the freshly-requeued task's own `create_worktree` call collided with the still-existing `task/<spec_id>` branch and failed outright (`fatal: a branch named 'task/trivial2' already exists`, confirmed live). `sweep_stale_worktrees` is what actually removes that branch/worktree, and its own docstring's pruning rule reads each task's *current* status -- it must run *before* reconciliation flips that status to `queued`, or an already-orphaned worktree would look "safe to resume" and never get swept. Verified end to end against two consecutive real `kill -9`s in a scratch repo: first, a stale lock file confirmed the lock is now actually acquired (absent before this fix); second, a real fresh `PROPOSING` session started cleanly with no worktree collision. Two new tests in `test_cli_run.py` cover the reconciliation-before-status-check ordering and a held-lock's clean CLI error, without needing a real process kill |
 
-## Phase 10 — acceptance run (in progress)
+## Phase 10 — acceptance run — Complete
 
-The overnight acceptance run itself, not more prep, is now underway against
-`/home/dev/delta/cosmo-tests/todo-frontend-app` -- run_id
-`bdf4ab101aee484b98c7a833c014714d`, started 2026-08-27T02:26:04Z, `cosmo
-run` invoked directly (systemd was never installed on this host; see "Open
-items" below). Real, useful data has already come out of it even though the
-queue is far from drained.
+**The acceptance run against `/home/dev/delta/cosmo-tests/todo-frontend-app`
+reached full completion this session: all six queued tasks (`scaffold-app`,
+`todo-data-model`, `use-local-storage-hook`, `use-todos-hook`, `todo-ui`,
+`todo-e2e`) reached `done`.** This closes out the "in progress" state the
+rest of this section originally described. The earlier `bdf4ab101aee...`
+run's silent-SIGTERM incident (kept below, unedited, as real historical
+data about this host) predates every fix in this section and this table's
+deviations 68-70 -- it was never explained, but it also never recurred
+during this session's own several real `cosmo run`/`cosmo run --task`
+invocations, none of which involved a multi-hour in-process `sleep()` for
+a quota pause (none of this session's real attempts hit a confirmed 5h
+exhaustion).
+
+Getting there required three more real, previously-unknown bugs, on top of
+the nine found earlier in this phase (deviations 59-67) -- see deviations
+68-70 for full detail:
+
+- **68**: the live `cosmo run` terminal never actually showed
+  `TASK_STATE_CHANGED` events despite the v5 plan's own explicit intent to
+  -- the exact gap the user reported live, watching this session's first
+  `cosmo run` invocation show harness chatter but no task id, state, or
+  timestamp anywhere.
+- **69**: `task.machine._do_finishing`'s `openspec archive` step, and
+  separately `cli.main.init`'s entire bootstrap (`openspec/`, `docs/`,
+  `.agent/<harness>/`, root symlinks), both left `repo_path` permanently
+  dirty by never committing their own output -- the first blocked
+  `todo-data-model`'s `MERGING` immediately after `scaffold-app` finished;
+  the second, reproduced fresh in a scratch repo, blocks the very *first*
+  task ever queued against a newly `cosmo init`-ed repo. Both fixed. This
+  is very likely the real, previously-unexplained mechanism behind last
+  session's finding #7 (`.agent/claude/CLAUDE.md` found dirty) -- a
+  background investigation this session additionally traced one real
+  recurrence of that specific instance to `run_init`'s unconditional
+  re-sync on an already-registered repo after the template moved on.
+  Confirmed clean across 7 more real task completions total this session
+  (5 in the main acceptance run, 2 in scratch-repo verification) after the
+  fix landed.
+- **70**: `cosmo run --task` never acquired the v5 process lock or ran
+  startup crash reconciliation at all -- a real `kill -9` left a task
+  permanently stuck outside `queued` with no recovery path except
+  `queue retry`'s full fresh-start. Fixed, and fixing it surfaced a further
+  bug (reconciliation alone doesn't clean up the crashed attempt's actual
+  git worktree/branch, causing the next attempt to collide) -- also fixed.
+  Verified against two consecutive real `kill -9`s in a scratch repo.
+
+Also validated for real this session, no code changes required going in:
+`task.machine.run_task(resume_at=MERGING)` resuming a real blocked task
+with zero new harness/gate calls (deviation 66, first real exercise);
+`gate.docker_runner`'s `--user`/`HOME` fix (deviation 63) producing zero
+root-owned files across every real gate run this session, not just each
+image in isolation; `cli.main.queue_retry`'s repeat-block guard (deviation
+65) actually refusing a real retry and `--force` actually overriding it.
+
+The rest of this section (the earlier `bdf4ab101aee...` run's own findings)
+is kept as-is below for its real, still-relevant data about this host.
 
 **A real, confirmed quota exhaustion happened and was handled correctly by
 the run-level state machine.** `scaffold-app` reached real `IMPLEMENTING`,
@@ -2595,51 +2647,72 @@ though it deliberately does *not* catch a clean `PAUSED`/`STOPPED` exit
 no sudo needed per the Phase 9 verification) before trusting an unattended
 run on this host again.
 
-**`use-local-storage-hook` sits `blocked` (`reason: cost`) with zero
-`task_failures` rows** -- never actually attempted, just marked blocked
-when a ceiling was hit while it was next in the DAG during an earlier
-attempt at this same run. Worth `cosmo queue retry` once `scaffold-app`
-and its dependents are actually done, not before.
+**`use-local-storage-hook`'s old `blocked` (`reason: cost`) state was
+resolved this session** -- `cosmo queue retry` once `scaffold-app` and its
+dependents were done, then a real run drove it (and every task queued
+behind it) to `done`. No longer open.
 
-### Open items for whoever finishes Phase 10
+### Open items -- updated this session, several closed for real
 
-- Install and actually exercise `deploy/cosmo-run.service` on this host
-  (`systemctl --user`, verified viable in Phase 9) so a host-level kill of
-  `cosmo run` gets a real restart instead of silent death -- the gap this
-  session's process-loss finding exposes.
-- `use-local-storage-hook`'s `cost`-blocked state needs a `queue retry`
-  once upstream tasks clear.
-- Open Item 2 (§3.3 timeout retuning against real p95 data) is still open
-  -- not enough real `IMPLEMENTING`/`VALIDATING`/`REVIEWING` durations
-  exist yet from this run alone.
-- `REVIEWING` still has zero real-`claude -p` verification -- none of the
-  tasks that have run so far have reached it.
-- **New, from the v5 improvements plan work (see that section below for
-  what shipped) -- all validation/acceptance of already-implemented code,
-  not further implementation:**
-  - A real Telegram bot token/chat id actually receiving a message end to
-    end via `cosmo notify watch` (`TelegramSink.send`'s real HTTP call is
-    unverified; its message formatting is unit-tested).
-  - A real `kill -9` of a `cosmo run` process mid-`IMPLEMENTING`/
-    `VALIDATING` against a real target repo, confirming the *next*
-    `cosmo run` picks the task back up via `run.recovery.
-    reconcile_interrupted_tasks` -- proven so far only by seeding a
-    crashed-looking DB state by hand and by this session's own real
-    process-loss incident above (which predates the fix), not by an actual
-    kill against code that has the fix.
-  - A real `cosmo run resume` against a real circuit-breaker-tripped or
-    quota-paused run from this same acceptance run -- directly applicable
-    to the `bdf4ab101aee...` run above once its quota window clears.
-  - A real `bypass_5h_with_credits=true` run against an account whose
-    usage credits are actually covering calls past a confirmed 5-hour
-    window, confirming `QUOTA_BYPASSED` fires and the run keeps going.
-  - `cosmo notify watch`'s `stale_after_seconds=1800` default and the
-    severity/allowlist notification rules, confirmed or retuned against a
-    real multi-hour run with a real sink attached -- same "confirm or
-    retune against real data" posture as Open Item 2's timeout retuning.
-  - Whether `deploy/cosmo-notify.service` actually survives alongside
-    `deploy/cosmo-run.service` under the same `systemctl --user` real
-    verification the first open item above calls for.
+Closed this session, with real evidence (not just code review) -- see
+deviations 68-70 above for detail:
+
+- ~~Install and actually exercise `deploy/cosmo-run.service`~~ -- done as
+  a real `systemctl --user` install (no system-wide `sudo` available in
+  this session; see deploy/README.md's own install instructions for the
+  system-wide path a future session with `sudo` should still verify).
+  `Type=notify`'s `sd_notify` STATUS= string was visible in `systemctl
+  status` for real, and a real bug in the shipped unit files
+  (`StartLimitIntervalSec`/`StartLimitBurst` needed `[Unit]`, not
+  `[Service]` -- systemd 259 silently rejected them) was found and fixed.
+- ~~`use-local-storage-hook`'s cost-blocked state~~ -- retried and
+  completed for real.
+- ~~A real `kill -9` of a `cosmo run` process, confirming the *next*
+  `cosmo run` picks the task back up~~ -- done, for both the queue-driving
+  path (already had the machinery) and `cosmo run --task` (didn't, until
+  deviation 70).
+- ~~`cli.main.queue_retry`'s repeat-block guard actually refusing a real
+  retry~~ -- done, against a real blocked task with 3 seeded
+  `task_failures` rows replaying `scaffold-app`'s own real historical
+  `error_max_turns` pattern (no task in this session's own real queue
+  happened to repeat-block 3 times on its own to exercise it more
+  organically).
+
+Still open:
+
+- **A real system-wide (`sudo cp .../etc/systemd/system/`) install** of
+  both units, as `deploy/README.md` actually documents for production --
+  this session's install was user-scope only, for lack of `sudo` access.
+- **`REVIEWING` and `VALIDATING` timeout data exists now but hasn't been
+  formally retuned (Open Item 2, §3.3)**: 8 more real `REVIEWING` passes
+  this session ran 33s-161s (`reviewing_wall=900s` -- comfortable margin);
+  `todo-e2e`'s two failing real `VALIDATING` attempts each took ~24-25
+  real minutes (`validating_wall=2700s` -- over half the budget on a
+  slow-failing e2e suite, the first real data point suggesting this value
+  is worth revisiting, not just guessed at). Retuning itself -- picking
+  new numbers -- is still a decision nobody has made, not a fact nobody
+  has gathered.
+- **A real Telegram bot token/chat id actually receiving a message end to
+  end** via `cosmo notify watch` -- blocked on not having credentials to
+  test with this session; `cosmo-notify.service`'s *refusal* to start
+  without them was confirmed for real instead (`notify.enabled is false
+  -- nothing to watch`, exactly as documented).
+  `TelegramSink.send`'s real HTTP call itself remains unverified.
+  `cosmo notify watch`'s `stale_after_seconds=1800` default and the
+  severity/allowlist rules are likewise still unconfirmed against a real
+  multi-hour run with a real sink attached.
+  Whether `deploy/cosmo-notify.service` survives long-term alongside
+  `deploy/cosmo-run.service` also remains unconfirmed beyond this
+  session's brief real check (it does start correctly; long-run
+  coexistence wasn't tested).
+- **A real `cosmo run resume` against a real circuit-breaker-tripped or
+  quota-paused run** -- no task in this session's own real queue tripped
+  either condition, so this specific command was never exercised for
+  real (as opposed to `reconcile_interrupted_tasks`, which was).
+- **A real `bypass_5h_with_credits=true` run** against an account whose
+  usage credits are actually covering calls past a confirmed 5-hour
+  window -- needs a real, deliberate quota-exhaustion window to test
+  against, not something to force casually (real spend, real waiting).
 
 ## v5 improvements plan — Implemented
 

@@ -201,6 +201,33 @@ def test_spec_queue_inserts_one_task_per_file_with_the_right_batch_id(tmp_path: 
     assert tasks["demo-frontend"].spec_batch_id == "demo-spec"
     assert tasks["demo-backend"].priority == 1
     assert tasks["demo-frontend"].priority == 0
+    assert tasks["demo-backend"].allow_test_edits is False
+    assert tasks["demo-frontend"].allow_test_edits is False
+
+
+def test_spec_queue_threads_allow_test_edits_through_from_frontmatter(tmp_path: Path) -> None:
+    """Found live: `cosmo spec queue` used to insert every task with
+    `allow_test_edits=False` unconditionally, no matter what the *-task.md
+    frontmatter said -- there was no field for it to say anything at all.
+    A task whose deliverable lived entirely under a guardrailed `e2e/` path
+    then had every write denied, submitted an empty implementation, and was
+    rejected by review three times running before a human traced it back to
+    the missing flag."""
+    repo = tmp_path / "target"
+    repo.mkdir()
+    _register(repo)
+    _write_task_file(
+        repo,
+        "demo",
+        "e2e-task.md",
+        "---\ntask_id: demo-e2e\nallow_test_edits: true\ntitle: E2E\n---\n\nbody\n",
+    )
+
+    result = runner.invoke(app, ["spec", "queue", "demo", "--repo", str(repo)])
+
+    assert result.exit_code == 0, result.stdout
+    tasks = {t.task_id: t for t in list_tasks(_db_path())}
+    assert tasks["demo-e2e"].allow_test_edits is True
 
 
 def test_spec_queue_with_no_task_files_fails_loudly(tmp_path: Path) -> None:

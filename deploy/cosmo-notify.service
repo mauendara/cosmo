@@ -6,6 +6,11 @@ Description=Cosmo notification watcher (v5 improvements plan part 3)
 # anything -- it must be able to run (and alert) independently.
 After=network-online.target
 Wants=network-online.target
+# Found live (real `systemctl --user` install, this session): systemd 259
+# rejects these two under `[Service]` outright ("Unknown key ... ignoring"
+# in the journal) -- they belong here, in `[Unit]`.
+StartLimitIntervalSec=3600
+StartLimitBurst=20
 
 [Service]
 Type=simple
@@ -21,8 +26,8 @@ ExecStart=/opt/cosmo/.venv/bin/cosmo notify watch
 # unconditionally.
 Restart=always
 RestartSec=15
-StartLimitIntervalSec=3600
-StartLimitBurst=20
+# The actual rate-limit directives now live in `[Unit]` above (see that
+# comment) -- systemd rejects them here.
 
 [Install]
 WantedBy=multi-user.target

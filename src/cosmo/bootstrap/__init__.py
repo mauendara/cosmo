@@ -18,6 +18,7 @@ from cosmo.bootstrap.discover import (
     templates_root,
 )
 from cosmo.bootstrap.docs import DocsCopyResult, copy_project_docs
+from cosmo.bootstrap.git_branch import commit_bootstrap_output
 from cosmo.bootstrap.git_identity import GitIdentity, read_configured_identity, set_local_identity
 from cosmo.bootstrap.hashing import compute_template_version
 from cosmo.bootstrap.init import GitBranchOutcome, InitResult, run_init
@@ -41,6 +42,7 @@ __all__ = [
     "TemplatesListing",
     "TemplatesRootNotFoundError",
     "archive_change",
+    "commit_bootstrap_output",
     "compute_template_version",
     "copy_project_docs",
     "create_root_symlinks",

@@ -45,11 +45,29 @@ task_id: <task>
 depends_on: [<other-task-id>, ...]   # omit or [] if none
 priority: 0                          # higher runs first among eligible tasks; optional, default 0
 title: <short human-readable title>
+allow_test_edits: true               # omit unless required -- see below
 ---
 
 <the enriched task description -- specific enough that a fresh session with
 no other context can implement it correctly.>
 ```
+
+### `allow_test_edits`
+
+Omit this key (it defaults to `false`) unless the task's own deliverable
+requires writing or editing files under a guardrailed test path: `src/test/**`,
+`e2e/**`, or anything matching `**/*.spec.ts(x)` / `**/*.test.ts(x)` /
+`**/*.spec.jsx` / `**/*.test.jsx` (this repo's own `CLAUDE.md` names the same
+list under "Guardrails"). That guard is enforced during `IMPLEMENTING` and
+fails closed: a task that needs to write there but wasn't queued with this
+flag set will find every such edit denied, correctly leave the corresponding
+`tasks.md` subtasks unchecked, and submit nothing for that part of the work --
+which review then has no choice but to reject, sending the task through
+retries it cannot actually pass. If a task you're writing is an e2e suite, a
+new unit-test file, or otherwise centers on adding test coverage rather than
+application code, set `allow_test_edits: true` on it here, at decomposition
+time -- there is no way to add the flag to an already-queued task later
+except discarding and re-adding it.
 
 "Enriched" means the body answers these, to the extent each one actually
 applies to this task -- don't force a section that has nothing to say:

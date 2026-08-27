@@ -7,6 +7,13 @@ Description=Cosmo autonomous run loop (spec 1, 9.5)
 # or a sidecar), and `cosmo doctor` already re-verifies this every start.
 After=network-online.target docker.service
 Wants=network-online.target
+# Found live (real `systemctl --user` install, this session): systemd 259
+# rejects these two under `[Service]` outright ("Unknown key ... ignoring"
+# in the journal) -- they belong here, in `[Unit]`. Left under `[Service]`,
+# the restart-storm cap this comment block elsewhere describes silently
+# never applied at all.
+StartLimitIntervalSec=3600
+StartLimitBurst=5
 
 [Service]
 Type=notify
@@ -51,9 +58,8 @@ Restart=on-failure
 RestartPreventExitStatus=1
 RestartSec=30
 # Caps runaway restart attempts if something keeps crash-looping despite
-# the exclusion above (e.g. a real bug, not a deliberate stop).
-StartLimitIntervalSec=3600
-StartLimitBurst=5
+# the exclusion above (e.g. a real bug, not a deliberate stop) -- the
+# actual directives now live in `[Unit]` above (see that comment).
 
 # Spec 9.5: OOMPolicy=stop (never silently respawn into the same memory
 # pressure that just killed it) and real memory accounting so `systemctl

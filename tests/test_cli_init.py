@@ -94,6 +94,67 @@ def test_init_against_a_scratch_git_repo_produces_every_documented_artifact(
     subprocess.run(["which", "openspec"], capture_output=True, check=False).returncode != 0,
     reason="real openspec CLI not on PATH",
 )
+def test_init_commits_its_own_bootstrap_output(tmp_path: Path) -> None:
+    """Found live: `cosmo init` never committed `openspec/`, `docs/`,
+    `.agent/<harness>/`, or the root symlinks on its own -- confirmed by
+    hand against a real scratch repo, where the very first task ever run
+    against it hit `MERGING`'s `_assert_ready` refusing to merge onto a
+    dirty `repo_path`, before any task-level bug had a chance to dirty
+    anything. `cosmo init` must leave the target repo on a clean, real
+    commit -- not just an unborn-or-dirty branch -- so the first `cosmo
+    run` doesn't inherit init's own leftovers."""
+    target = _git_repo(tmp_path)
+
+    result = runner.invoke(app, ["init", str(target)], input="\n")
+
+    assert result.exit_code == 0, result.stdout
+    assert "committed" in result.stdout
+    status = subprocess.run(
+        ["git", "-C", str(target), "status", "--porcelain"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert status.stdout.strip() == "", f"target left dirty after init: {status.stdout!r}"
+    log = subprocess.run(
+        ["git", "-C", str(target), "log", "-1", "--format=%s"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "init bootstrap" in log.stdout
+
+
+@pytest.mark.skipif(
+    subprocess.run(["which", "openspec"], capture_output=True, check=False).returncode != 0,
+    reason="real openspec CLI not on PATH",
+)
+def test_init_does_not_auto_commit_pre_existing_dirty_work(tmp_path: Path) -> None:
+    """The `SKIPPED_DIRTY` case is a human's own unrelated in-progress work
+    that predates `cosmo init` entirely -- folding it into an "init
+    bootstrap" commit on their behalf would be a real surprise, not a fix."""
+    target = tmp_path / "dirty-repo"
+    target.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=target, check=True)
+    (target / "untracked.txt").write_text("someone's own work in progress\n")
+
+    result = runner.invoke(app, ["init", str(target)], input="\n")
+
+    assert result.exit_code == 0, result.stdout
+    assert "init bootstrap output" not in result.stdout
+    status = subprocess.run(
+        ["git", "-C", str(target), "status", "--porcelain"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "untracked.txt" in status.stdout
+
+
+@pytest.mark.skipif(
+    subprocess.run(["which", "openspec"], capture_output=True, check=False).returncode != 0,
+    reason="real openspec CLI not on PATH",
+)
 def test_rerunning_init_reports_skipped_docs_and_refreshes_agent_dir(tmp_path: Path) -> None:
     target = _git_repo(tmp_path)
     runner.invoke(app, ["init", str(target)], input="\n")

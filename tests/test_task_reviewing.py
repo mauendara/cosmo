@@ -14,6 +14,9 @@ import subprocess
 from collections.abc import Callable
 from pathlib import Path
 
+import pytest
+
+from cosmo.bootstrap.openspec import ensure_openspec_initialized
 from cosmo.config import CosmoConfig, load_config
 from cosmo.events import EventEmitter
 from cosmo.gate.fake import FakeGate, ScriptedGateResult
@@ -24,9 +27,13 @@ from cosmo.harness.fake import FakeHarnessAdapter, FakeOutcome, ScriptedCall
 from cosmo.store import StoreWriter
 from cosmo.store.enums import FailureStage, TaskStatus
 from cosmo.store.reader import get_task, list_events, list_task_failures
-from cosmo.task.machine import run_task
+from cosmo.task.machine import _do_finishing, run_task
 from cosmo.task.review import review_result_path
 from cosmo.task.types import TaskContext
+
+_OPENSPEC_ON_PATH = (
+    subprocess.run(["which", "openspec"], capture_output=True, check=False).returncode == 0
+)
 
 NO_USER_CONFIG = Path("/nonexistent/config.toml")
 
@@ -309,5 +316,62 @@ def test_finishing_never_blocks_a_task_when_archive_fails(tmp_path: Path) -> Non
             for e in reversed(list_events(cfg.paths.db_path, task_id=ctx.task_id, limit=200))
         ]
         assert "task.finishing_failed" in event_types
+    finally:
+        writer.close()
+
+
+@pytest.mark.skipif(not _OPENSPEC_ON_PATH, reason="real openspec CLI not on PATH")
+def test_do_finishing_commits_the_archive_so_repo_path_stays_clean(tmp_path: Path) -> None:
+    """Found live: `openspec archive` mutates `repo_path`'s working tree
+    (moves the change under `openspec/changes/archive/`, rewrites
+    `openspec/specs/`) but never commits the result on its own -- every
+    earlier version of `_do_finishing` left `repo_path` dirty after every
+    single completed task, which then made the *next* task's `MERGING` step
+    (`git.merge._assert_ready`) refuse to merge at all ("has uncommitted
+    changes -- refusing to merge"). Confirmed against a real two-task run,
+    not just inferred. `_do_finishing` must leave `repo_path` exactly as
+    clean as `_assert_ready` requires it to be."""
+    cfg = _fast_config(tmp_path)
+    repo = _repo_on_develop(tmp_path)
+    ensure_openspec_initialized(repo)
+    subprocess.run(
+        ["openspec", "new", "change", "add-foo"], cwd=repo, check=True, capture_output=True
+    )
+    _git(repo, "add", "-A")
+    _git(
+        repo,
+        "-c",
+        "user.name=t",
+        "-c",
+        "user.email=t@example.com",
+        "commit",
+        "-q",
+        "-m",
+        "openspec change: add-foo",
+    )
+
+    writer = StoreWriter(cfg.paths.db_path)
+    emitter = EventEmitter(writer)
+    ctx = TaskContext(
+        task_id="add-foo",
+        spec_path="openspec/changes/add-foo",
+        worktree_path=repo,
+        branch="develop",
+        base_branch="develop",
+        allow_test_edits=False,
+        max_attempts=1,
+    )
+
+    try:
+        _do_finishing(ctx=ctx, repo_path=repo, config=cfg, emitter=emitter, run_id=None)
+
+        status = _git(repo, "status", "--porcelain")
+        assert status.stdout.strip() == "", (
+            f"repo_path left dirty after _do_finishing: {status.stdout!r}"
+        )
+        assert not (repo / "openspec" / "changes" / "add-foo").exists()
+
+        log = _git(repo, "log", "-1", "--format=%s")
+        assert "archive" in log.stdout
     finally:
         writer.close()

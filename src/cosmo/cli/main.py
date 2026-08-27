@@ -18,6 +18,7 @@ from typing import Annotated, Any
 import typer
 from pydantic import ValidationError
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
 
 from cosmo import __version__
@@ -26,6 +27,7 @@ from cosmo.bootstrap import (
     GitIdentity,
     OpenSpecInitError,
     TemplatesRootNotFoundError,
+    commit_bootstrap_output,
     list_templates,
     read_configured_identity,
     run_init,
@@ -44,6 +46,7 @@ from cosmo.git.worktree import (
     find_last_commit_touching,
     remove_worktree,
     reset_worktree_to_commit,
+    sweep_stale_worktrees,
 )
 from cosmo.harness import (
     UnknownHarnessError,
@@ -56,7 +59,7 @@ from cosmo.notify.telegram import TelegramSink
 from cosmo.notify.watch import run_watch_loop
 from cosmo.run.dag import DagCycleError, find_cycle, resolve_execution_order
 from cosmo.run.loop import run_queue
-from cosmo.run.recovery import RunLockHeldError
+from cosmo.run.recovery import RunLockHeldError, acquire_run_lock, reconcile_interrupted_tasks
 from cosmo.run.types import RunOutcome
 from cosmo.spec import SpecTaskFile, TaskFileError, list_task_files
 from cosmo.store import StoreWriter, TaskNotFoundError
@@ -126,7 +129,12 @@ def _print_activity(line: str) -> None:
 
 
 _EMIT_LIFECYCLE_INFO_TYPES = frozenset(
-    {EventType.RUN_STARTED.value, EventType.RUN_RESUMED.value, EventType.RUN_SUMMARY.value}
+    {
+        EventType.RUN_STARTED.value,
+        EventType.RUN_RESUMED.value,
+        EventType.RUN_SUMMARY.value,
+        EventType.TASK_STATE_CHANGED.value,
+    }
 )
 _EMIT_SEVERITY_STYLE = {"info": "cyan", "warning": "yellow", "error": "red", "critical": "bold red"}
 
@@ -150,7 +158,15 @@ def _print_emit(event: Event) -> None:
         if isinstance(resume_delay, (int, float)):
             eta = datetime.now(UTC) + timedelta(seconds=resume_delay)
             detail = f" (resume at {eta.strftime('%Y-%m-%dT%H:%MZ')})"
-    console.print(f"[bold {style}]>> {event.event_type}[/bold {style}]{detail}")
+    elif event.event_type == EventType.TASK_STATE_CHANGED.value:
+        from_state = event.payload.get("from_state")
+        to_state = event.payload.get("to_state")
+        detail = escape(f" [{event.task_id}] {from_state} -> {to_state}")
+    try:
+        when = datetime.fromisoformat(event.timestamp).strftime("%H:%M:%SZ")
+    except ValueError:
+        when = event.timestamp
+    console.print(f"[dim]{when}[/dim] [bold {style}]>> {event.event_type}[/bold {style}]{detail}")
 
 
 ConfigOption = Annotated[
@@ -509,83 +525,121 @@ def run_cmd(
         )
         return
 
-    task = get_task(cfg.paths.db_path, task_id)
-    if task is None:
-        err_console.print(f"[red]no such task: {task_id!r}[/red]")
-        raise typer.Exit(code=1)
-    if task.status != "queued":
-        err_console.print(f"[red]task {task_id!r} is {task.status!r}, not queued[/red]")
-        raise typer.Exit(code=1)
-
-    resolved_base = base_branch if base_branch is not None else cfg.git.base_branch
-    name, source = resolve_harness_name(harness, project_harness, cfg.harness.name)
-    console.print(f"harness: [bold]{name}[/bold] (from {source})")
+    # Found live: this single-task path never acquired the v5 improvements
+    # plan part 1 process lock or ran its startup crash reconciliation at
+    # all -- both only ever lived in `run.loop.run_queue`. A real `kill -9`
+    # against a `cosmo run --task` process left the task stuck at whatever
+    # non-`queued` status it was mid-attempt (invisible to `run.dag.
+    # resolve_execution_order`, which only ever considers `queued` tasks),
+    # and the *next* `cosmo run --task <same-id>` hit the `not queued` check
+    # below and refused outright -- a genuine dead end, not recoverable
+    # without a human reaching for `queue retry` instead. `run_id=None`
+    # throughout (reconciliation included) preserves this path's own "no
+    # run tracking" posture (`task.machine.run_task`'s own docstring) --
+    # there is no `run_state` row here for anything to attribute to.
     try:
-        adapter = get_adapter(name)(cfg)
-    except UnknownHarnessError as exc:
+        lock = acquire_run_lock(cfg.paths.data_dir)
+    except RunLockHeldError as exc:
         err_console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=1) from None
-
-    writer = StoreWriter(cfg.paths.db_path)
     try:
-        emitter = EventEmitter(writer, on_emit=_print_emit)
-        run_id = uuid.uuid4().hex
-        spec_id = Path(task.spec_path).stem
-        branch = f"task/{spec_id}"
-        if task.worktree_path is not None and Path(task.worktree_path).is_dir():
-            # Same reuse rule as `run.loop._run_one_task` (spec 3.2): a
-            # `QUEUED` task whose `worktree_path` is still set has a worktree
-            # mid-lifecycle, not abandoned (`cli.main.queue_retry` is the
-            # only place that ever clears it, and only after physically
-            # removing the worktree). Found by hand, driving the fix for a
-            # real blocked task through this single-task path rather than
-            # the DAG loop: `create_worktree` always names the branch
-            # `task/<spec_id>` regardless of `run_id`, so calling it
-            # unconditionally here collided with the still-checked-out
-            # branch from the worktree `queue retry` had just kept, and
-            # `cosmo run --task` failed outright before ever invoking the
-            # harness.
-            info = WorktreeInfo(task_id=task_id, branch=branch, path=Path(task.worktree_path))
-        else:
-            info = create_worktree(
-                repo_path=resolved_repo,
-                work_dir=cfg.paths.work_dir,
-                run_id=run_id,
+        writer = StoreWriter(cfg.paths.db_path)
+        try:
+            emitter = EventEmitter(writer, on_emit=_print_emit)
+            # Must run *before* reconciliation, same order `run.loop.
+            # _run_queue_locked` uses and for the same reason: this sweep's
+            # own "prune anything not blocked/queued" rule reads each task's
+            # *current* status, still `proposing`/`implementing`/etc. at
+            # this point -- reconciliation flips it to `queued` a few lines
+            # down, which would make an already-orphaned worktree look
+            # "safe to resume" and never get removed. Found live: without
+            # this, reconciliation alone requeues the task but leaves its
+            # crashed attempt's worktree and branch on disk, so the fresh
+            # `create_worktree` call below collides with the still-existing
+            # `task/<spec_id>` branch and fails outright.
+            sweep_stale_worktrees(
+                repo_path=resolved_repo, work_dir=cfg.paths.work_dir, db_path=cfg.paths.db_path
+            )
+            reconcile_interrupted_tasks(
+                db_path=cfg.paths.db_path, writer=writer, emitter=emitter, run_id=None
+            )
+
+            task = get_task(cfg.paths.db_path, task_id)
+            if task is None:
+                err_console.print(f"[red]no such task: {task_id!r}[/red]")
+                raise typer.Exit(code=1)
+            if task.status != "queued":
+                err_console.print(f"[red]task {task_id!r} is {task.status!r}, not queued[/red]")
+                raise typer.Exit(code=1)
+
+            resolved_base = base_branch if base_branch is not None else cfg.git.base_branch
+            name, source = resolve_harness_name(harness, project_harness, cfg.harness.name)
+            console.print(f"harness: [bold]{name}[/bold] (from {source})")
+            try:
+                adapter = get_adapter(name)(cfg)
+            except UnknownHarnessError as exc:
+                err_console.print(f"[red]{exc}[/red]")
+                raise typer.Exit(code=1) from None
+
+            run_id = uuid.uuid4().hex
+            spec_id = Path(task.spec_path).stem
+            branch = f"task/{spec_id}"
+            if task.worktree_path is not None and Path(task.worktree_path).is_dir():
+                # Same reuse rule as `run.loop._run_one_task` (spec 3.2): a
+                # `QUEUED` task whose `worktree_path` is still set has a
+                # worktree mid-lifecycle, not abandoned (`cli.main.
+                # queue_retry` is the only place that ever clears it, and
+                # only after physically removing the worktree). Found by
+                # hand, driving the fix for a real blocked task through this
+                # single-task path rather than the DAG loop: `create_
+                # worktree` always names the branch `task/<spec_id>`
+                # regardless of `run_id`, so calling it unconditionally here
+                # collided with the still-checked-out branch from the
+                # worktree `queue retry` had just kept, and `cosmo run
+                # --task` failed outright before ever invoking the harness.
+                info = WorktreeInfo(task_id=task_id, branch=branch, path=Path(task.worktree_path))
+            else:
+                info = create_worktree(
+                    repo_path=resolved_repo,
+                    work_dir=cfg.paths.work_dir,
+                    run_id=run_id,
+                    task_id=task_id,
+                    spec_id=spec_id,
+                    base_branch=resolved_base,
+                    harness=name,
+                    writer=writer,
+                    emitter=emitter,
+                )
+            adapter.cwd = info.path
+
+            ctx = TaskContext(
                 task_id=task_id,
-                spec_id=spec_id,
+                spec_path=task.spec_path,
+                worktree_path=info.path,
+                branch=info.branch,
                 base_branch=resolved_base,
-                harness=name,
+                allow_test_edits=task.allow_test_edits,
+                max_attempts=task.max_attempts,
+            )
+            resume_at = (
+                TaskStatus(task.resume_at_stage)
+                if task.resume_at_stage is not None
+                else TaskStatus.IMPLEMENTING
+            )
+            final_status = run_task(
+                ctx=ctx,
+                config=cfg,
                 writer=writer,
                 emitter=emitter,
+                adapter=adapter,
+                repo_path=resolved_repo,
+                on_activity=_print_activity,
+                resume_at=resume_at,
             )
-        adapter.cwd = info.path
-
-        ctx = TaskContext(
-            task_id=task_id,
-            spec_path=task.spec_path,
-            worktree_path=info.path,
-            branch=info.branch,
-            base_branch=resolved_base,
-            allow_test_edits=task.allow_test_edits,
-            max_attempts=task.max_attempts,
-        )
-        resume_at = (
-            TaskStatus(task.resume_at_stage)
-            if task.resume_at_stage is not None
-            else TaskStatus.IMPLEMENTING
-        )
-        final_status = run_task(
-            ctx=ctx,
-            config=cfg,
-            writer=writer,
-            emitter=emitter,
-            adapter=adapter,
-            repo_path=resolved_repo,
-            on_activity=_print_activity,
-            resume_at=resume_at,
-        )
+        finally:
+            writer.close()
     finally:
-        writer.close()
+        lock.release()
 
     style = "green" if final_status is TaskStatus.DONE else "yellow"
     console.print(f"[{style}]{final_status.value}[/{style}] {task_id}")
@@ -920,6 +974,17 @@ def init(
     )
     _ensure_git_identity(result.target, cfg, git_author_name, git_author_email)
 
+    # Found live: none of the steps above commit anything on their own --
+    # `openspec/`, `docs/`, `.agent/<harness>/`, and the root symlinks all
+    # land as plain working-tree changes. Skipped when the tree was already
+    # dirty *before* any of this ran (`SKIPPED_DIRTY`) -- that's a human's
+    # own unrelated in-progress work, not something `cosmo init` should
+    # fold into a commit on their behalf.
+    if result.git_branch != GitBranchOutcome.SKIPPED_DIRTY and commit_bootstrap_output(
+        result.target
+    ):
+        console.print("[green]committed[/green] init bootstrap output")
+
 
 def _ensure_git_identity(
     target: Path,
@@ -1153,11 +1218,16 @@ def _spec_tasks_dir(repo: Path, name: str) -> Path:
 
 def _render_spec_preview(name: str, task_files: list[SpecTaskFile]) -> None:
     table = Table(title=f"{name}-spec tasks", title_justify="left")
-    for col in ("task_id", "title", "depends_on", "priority", "file"):
+    for col in ("task_id", "title", "depends_on", "priority", "allow_test_edits", "file"):
         table.add_column(col)
     for tf in task_files:
         table.add_row(
-            tf.task_id, tf.title, ", ".join(tf.depends_on) or "-", str(tf.priority), tf.path.name
+            tf.task_id,
+            tf.title,
+            ", ".join(tf.depends_on) or "-",
+            str(tf.priority),
+            "yes" if tf.allow_test_edits else "-",
+            tf.path.name,
         )
     console.print(table)
 
@@ -1237,7 +1307,8 @@ def spec_add(
         f"docs/backend/, docs/frontend/, docs/data-model.md, and "
         f"docs/base-standards.md, then decompose it into one "
         f"docs/specs/{name}-spec/tasks/<task>-task.md file per identified unit "
-        f"of work, each with task_id/depends_on/priority/title frontmatter."
+        f"of work, each with task_id/depends_on/priority/title/allow_test_edits "
+        f"frontmatter (the skill explains when allow_test_edits is required)."
     )
     timeout_s = timeout if timeout is not None else float(cfg.timeouts.proposing_wall)
     result_box: list[HarnessResult] = []
@@ -1320,6 +1391,7 @@ def spec_queue(
                 depends_on=tf.depends_on,
                 priority=tf.priority,
                 max_attempts=cfg.retries.max_attempts,
+                allow_test_edits=tf.allow_test_edits,
                 spec_batch_id=spec_batch_id,
             )
             emit_state_changed(EventEmitter(writer), result)

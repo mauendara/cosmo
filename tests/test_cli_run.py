@@ -109,6 +109,71 @@ def test_run_rejects_a_task_that_is_not_queued(tmp_path: Path) -> None:
     assert "not queued" in result.output
 
 
+def test_run_task_reconciles_a_crash_orphaned_task_before_the_status_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Found live: `cosmo run --task` never called `run.recovery.
+    reconcile_interrupted_tasks` at all -- a real `kill -9` against a
+    `cosmo run --task` process left the task stuck at whatever non-`queued`
+    status it was mid-attempt, and the *next* `cosmo run --task <same-id>`
+    hit the `not queued` check and refused outright, forever, with no way
+    to recover short of `queue retry` (a genuine fresh start, discarding
+    the worktree). Simulates the crash directly (no real process kill
+    needed to set this up, matching this project's own fake/unit-coverage
+    convention) by pushing the task straight to `implementing` -- the
+    status a real crash mid-`IMPLEMENTING` would leave behind."""
+    repo = _repo_on_develop(tmp_path)
+    runner.invoke(app, ["queue", "add", "openspec/changes/add-foo", "--task-id", "add-foo"])
+    db_path = load_config().paths.db_path
+    writer = StoreWriter(db_path)
+    try:
+        writer.queue_transition("add-foo", TaskStatus.PROPOSING)
+        writer.queue_transition("add-foo", TaskStatus.PROPOSED)
+        writer.queue_transition("add-foo", TaskStatus.IMPLEMENTING)
+    finally:
+        writer.close()
+
+    def _fake_run_task(*, ctx: TaskContext, **kwargs: Any) -> TaskStatus:
+        return TaskStatus.DONE
+
+    monkeypatch.setattr(cli_main, "run_task", _fake_run_task)
+
+    result = runner.invoke(app, ["run", "--task", "add-foo", "--repo", str(repo)])
+
+    assert result.exit_code == 0, result.output
+    assert "not queued" not in result.output
+    assert "done" in result.output
+
+    from cosmo.store.reader import list_events, list_task_failures
+
+    events = list_events(db_path, task_id="add-foo", limit=200)
+    assert any(e.event_type == "task.interrupted" for e in events)
+    failures = list_task_failures(db_path, "add-foo")
+    assert any(
+        f.failure_type == "environment_error" and f.run_id is None and "crashed" in f.error_summary
+        for f in failures
+    )
+
+
+def test_run_task_reports_a_held_run_lock_cleanly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _repo_on_develop(tmp_path)
+    runner.invoke(app, ["queue", "add", "openspec/changes/add-foo", "--task-id", "add-foo"])
+
+    from cosmo.run.recovery import RunLockHeldError
+
+    def _fake_acquire_run_lock(data_dir: Path) -> None:
+        raise RunLockHeldError(f"another cosmo run already holds a lock in {data_dir}")
+
+    monkeypatch.setattr(cli_main, "acquire_run_lock", _fake_acquire_run_lock)
+
+    result = runner.invoke(app, ["run", "--task", "add-foo", "--repo", str(repo)])
+
+    assert result.exit_code == 1
+    assert "already holds a lock" in result.output
+
+
 def test_run_creates_the_worktree_and_drives_run_task_to_done(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

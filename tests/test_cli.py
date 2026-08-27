@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import subprocess
 from pathlib import Path
 
@@ -9,12 +10,14 @@ import pytest
 from typer.testing import CliRunner
 
 from cosmo import __version__
+from cosmo.cli import main as cli_main
 from cosmo.cli.main import app
 from cosmo.config import load_config
 from cosmo.events import EventEmitter
+from cosmo.events.envelope import Event, EventType
 from cosmo.git.worktree import create_worktree
 from cosmo.store import StoreWriter, find_project_by_path
-from cosmo.store.enums import BlockedReason, FailureStage, FailureType, NextAction
+from cosmo.store.enums import BlockedReason, FailureStage, FailureType, NextAction, Severity
 from cosmo.store.reader import get_task
 
 runner = CliRunner()
@@ -564,3 +567,63 @@ def test_doctor_resolves_the_project_tier_from_a_registered_project(tmp_path: Pa
 
     result = runner.invoke(app, ["doctor", "--project-path", str(target)])
     assert "project registration" in result.stdout
+
+
+def test_print_emit_shows_task_state_changed_with_task_id_and_states(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`_print_emit` (`cosmo run`'s live-terminal `on_emit` sink) used to
+    filter `task.state_changed` out entirely -- it's `Severity.INFO` and
+    wasn't in `_EMIT_LIFECYCLE_INFO_TYPES` -- leaving the one terminal an
+    operator is actually watching with no visible task id, state, or
+    timestamp for a running task. Also guards the real regression found
+    fixing that: the task id gets interpolated into a Rich-markup string,
+    and an unescaped `[task-id]` is swallowed by Rich as a (bogus) style
+    tag rather than printed."""
+    from rich.console import Console
+
+    buf = io.StringIO()
+    monkeypatch.setattr(cli_main, "console", Console(file=buf, width=200))
+
+    event = Event(
+        event_id="e1",
+        run_id="run-1",
+        task_id="scaffold-app-task",
+        timestamp="2026-08-27T18:22:52.542+00:00",
+        sequence=1,
+        event_type=EventType.TASK_STATE_CHANGED.value,
+        severity=Severity.INFO,
+        schema_version=1,
+        payload={"from_state": "implementing", "to_state": "validating", "attempt_number": 1},
+    )
+
+    cli_main._print_emit(event)
+
+    output = buf.getvalue()
+    assert "task.state_changed" in output
+    assert "scaffold-app-task" in output
+    assert "implementing -> validating" in output
+    assert "18:22:52Z" in output
+
+
+def test_print_emit_still_filters_out_chatty_info_events(monkeypatch: pytest.MonkeyPatch) -> None:
+    from rich.console import Console
+
+    buf = io.StringIO()
+    monkeypatch.setattr(cli_main, "console", Console(file=buf, width=200))
+
+    event = Event(
+        event_id="e1",
+        run_id="run-1",
+        task_id="t1",
+        timestamp="2026-08-27T18:22:52.542+00:00",
+        sequence=1,
+        event_type=EventType.TASK_PROGRESS.value,
+        severity=Severity.INFO,
+        schema_version=1,
+        payload={},
+    )
+
+    cli_main._print_emit(event)
+
+    assert buf.getvalue() == ""

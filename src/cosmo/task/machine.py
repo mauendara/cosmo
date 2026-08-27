@@ -406,7 +406,7 @@ def run_task(
         emit_state_changed(
             emitter, writer.queue_transition(task_id, TaskStatus.FINISHING, run_id=run_id)
         )
-        _do_finishing(ctx=ctx, repo_path=repo_path, emitter=emitter, run_id=run_id)
+        _do_finishing(ctx=ctx, repo_path=repo_path, config=config, emitter=emitter, run_id=run_id)
         emit_state_changed(
             emitter, writer.queue_transition(task_id, TaskStatus.DONE, run_id=run_id)
         )
@@ -977,6 +977,7 @@ def _do_finishing(
     *,
     ctx: TaskContext,
     repo_path: Path,
+    config: CosmoConfig,
     emitter: EventEmitter,
     run_id: str | None,
 ) -> None:
@@ -997,6 +998,18 @@ def _do_finishing(
     Deliberately best-effort and non-blocking, per the plan's own decision:
     the task already merged successfully by the time this runs, so a
     failure here must never retroactively fail it -- only a warning event.
+
+    Found live (deviation 68 follow-up): `openspec archive` mutates
+    `repo_path`'s working tree directly (moves the change's files under
+    `openspec/changes/archive/`, rewrites `openspec/specs/`) but never
+    commits the result on its own -- every earlier version of this function
+    left `repo_path` sitting dirty after every single completed task, which
+    then made the *next* task's `MERGING` step (`git.merge._assert_ready`)
+    refuse to merge at all ("has uncommitted changes -- refusing to merge"),
+    confirmed live against a real two-task run. Committing the archive's own
+    output here, the same way `_git_commit_decisions_log` commits
+    `docs/decisions-log.md` in the worktree, is what actually closes that
+    gap -- a warning event alone was never going to un-dirty `repo_path`.
     """
     task_id = ctx.task_id
     spec_id = Path(ctx.spec_path).stem
@@ -1010,6 +1023,67 @@ def _do_finishing(
             task_id=task_id,
             payload={"spec_id": spec_id, "error": str(exc)},
         )
+        return
+
+    try:
+        _git_commit_archive(repo_path, spec_id, config)
+    except GitCommandError as exc:
+        emitter.emit(
+            event_type=EventType.TASK_FINISHING_FAILED,
+            severity=Severity.WARNING,
+            run_id=run_id,
+            task_id=task_id,
+            payload={"spec_id": spec_id, "error": str(exc)},
+        )
+
+
+def _git_commit_archive(repo_path: Path, spec_id: str, config: CosmoConfig) -> None:
+    """Commits whatever `archive_change` just changed in `repo_path` --
+    scoped to `openspec/` specifically, mirroring `_git_commit_decisions_log`'s
+    own scoped `git add`. A no-op, not an error, when `openspec archive`
+    happened to change nothing (`--skip-specs` is never passed, but a change
+    with no spec deltas is still possible)."""
+    identity_flags: list[str] = []
+    if not config.git.unified_identity:
+        identity_flags = [
+            "-c",
+            f"user.name={config.git.commit_author_name}",
+            "-c",
+            f"user.email={config.git.commit_author_email}",
+        ]
+    try:
+        subprocess.run(
+            ["git", "-C", str(repo_path), "add", "-A", "--", "openspec"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=60.0,
+        )
+        staged = subprocess.run(
+            ["git", "-C", str(repo_path), "diff", "--cached", "--quiet"],
+            capture_output=True,
+            text=True,
+            timeout=60.0,
+        )
+        if staged.returncode == 0:
+            return
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repo_path),
+                *identity_flags,
+                "commit",
+                "-m",
+                f"cosmo: archive {spec_id}",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=60.0,
+        )
+    except (OSError, subprocess.TimeoutExpired, subprocess.CalledProcessError) as exc:
+        raise GitCommandError(f"could not commit openspec archive for {spec_id!r}: {exc}") from exc
 
 
 # -- shared helpers -----------------------------------------------------------
