@@ -162,9 +162,12 @@ def test_queue_block_then_retry_round_trips_status() -> None:
 def _repo_on_develop(tmp_path: Path) -> Path:
     repo = tmp_path / "target-repo"
     repo.mkdir()
-    run = lambda *a: subprocess.run(  # noqa: E731
-        ["git", "-C", str(repo), *a], check=True, capture_output=True, text=True
-    )
+
+    def run(*a: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["git", "-C", str(repo), *a], check=True, capture_output=True, text=True
+        )
+
     run("-c", "user.name=t", "-c", "user.email=t@example.com", "init", "-q")
     (repo / "README.md").write_text("hello\n")
     run("add", "README.md")
