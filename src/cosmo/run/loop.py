@@ -607,6 +607,11 @@ def _run_one_task(
             return RunGuardAction.REQUEUE
         return None
 
+    resume_at = (
+        TaskStatus(task.resume_at_stage)
+        if task.resume_at_stage is not None
+        else TaskStatus.IMPLEMENTING
+    )
     status = run_task(
         ctx=ctx,
         config=config,
@@ -619,6 +624,7 @@ def _run_one_task(
         on_harness_result=on_harness_result,
         check_run_guard=check_run_guard,
         on_activity=on_activity,
+        resume_at=resume_at,
     )
 
     confirmed = box["quota_signal"]

@@ -38,6 +38,10 @@ kill_grace = 20
 max_attempts = 2
 delay_min = 30
 delay_max = 60
+# `queue retry` refuses (reports instead) once the task's most recent
+# terminal block matches this many *prior* terminal blocks for the same
+# reason -- see RetryConfig.repeat_block_threshold's own comment.
+repeat_block_threshold = 2
 
 [circuit_breaker]
 # Spec 6.5. merge_conflict and flaky are excluded from the tally.
@@ -54,8 +58,8 @@ warn_at_fraction = 0.8
 
 [gate]
 # Spec 1.1. Version pinning is atomic: these bump together, never "latest".
-playwright_image = "mcr.microsoft.com/playwright:v1.50.0-noble"
-playwright_npm_version = "1.50.0"
+playwright_image = "mcr.microsoft.com/playwright:v1.49.0-noble"
+playwright_npm_version = "1.49.0"
 shm_size = "2gb"
 ipc_host = true
 

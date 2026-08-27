@@ -23,6 +23,7 @@ from cosmo.git.worktree import (
     WorktreeError,
     create_worktree,
     remove_worktree,
+    reset_worktree_to_commit,
     sweep_stale_worktrees,
 )
 from cosmo.store import StoreWriter
@@ -309,3 +310,95 @@ def test_remove_worktree_really_deletes_an_unremovable_directory_via_real_docker
     remove_worktree(repo_path=repo, worktree_path=worktree_path, branch="task/add-foo")
 
     assert not worktree_path.exists()
+
+
+def test_reset_worktree_to_commit_invokes_docker_for_a_leftover_git_clean_cannot_remove(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: `git clean -fdx` alone left a root-owned leftover
+    (`node_modules_old`, here stood in for with the same `0o000` trick
+    `remove_worktree`'s own test uses) behind after a real `queue retry` --
+    confirmed live against the Phase 10 acceptance run's actual blocked
+    task. `reset_worktree_to_commit` must now notice via a dry-run
+    `git clean -fdxn` and fall back to the same disposable-root-container
+    removal `remove_worktree` already had."""
+    repo, propose_commit, worktree_path, locked = (
+        _worktree_with_a_propose_commit_and_an_unremovable_leftover(tmp_path)
+    )
+    log = tmp_path / "docker.log"
+    monkeypatch.setenv("FAKE_DOCKER_LOG", str(log))
+    try:
+        reset_worktree_to_commit(worktree_path, propose_commit, docker_bin=str(FAKE_DOCKER))
+
+        assert locked.exists()  # fake docker never really deletes anything
+        invocation = log.read_text()
+        assert "run" in invocation and "--rm" in invocation
+        assert f"{locked.parent}:/cosmo-cleanup" in invocation
+        assert f"/cosmo-cleanup/{locked.name}" in invocation
+    finally:
+        os.chmod(locked, stat.S_IRWXU)
+
+
+@pytest.mark.skipif(
+    shutil.which("docker") is None or os.environ.get("COSMO_GATE_DOCKER_E2E") != "1",
+    reason="real root-container cleanup against real docker -- opt in with COSMO_GATE_DOCKER_E2E=1",
+)
+def test_reset_worktree_to_commit_really_deletes_an_unremovable_leftover_via_real_docker(
+    tmp_path: Path,
+) -> None:
+    repo, propose_commit, worktree_path, locked = (
+        _worktree_with_a_propose_commit_and_an_unremovable_leftover(tmp_path)
+    )
+
+    reset_worktree_to_commit(worktree_path, propose_commit)
+
+    assert not locked.exists()
+    assert (worktree_path / "openspec_marker.txt").is_file()
+
+
+def _worktree_with_a_propose_commit_and_an_unremovable_leftover(
+    tmp_path: Path,
+) -> tuple[Path, str, Path, Path]:
+    """A worktree at the shape `queue_retry`'s kept-worktree path actually
+    sees: a real `PROPOSING` commit to reset back to, plus an untracked,
+    unremovable leftover from the failed `IMPLEMENTING` attempt being
+    discarded -- the real Phase 10 shape (`node_modules_old`, root-owned by
+    a gate container) reproduced without root or a real gate run, same
+    `0o000` stand-in `_worktree_with_an_unremovable_subdirectory` already
+    uses for `remove_worktree`. Returns (repo, propose_commit_sha,
+    worktree_path)."""
+    repo = _repo_on_develop(tmp_path)
+    db_path = tmp_path / "cosmo.db"
+    writer = StoreWriter(db_path)
+    writer.queue_add(task_id="add-foo", spec_path="p", max_attempts=2)
+    emitter = EventEmitter(writer)
+    info = create_worktree(
+        repo_path=repo,
+        work_dir=tmp_path / "work",
+        run_id="run-1",
+        task_id="add-foo",
+        spec_id="add-foo",
+        base_branch="develop",
+        harness="claude",
+        writer=writer,
+        emitter=emitter,
+    )
+    writer.close()
+
+    (info.path / "openspec_marker.txt").write_text("proposed\n", encoding="utf-8")
+    (info.path / "frontend").mkdir()
+    (info.path / "frontend" / "package.json").write_text("{}\n", encoding="utf-8")
+    _git(info.path, "add", "openspec_marker.txt", "frontend/package.json")
+    _git(info.path, "commit", "-q", "-m", "Propose add-foo")
+    propose_commit = subprocess.run(
+        ["git", "-C", str(info.path), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    locked = info.path / "frontend" / "node_modules_old"
+    locked.mkdir(parents=True)
+    (locked / "leftover.js").write_bytes(b"")
+    os.chmod(locked, 0o000)
+    return repo, propose_commit, info.path, locked

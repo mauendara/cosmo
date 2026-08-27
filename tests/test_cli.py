@@ -159,6 +159,106 @@ def test_queue_block_then_retry_round_trips_status() -> None:
     assert "requeued t1" in retried.stdout
 
 
+def test_queue_retry_refuses_when_the_same_reason_has_blocked_repeatedly() -> None:
+    """Regression: `attempt_count` resets to 0 on every `queue retry`
+    regardless of *why* the task blocked -- nothing otherwise remembers a
+    task blocking the identical way across separate runs (real evidence:
+    `error_max_turns`, 3 separate runs, in this project's own acceptance
+    run). Default `retries.repeat_block_threshold` is 2, so a 3rd identical
+    block must be refused without `--force`."""
+    runner.invoke(app, ["queue", "add", "p1", "--task-id", "t1"])
+    db_path = load_config().paths.db_path
+    writer = StoreWriter(db_path)
+    for i in range(3):
+        writer.queue_begin_attempt("t1")
+        writer.record_task_failure(
+            task_id="t1",
+            run_id=None,
+            attempt_number=i,
+            failure_type=FailureType.ENVIRONMENT_ERROR,
+            failure_stage=FailureStage.IMPLEMENT,
+            error_summary="error_max_turns",
+            error_detail=None,
+            files_touched=[],
+            will_retry=False,
+            next_action=NextAction.BLOCK,
+        )
+    writer.queue_block("t1", BlockedReason.ENVIRONMENT)
+    writer.close()
+
+    refused = runner.invoke(app, ["queue", "retry", "t1"])
+    assert refused.exit_code == 1
+    assert "refusing to retry" in refused.stderr
+    assert "error_max_turns" in refused.stderr
+    task = get_task(db_path, "t1")
+    assert task is not None
+    assert task.status == "blocked"  # untouched -- the guard ran before any mutation
+
+    forced = runner.invoke(app, ["queue", "retry", "t1", "--force"])
+    assert forced.exit_code == 0
+    assert "requeued t1" in forced.stdout
+    task = get_task(db_path, "t1")
+    assert task is not None
+    assert task.status == "queued"
+
+
+def test_queue_retry_resumes_at_merging_instead_of_discarding_the_worktree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """v6: an `environment_error` at `MERGING` means `IMPLEMENTING`/
+    `VALIDATING`/`REVIEWING` already succeeded on this worktree -- `queue
+    retry` must resume there directly (`resume_at_stage`), not reset the
+    worktree back to the `PROPOSING` commit the way a code-level failure
+    would. Real bug this fixes: a real acceptance-run task had its fully
+    green implementation discarded and redone from scratch just to
+    reproduce an identical, target-repo-side merge failure a second time."""
+    repo = _repo_on_develop(tmp_path)
+    monkeypatch.chdir(repo)
+    db_path = load_config().paths.db_path
+    writer = StoreWriter(db_path)
+    writer.register_project(target_path=str(repo.resolve()), harness="claude")
+    writer.queue_add(task_id="t1", spec_path="openspec/changes/t1", max_attempts=2)
+    emitter = EventEmitter(writer)
+    info = create_worktree(
+        repo_path=repo,
+        work_dir=tmp_path / "work",
+        run_id="run-1",
+        task_id="t1",
+        spec_id="t1",
+        base_branch="develop",
+        harness="claude",
+        writer=writer,
+        emitter=emitter,
+    )
+    writer.queue_begin_attempt("t1")
+    writer.record_task_failure(
+        task_id="t1",
+        run_id=None,
+        attempt_number=1,
+        failure_type=FailureType.ENVIRONMENT_ERROR,
+        failure_stage=FailureStage.MERGE,
+        error_summary="target repo has uncommitted changes -- refusing to merge",
+        error_detail=None,
+        files_touched=[],
+        will_retry=False,
+        next_action=NextAction.BLOCK,
+    )
+    writer.queue_block("t1", BlockedReason.ENVIRONMENT)
+    writer.close()
+
+    result = runner.invoke(app, ["queue", "retry", "t1"])
+
+    assert result.exit_code == 0, result.stderr
+    assert "resuming directly at merging" in result.stdout
+    task = get_task(db_path, "t1")
+    assert task is not None
+    assert task.status == "queued"
+    assert task.resume_at_stage == "merging"
+    assert task.attempt_count == 1  # untouched, unlike a code-level `queue retry`
+    assert task.worktree_path == str(info.path)  # untouched -- nothing was discarded
+    assert info.path.is_dir()
+
+
 def _repo_on_develop(tmp_path: Path) -> Path:
     repo = tmp_path / "target-repo"
     repo.mkdir()
@@ -295,6 +395,71 @@ def test_queue_retry_with_an_already_proposed_change_keeps_the_worktree(
     assert task.status == "queued"
     assert task.attempt_count == 0
     assert task.worktree_path == str(info.path)
+
+
+def test_queue_retry_on_a_kept_worktree_re_syncs_harness_assets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: the kept-worktree path (`propose_commit` found) used to
+    skip `sync_harness_assets` entirely -- `create_worktree` only syncs once,
+    at creation, and `reset_worktree_to_commit`'s own `git clean -fdx` wipes
+    `.agent/claude/` right back out since it was never committed here (a
+    worktree's `.agent` is written straight to disk, not `git add`ed). Before
+    the fix, a retried attempt ran with no guardrail hooks and no
+    settings.json at all -- worse than merely stale ones."""
+    repo = _repo_on_develop(tmp_path)
+    monkeypatch.chdir(repo)
+    db_path = load_config().paths.db_path
+    writer = StoreWriter(db_path)
+    writer.register_project(target_path=str(repo.resolve()), harness="claude")
+    writer.queue_add(task_id="t1", spec_path="openspec/changes/t1", max_attempts=2)
+    emitter = EventEmitter(writer)
+    info = create_worktree(
+        repo_path=repo,
+        work_dir=tmp_path / "work",
+        run_id="run-1",
+        task_id="t1",
+        spec_id="t1",
+        base_branch="develop",
+        harness="claude",
+        writer=writer,
+        emitter=emitter,
+    )
+    assert (info.path / ".agent" / "claude" / "settings.json").is_file()
+
+    def _git(*args: str) -> None:
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(info.path),
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@example.com",
+                *args,
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+    change_dir = info.path / "openspec" / "changes" / "t1"
+    change_dir.mkdir(parents=True)
+    (change_dir / "tasks.md").write_text("- [x] 1.1 Done\n", encoding="utf-8")
+    _git("add", "openspec")
+    _git("commit", "-q", "-m", "Propose t1 OpenSpec change")
+
+    writer.queue_begin_attempt("t1")
+    writer.queue_block("t1", BlockedReason.CODE_FAILURE)
+    writer.close()
+
+    result = runner.invoke(app, ["queue", "retry", "t1"])
+
+    assert result.exit_code == 0, result.stderr
+    assert "kept the already-proposed" in result.stdout
+    assert (info.path / ".agent" / "claude" / "settings.json").is_file()
+    assert (info.path / ".agent" / "claude" / "hooks" / "background_task_guard.py").is_file()
 
 
 def test_queue_block_rejects_an_invalid_reason() -> None:

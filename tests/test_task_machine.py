@@ -162,6 +162,119 @@ def test_happy_path_reaches_done_with_a_complete_event_trail(tmp_path: Path) -> 
         writer.close()
 
 
+def test_resume_at_merging_skips_straight_there_calling_neither_harness_nor_gate(
+    tmp_path: Path,
+) -> None:
+    """v6: a task whose most recent block was an `environment_error` at
+    `MERGING` has already been proposed, implemented, validated, and
+    (when enabled) reviewed -- none of that needs redoing, only the merge
+    itself. `resume_at=TaskStatus.MERGING` must reach `DONE` without ever
+    calling `propose`/`implement`/`review` or re-running the gate -- the
+    real bug this fixes: `queue retry` used to discard a fully green
+    implementation just to reproduce the identical merge failure a second
+    time."""
+    cfg, repo, writer, emitter, ctx = _setup(tmp_path)
+    # Stand in for "IMPLEMENTING/VALIDATING/REVIEWING/COMMITTING already
+    # succeeded in an earlier `cosmo run` process" -- a real commit on the
+    # task branch, mergeable into `develop`, with no fake-adapter call
+    # involved in producing it.
+    (ctx.worktree_path / "feature.txt").write_text("done\n", encoding="utf-8")
+    _git(ctx.worktree_path, "add", "feature.txt")
+    _git(
+        ctx.worktree_path,
+        "-c",
+        "user.name=t",
+        "-c",
+        "user.email=t@example.com",
+        "commit",
+        "-q",
+        "-m",
+        "Implement add-foo",
+    )
+    adapter = FakeHarnessAdapter(
+        cfg, cwd=ctx.worktree_path, script=ScriptedCall(FakeOutcome.SUCCESS)
+    )
+    gate = FakeGate(ScriptedGateResult(passed=True))
+
+    try:
+        status = run_task(
+            ctx=ctx,
+            config=cfg,
+            writer=writer,
+            emitter=emitter,
+            adapter=adapter,
+            repo_path=repo,
+            gate_runner=_gate_runner(gate),
+            resume_at=TaskStatus.MERGING,
+        )
+
+        assert status is TaskStatus.DONE
+        assert adapter.calls == []
+        assert gate.calls == []
+        task = get_task(cfg.paths.db_path, ctx.task_id)
+        assert task is not None
+        assert task.status == "done"
+        transitions = [
+            e.payload["to_state"]
+            for e in reversed(list_events(cfg.paths.db_path, task_id=ctx.task_id, limit=200))
+            if e.event_type == "task.state_changed"
+        ]
+        assert transitions == ["merging", "done", "finishing", "done"]
+    finally:
+        writer.close()
+
+
+def test_resume_at_committing_skips_straight_there_calling_neither_harness_nor_gate(
+    tmp_path: Path,
+) -> None:
+    """Same shape as the `MERGING` case above, for a task whose most recent
+    block was an `environment_error` at `COMMITTING` itself (a `git commit`
+    failure, e.g. a lock file) -- `IMPLEMENTING`/`VALIDATING`/`REVIEWING`
+    already succeeded, only `COMMITTING`+`MERGING` need retrying."""
+    cfg, repo, writer, emitter, ctx = _setup(tmp_path)
+    (ctx.worktree_path / "feature.txt").write_text("done\n", encoding="utf-8")
+    _git(ctx.worktree_path, "add", "feature.txt")
+    _git(
+        ctx.worktree_path,
+        "-c",
+        "user.name=t",
+        "-c",
+        "user.email=t@example.com",
+        "commit",
+        "-q",
+        "-m",
+        "Implement add-foo",
+    )
+    adapter = FakeHarnessAdapter(
+        cfg, cwd=ctx.worktree_path, script=ScriptedCall(FakeOutcome.SUCCESS)
+    )
+    gate = FakeGate(ScriptedGateResult(passed=True))
+
+    try:
+        status = run_task(
+            ctx=ctx,
+            config=cfg,
+            writer=writer,
+            emitter=emitter,
+            adapter=adapter,
+            repo_path=repo,
+            gate_runner=_gate_runner(gate),
+            resume_at=TaskStatus.COMMITTING,
+        )
+
+        assert status is TaskStatus.DONE
+        assert adapter.calls == []
+        assert gate.calls == []
+        transitions = [
+            e.payload["to_state"]
+            for e in reversed(list_events(cfg.paths.db_path, task_id=ctx.task_id, limit=200))
+            if e.event_type == "task.state_changed"
+        ]
+        assert transitions == ["committing", "merging", "done", "finishing", "done"]
+    finally:
+        writer.close()
+
+
 def test_proposing_is_skipped_when_the_worktree_already_has_a_complete_change(
     tmp_path: Path,
 ) -> None:

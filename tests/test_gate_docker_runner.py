@@ -6,6 +6,7 @@ external process, test the argv/parsing mechanics, not a real daemon.
 from __future__ import annotations
 
 import http.server
+import os
 import threading
 from pathlib import Path
 
@@ -29,6 +30,23 @@ def test_container_flags_include_the_non_negotiable_labels_and_ipc(gate: GateCon
     assert f"--shm-size={gate.shm_size}" in flags
     assert "orchestrator.run_id=run-1" in flags
     assert "orchestrator.task_id=task-1" in flags
+
+
+def test_container_flags_run_as_the_host_user_not_the_image_default(
+    gate: GateConfig,
+) -> None:
+    """Regression: every gate container used to run as its image's default
+    user (root, for `node`/`maven`/`playwright`), so build/e2e output
+    written into the bind-mounted worktree came back root-owned -- the
+    unprivileged `IMPLEMENTING` harness session then had no way to remove
+    it on a later retry (confirmed live: `rm`, `sudo`, and a cross-
+    filesystem `mv` all failed with `Permission denied`)."""
+    flags = docker_runner.container_flags(gate, "run-1", "task-1")
+    assert "--user" in flags
+    user_value = flags[flags.index("--user") + 1]
+    assert user_value == f"{os.getuid()}:{os.getgid()}"
+    assert "-e" in flags
+    assert "HOME=/tmp" in flags
 
 
 def test_run_container_builds_expected_argv(

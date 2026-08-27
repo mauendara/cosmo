@@ -132,6 +132,7 @@ def run_task(
     on_harness_result: OnHarnessResult | None = None,
     check_run_guard: CheckRunGuard | None = None,
     on_activity: OnActivity | None = None,
+    resume_at: TaskStatus = TaskStatus.IMPLEMENTING,
 ) -> TaskStatus:
     """`run_id` defaults to `None`, preserving Phase 7's "no run tracking"
     posture for any caller that doesn't have one -- `cosmo run --task`
@@ -144,53 +145,22 @@ def run_task(
     classification logic when unset (both default to `None`). `on_harness_
     result` observes every raw `HarnessResult` from `propose()`/
     `implement()` as it happens; `check_run_guard` is polled once before
-    each new `PROPOSING`/`IMPLEMENTING` attempt starts."""
+    each new `PROPOSING`/`IMPLEMENTING` attempt starts.
+
+    `resume_at` (v6, `store.writer.queue_resume_at`): `COMMITTING` or
+    `MERGING` skip straight there -- `PROPOSING` and every stage before
+    `resume_at` already succeeded in an earlier `cosmo run` process, on this
+    same worktree, and are not redone. Safe specifically because
+    `COMMITTING`/`MERGING` are the only two stages whose own
+    `environment_error` never gets an in-run retry at all (`_do_committing`/
+    `_do_merging` below always `will_retry=False`) -- unlike every earlier
+    stage, there is no "the code needs to change" judgment bundled into that
+    failure, so nothing before it needs to be redone either. `cli.main.
+    queue_retry` is the only real caller of anything but the default."""
     task_id = ctx.task_id
 
-    proposed = _do_proposing(
-        ctx=ctx,
-        config=config,
-        writer=writer,
-        emitter=emitter,
-        adapter=adapter,
-        run_id=run_id,
-        on_harness_result=on_harness_result,
-        check_run_guard=check_run_guard,
-        on_activity=on_activity,
-    )
-    if proposed is not TaskStatus.PROPOSED:
-        # BLOCKED (an ordinary PROPOSING failure) or QUEUED (`check_run_
-        # guard` fired REQUEUE before/during PROPOSING) -- either way this
-        # task's run is over for now.
-        return proposed
-    emit_state_changed(
-        emitter, writer.queue_transition(task_id, TaskStatus.PROPOSED, run_id=run_id)
-    )
-
-    task_row = get_task(config.paths.db_path, task_id)
-    attempt_count = task_row.attempt_count if task_row is not None else 0
-    validating_env_retries = 0
-
-    while True:
-        if check_run_guard is not None:
-            guard_action = check_run_guard()
-            if guard_action is RunGuardAction.REQUEUE:
-                return _requeue(writer=writer, emitter=emitter, task_id=task_id, run_id=run_id)
-            if guard_action is RunGuardAction.BLOCK_COST:
-                return _block(
-                    writer=writer,
-                    emitter=emitter,
-                    task_id=task_id,
-                    run_id=run_id,
-                    reason=BlockedReason.COST,
-                    note="task cost ceiling reached (spec 7.3)",
-                )
-
-        # -- IMPLEMENTING -----------------------------------------------
-        emit_state_changed(
-            emitter, writer.queue_transition(task_id, TaskStatus.IMPLEMENTING, run_id=run_id)
-        )
-        implemented = _do_implementing(
+    if resume_at is TaskStatus.IMPLEMENTING:
+        proposed = _do_proposing(
             ctx=ctx,
             config=config,
             writer=writer,
@@ -198,153 +168,219 @@ def run_task(
             adapter=adapter,
             run_id=run_id,
             on_harness_result=on_harness_result,
+            check_run_guard=check_run_guard,
             on_activity=on_activity,
         )
+        if proposed is not TaskStatus.PROPOSED:
+            # BLOCKED (an ordinary PROPOSING failure) or QUEUED (`check_run_
+            # guard` fired REQUEUE before/during PROPOSING) -- either way this
+            # task's run is over for now.
+            return proposed
+        emit_state_changed(
+            emitter, writer.queue_transition(task_id, TaskStatus.PROPOSED, run_id=run_id)
+        )
 
-        if not implemented.success:
-            assert implemented.classification is not None
-            if implemented.timed_out:
+    task_row = get_task(config.paths.db_path, task_id)
+    attempt_count = task_row.attempt_count if task_row is not None else 0
+    validating_env_retries = 0
+
+    if resume_at is not TaskStatus.MERGING:
+        skip_to_committing = resume_at is TaskStatus.COMMITTING
+        while True:
+            if not skip_to_committing:
+                if check_run_guard is not None:
+                    guard_action = check_run_guard()
+                    if guard_action is RunGuardAction.REQUEUE:
+                        return _requeue(
+                            writer=writer, emitter=emitter, task_id=task_id, run_id=run_id
+                        )
+                    if guard_action is RunGuardAction.BLOCK_COST:
+                        return _block(
+                            writer=writer,
+                            emitter=emitter,
+                            task_id=task_id,
+                            run_id=run_id,
+                            reason=BlockedReason.COST,
+                            note="task cost ceiling reached (spec 7.3)",
+                        )
+
+                # -- IMPLEMENTING -----------------------------------------------
+                emit_state_changed(
+                    emitter,
+                    writer.queue_transition(task_id, TaskStatus.IMPLEMENTING, run_id=run_id),
+                )
+                implemented = _do_implementing(
+                    ctx=ctx,
+                    config=config,
+                    writer=writer,
+                    emitter=emitter,
+                    adapter=adapter,
+                    run_id=run_id,
+                    on_harness_result=on_harness_result,
+                    on_activity=on_activity,
+                )
+
+                if not implemented.success:
+                    assert implemented.classification is not None
+                    if implemented.timed_out:
+                        will_retry = attempt_count < ctx.max_attempts
+                        attempt_count = writer.queue_begin_attempt(task_id)
+                        _record_failure(
+                            writer,
+                            task_id,
+                            run_id,
+                            attempt_count,
+                            implemented.classification,
+                            will_retry,
+                        )
+                        if not will_retry:
+                            return _block(
+                                writer=writer,
+                                emitter=emitter,
+                                task_id=task_id,
+                                run_id=run_id,
+                                reason=BlockedReason.TIMEOUT,
+                                note=implemented.classification.error_summary,
+                            )
+                    else:
+                        validating_env_retries += 1
+                        blocking = validating_env_retries > config.retries.max_attempts
+                        _record_failure(
+                            writer,
+                            task_id,
+                            run_id,
+                            attempt_count,
+                            implemented.classification,
+                            will_retry=not blocking,
+                        )
+                        if blocking:
+                            return _block(
+                                writer=writer,
+                                emitter=emitter,
+                                task_id=task_id,
+                                run_id=run_id,
+                                reason=BlockedReason.ENVIRONMENT,
+                                note=implemented.classification.error_summary,
+                            )
+                    emit_state_changed(
+                        emitter,
+                        writer.queue_transition(task_id, TaskStatus.FAILED_RETRY, run_id=run_id),
+                    )
+                    _retry_delay(config)
+                    continue
+
+                # -- VALIDATING ---------------------------------------------------
+                emit_state_changed(
+                    emitter,
+                    writer.queue_transition(task_id, TaskStatus.VALIDATING, run_id=run_id),
+                )
+                gate_result = validate_task(
+                    task_id=task_id,
+                    run_id=run_id,
+                    attempt_number=attempt_count,
+                    max_attempts=ctx.max_attempts,
+                    worktree_path=ctx.worktree_path,
+                    base_branch=ctx.base_branch,
+                    task_branch=ctx.branch,
+                    allow_test_edits=ctx.allow_test_edits,
+                    config=config,
+                    writer=writer,
+                    emitter=emitter,
+                    gate_runner=gate_runner,
+                )
+
+                if (
+                    not gate_result.passed
+                    and gate_result.failure_type is FailureType.ENVIRONMENT_ERROR
+                ):
+                    validating_env_retries += 1
+                    if validating_env_retries > config.retries.max_attempts:
+                        return _block(
+                            writer=writer,
+                            emitter=emitter,
+                            task_id=task_id,
+                            run_id=run_id,
+                            reason=BlockedReason.ENVIRONMENT,
+                            note=gate_result.error_summary,
+                        )
+                    emit_state_changed(
+                        emitter,
+                        writer.queue_transition(task_id, TaskStatus.FAILED_RETRY, run_id=run_id),
+                    )
+                    _retry_delay(config)
+                    continue
+
+                # A genuine code-level judgment happened (pass, or code_error /
+                # test_integrity) -- this consumes one attempt, pass or fail.
                 will_retry = attempt_count < ctx.max_attempts
                 attempt_count = writer.queue_begin_attempt(task_id)
-                _record_failure(
-                    writer, task_id, run_id, attempt_count, implemented.classification, will_retry
-                )
-                if not will_retry:
-                    return _block(
+
+                if not gate_result.passed:
+                    if not will_retry:
+                        return _block(
+                            writer=writer,
+                            emitter=emitter,
+                            task_id=task_id,
+                            run_id=run_id,
+                            reason=BlockedReason.CODE_FAILURE,
+                            note=gate_result.error_summary,
+                        )
+                    emit_state_changed(
+                        emitter,
+                        writer.queue_transition(task_id, TaskStatus.FAILED_RETRY, run_id=run_id),
+                    )
+                    _retry_delay(config)
+                    continue
+
+                # -- REVIEWING (v4 workflow changes) -------------------------------
+                if config.review.enabled:
+                    review_step = _do_reviewing(
+                        ctx=ctx,
+                        config=config,
                         writer=writer,
                         emitter=emitter,
-                        task_id=task_id,
+                        adapter=adapter,
                         run_id=run_id,
-                        reason=BlockedReason.TIMEOUT,
-                        note=implemented.classification.error_summary,
+                        on_harness_result=on_harness_result,
+                        on_activity=on_activity,
+                        attempt_count=attempt_count,
+                        will_retry=will_retry,
+                        validating_env_retries=validating_env_retries,
                     )
-            else:
-                validating_env_retries += 1
-                blocking = validating_env_retries > config.retries.max_attempts
-                _record_failure(
-                    writer,
-                    task_id,
-                    run_id,
-                    attempt_count,
-                    implemented.classification,
-                    will_retry=not blocking,
-                )
-                if blocking:
-                    return _block(
-                        writer=writer,
-                        emitter=emitter,
-                        task_id=task_id,
-                        run_id=run_id,
-                        reason=BlockedReason.ENVIRONMENT,
-                        note=implemented.classification.error_summary,
-                    )
-            emit_state_changed(
-                emitter, writer.queue_transition(task_id, TaskStatus.FAILED_RETRY, run_id=run_id)
-            )
-            _retry_delay(config)
-            continue
+                    validating_env_retries = review_step.validating_env_retries
+                    if review_step.outcome is _ReviewOutcome.RETRY:
+                        emit_state_changed(
+                            emitter,
+                            writer.queue_transition(
+                                task_id, TaskStatus.FAILED_RETRY, run_id=run_id
+                            ),
+                        )
+                        _retry_delay(config)
+                        continue
+                    if review_step.outcome is _ReviewOutcome.BLOCKED:
+                        return TaskStatus.BLOCKED
 
-        # -- VALIDATING ---------------------------------------------------
-        emit_state_changed(
-            emitter, writer.queue_transition(task_id, TaskStatus.VALIDATING, run_id=run_id)
-        )
-        gate_result = validate_task(
-            task_id=task_id,
-            run_id=run_id,
-            attempt_number=attempt_count,
-            max_attempts=ctx.max_attempts,
-            worktree_path=ctx.worktree_path,
-            base_branch=ctx.base_branch,
-            task_branch=ctx.branch,
-            allow_test_edits=ctx.allow_test_edits,
-            config=config,
-            writer=writer,
-            emitter=emitter,
-            gate_runner=gate_runner,
-        )
+            skip_to_committing = False
 
-        if not gate_result.passed and gate_result.failure_type is FailureType.ENVIRONMENT_ERROR:
-            validating_env_retries += 1
-            if validating_env_retries > config.retries.max_attempts:
-                return _block(
-                    writer=writer,
-                    emitter=emitter,
-                    task_id=task_id,
-                    run_id=run_id,
-                    reason=BlockedReason.ENVIRONMENT,
-                    note=gate_result.error_summary,
-                )
-            emit_state_changed(
-                emitter, writer.queue_transition(task_id, TaskStatus.FAILED_RETRY, run_id=run_id)
-            )
-            _retry_delay(config)
-            continue
-
-        # A genuine code-level judgment happened (pass, or code_error /
-        # test_integrity) -- this consumes one attempt, pass or fail.
-        will_retry = attempt_count < ctx.max_attempts
-        attempt_count = writer.queue_begin_attempt(task_id)
-
-        if not gate_result.passed:
-            if not will_retry:
-                return _block(
-                    writer=writer,
-                    emitter=emitter,
-                    task_id=task_id,
-                    run_id=run_id,
-                    reason=BlockedReason.CODE_FAILURE,
-                    note=gate_result.error_summary,
-                )
-            emit_state_changed(
-                emitter, writer.queue_transition(task_id, TaskStatus.FAILED_RETRY, run_id=run_id)
-            )
-            _retry_delay(config)
-            continue
-
-        # -- REVIEWING (v4 workflow changes) -------------------------------
-        if config.review.enabled:
-            review_step = _do_reviewing(
+            # -- COMMITTING -----------------------------------------------------
+            committing = _do_committing(
                 ctx=ctx,
                 config=config,
                 writer=writer,
                 emitter=emitter,
-                adapter=adapter,
                 run_id=run_id,
-                on_harness_result=on_harness_result,
-                on_activity=on_activity,
                 attempt_count=attempt_count,
-                will_retry=will_retry,
-                validating_env_retries=validating_env_retries,
             )
-            validating_env_retries = review_step.validating_env_retries
-            if review_step.outcome is _ReviewOutcome.RETRY:
+            if committing is _CommitOutcome.RETRY:
                 emit_state_changed(
                     emitter,
                     writer.queue_transition(task_id, TaskStatus.FAILED_RETRY, run_id=run_id),
                 )
                 _retry_delay(config)
                 continue
-            if review_step.outcome is _ReviewOutcome.BLOCKED:
+            if committing is _CommitOutcome.BLOCKED:
                 return TaskStatus.BLOCKED
-
-        # -- COMMITTING -----------------------------------------------------
-        committing = _do_committing(
-            ctx=ctx,
-            config=config,
-            writer=writer,
-            emitter=emitter,
-            run_id=run_id,
-            attempt_count=attempt_count,
-        )
-        if committing is _CommitOutcome.RETRY:
-            emit_state_changed(
-                emitter, writer.queue_transition(task_id, TaskStatus.FAILED_RETRY, run_id=run_id)
-            )
-            _retry_delay(config)
-            continue
-        if committing is _CommitOutcome.BLOCKED:
-            return TaskStatus.BLOCKED
-        break  # _CommitOutcome.DONE
+            break  # _CommitOutcome.DONE
 
     # -- MERGING ------------------------------------------------------------
     emit_state_changed(emitter, writer.queue_transition(task_id, TaskStatus.MERGING, run_id=run_id))

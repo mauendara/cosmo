@@ -433,6 +433,34 @@ _SCHEMA_V8 = """
 ALTER TABLE task_failures ADD COLUMN failure_signature TEXT;
 """
 
+# ============================================================================
+# Migration 9 -- v6 improvements: `task_queue` gains `resume_at_stage`.
+#
+# `COMMITTING`/`MERGING` are the only two states in the whole state machine
+# whose own `environment_error` goes straight to `BLOCKED` with no in-run
+# retry (`task.machine._do_committing`/`_do_merging`) -- reasonable in the
+# moment (an immediate retry of a git-commit or merge failure usually
+# doesn't help), but `queue retry`'s only recovery path used to discard
+# *everything* back to the `PROPOSING` commit regardless, including a fully
+# `IMPLEMENTING`+`VALIDATING`+`REVIEWING`-passed candidate that had nothing
+# to do with why `COMMITTING`/`MERGING` itself failed (confirmed live: a
+# real Phase 10 task's `MERGING` blocked on the *target repo* having
+# unrelated uncommitted changes -- `queue retry` then threw away a fully
+# green implementation just to redo it identically). `resume_at_stage`
+# lets `cli.main.queue_retry` say "resume directly at this stage, the
+# worktree needs no reset" instead -- `store.writer.queue_transition`
+# clears it unconditionally on every real transition, so it's consumed
+# exactly once, the moment `task.machine.run_task` actually acts on it.
+# Plain nullable column with a `CHECK`, same `ALTER TABLE ADD COLUMN`
+# recipe as migrations 6/8 -- no existing row's `NULL` value can violate
+# the constraint, so no recreate-copy-swap is needed even though this one
+# does carry a `CHECK`.
+# ============================================================================
+_SCHEMA_V9 = """
+ALTER TABLE task_queue ADD COLUMN resume_at_stage TEXT
+    CHECK (resume_at_stage IS NULL OR resume_at_stage IN ('committing', 'merging'));
+"""
+
 MIGRATIONS: list[Migration] = [
     Migration(1, "initial schema: events, queue, progress, run state, cost, history", _SCHEMA_V1),
     Migration(2, "task_failures.failure_stage gains secrets (gate gitleaks backstop)", _SCHEMA_V2),
@@ -456,6 +484,11 @@ MIGRATIONS: list[Migration] = [
         "task_failures gains failure_signature (v5 improvements, part 5 Class 1)",
         _SCHEMA_V8,
     ),
+    Migration(
+        9,
+        "task_queue gains resume_at_stage (v6, resume COMMITTING/MERGING in place)",
+        _SCHEMA_V9,
+    ),
 ]
 
 
@@ -476,7 +509,24 @@ def latest_version() -> int:
 
 def migrate(conn: sqlite3.Connection) -> list[int]:
     """Apply every migration newer than the schema's current version, in
-    order, each as its own transaction. Returns the versions applied."""
+    order, each as its own transaction. Returns the versions applied.
+
+    `PRAGMA foreign_keys` is dropped to OFF around each migration's own
+    transaction, not left ON as `connect_writer` otherwise sets it (spec
+    8.1): several migrations (3, 4, 5, 7) recreate-copy-swap a table that
+    other tables hold a live FK reference to (e.g. `task_failures.run_id ->
+    run_state.run_id`). SQLite refuses `DROP TABLE` on a table with an
+    existing FK-referencing row elsewhere once `foreign_keys=ON` -- invisible
+    against every fixture here and in tests because they only ever insert
+    the referencing row *after* migrating, but a real, already-running
+    database (this project's own Phase 10 acceptance run, concretely) has
+    those rows in place *before* a later migration is added to the
+    codebase. The pragma can't be toggled inside a transaction (SQLite
+    no-ops it there), hence issuing it outside `executescript`'s own
+    BEGIN/COMMIT. `PRAGMA foreign_key_check` after each migration, with
+    `foreign_keys` back ON, still catches a migration that actually leaves a
+    dangling reference -- this widens what's tolerated during the swap, not
+    what's tolerated afterward."""
     applied: list[int] = []
     current = current_version(conn)
     for migration in sorted(MIGRATIONS, key=lambda m: m.version):
@@ -492,6 +542,15 @@ def migrate(conn: sqlite3.Connection) -> list[int]:
             f"VALUES ({migration.version}, '{migration.description}', "
             f"strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));"
         )
-        conn.executescript(f"BEGIN;\n{migration.sql}\n{stamp}\nCOMMIT;")
+        conn.execute("PRAGMA foreign_keys = OFF")
+        try:
+            conn.executescript(f"BEGIN;\n{migration.sql}\n{stamp}\nCOMMIT;")
+        finally:
+            conn.execute("PRAGMA foreign_keys = ON")
+        violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+        if violations:
+            raise sqlite3.IntegrityError(
+                f"migration {migration.version} left dangling foreign keys: {violations!r}"
+            )
         applied.append(migration.version)
     return applied

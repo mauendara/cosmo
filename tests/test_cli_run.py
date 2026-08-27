@@ -142,6 +142,47 @@ def test_run_creates_the_worktree_and_drives_run_task_to_done(
     assert task.worktree_path is not None
 
 
+def test_run_reuses_an_existing_worktree_instead_of_recreating_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: a `QUEUED` task can already have a `worktree_path` --
+    e.g. `queue retry`'s kept-worktree path, or a prior `cosmo run` process
+    that died mid-attempt. `run_cmd` used to call `create_worktree`
+    unconditionally, which names the branch `task/<spec_id>` regardless of
+    `run_id` -- a second, brand-new worktree for the same task collided
+    with the branch the first worktree still had checked out, and
+    `cosmo run --task` failed on `git worktree add` before ever invoking the
+    harness. Same reuse rule as `run.loop._run_one_task` (spec 3.2)."""
+    repo = _repo_on_develop(tmp_path)
+    runner.invoke(app, ["queue", "add", "openspec/changes/add-foo", "--task-id", "add-foo"])
+
+    captured: dict[str, Any] = {}
+
+    def _fake_run_task(*, ctx: TaskContext, **kwargs: Any) -> TaskStatus:
+        captured["ctx"] = ctx
+        return TaskStatus.DONE
+
+    monkeypatch.setattr(cli_main, "run_task", _fake_run_task)
+
+    first = runner.invoke(app, ["run", "--task", "add-foo", "--repo", str(repo)])
+    assert first.exit_code == 0, first.output
+    first_worktree = captured["ctx"].worktree_path
+    assert first_worktree.is_dir()
+
+    db_path = load_config().paths.db_path
+    writer = StoreWriter(db_path)
+    try:
+        writer.queue_retry("add-foo", clear_worktree=False)
+    finally:
+        writer.close()
+
+    second = runner.invoke(app, ["run", "--task", "add-foo", "--repo", str(repo)])
+
+    assert second.exit_code == 0, second.output
+    assert captured["ctx"].worktree_path == first_worktree
+    assert captured["ctx"].branch == "task/add-foo"
+
+
 def test_run_exits_nonzero_when_the_task_ends_blocked(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

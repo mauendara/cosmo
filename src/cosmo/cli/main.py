@@ -30,6 +30,7 @@ from cosmo.bootstrap import (
     read_configured_identity,
     run_init,
     set_local_identity,
+    sync_harness_assets,
 )
 from cosmo.checks import CheckResult, CheckStatus
 from cosmo.config import DEFAULTS_PATH, CosmoConfig, load_config, user_config_path
@@ -38,6 +39,7 @@ from cosmo.events import Event, EventEmitter, EventType, Severity, emit_state_ch
 from cosmo.gate.runner import run_validation_gate
 from cosmo.gate.types import GateResult
 from cosmo.git.worktree import (
+    WorktreeInfo,
     create_worktree,
     find_last_commit_touching,
     remove_worktree,
@@ -59,6 +61,7 @@ from cosmo.run.types import RunOutcome
 from cosmo.spec import SpecTaskFile, TaskFileError, list_task_files
 from cosmo.store import StoreWriter, TaskNotFoundError
 from cosmo.store.enums import BlockedReason, RunStatus, StopReason, TaskStatus
+from cosmo.store.failure_signature import detect_repeat_block
 from cosmo.store.reader import (
     find_project_by_path,
     get_progress,
@@ -528,17 +531,33 @@ def run_cmd(
         emitter = EventEmitter(writer, on_emit=_print_emit)
         run_id = uuid.uuid4().hex
         spec_id = Path(task.spec_path).stem
-        info = create_worktree(
-            repo_path=resolved_repo,
-            work_dir=cfg.paths.work_dir,
-            run_id=run_id,
-            task_id=task_id,
-            spec_id=spec_id,
-            base_branch=resolved_base,
-            harness=name,
-            writer=writer,
-            emitter=emitter,
-        )
+        branch = f"task/{spec_id}"
+        if task.worktree_path is not None and Path(task.worktree_path).is_dir():
+            # Same reuse rule as `run.loop._run_one_task` (spec 3.2): a
+            # `QUEUED` task whose `worktree_path` is still set has a worktree
+            # mid-lifecycle, not abandoned (`cli.main.queue_retry` is the
+            # only place that ever clears it, and only after physically
+            # removing the worktree). Found by hand, driving the fix for a
+            # real blocked task through this single-task path rather than
+            # the DAG loop: `create_worktree` always names the branch
+            # `task/<spec_id>` regardless of `run_id`, so calling it
+            # unconditionally here collided with the still-checked-out
+            # branch from the worktree `queue retry` had just kept, and
+            # `cosmo run --task` failed outright before ever invoking the
+            # harness.
+            info = WorktreeInfo(task_id=task_id, branch=branch, path=Path(task.worktree_path))
+        else:
+            info = create_worktree(
+                repo_path=resolved_repo,
+                work_dir=cfg.paths.work_dir,
+                run_id=run_id,
+                task_id=task_id,
+                spec_id=spec_id,
+                base_branch=resolved_base,
+                harness=name,
+                writer=writer,
+                emitter=emitter,
+            )
         adapter.cwd = info.path
 
         ctx = TaskContext(
@@ -550,6 +569,11 @@ def run_cmd(
             allow_test_edits=task.allow_test_edits,
             max_attempts=task.max_attempts,
         )
+        resume_at = (
+            TaskStatus(task.resume_at_stage)
+            if task.resume_at_stage is not None
+            else TaskStatus.IMPLEMENTING
+        )
         final_status = run_task(
             ctx=ctx,
             config=cfg,
@@ -558,6 +582,7 @@ def run_cmd(
             adapter=adapter,
             repo_path=resolved_repo,
             on_activity=_print_activity,
+            resume_at=resume_at,
         )
     finally:
         writer.close()
@@ -1400,6 +1425,14 @@ def queue_retry(
             "Defaults to the current directory."
         ),
     ] = None,
+    force: Annotated[
+        bool,
+        typer.Option(
+            "--force",
+            help="Proceed even though this task's most recent block repeats a prior "
+            "one for the same reason (see the repeat-block guard below).",
+        ),
+    ] = False,
     config: ConfigOption = None,
 ) -> None:
     """Reset a `blocked` task back to `queued` for a genuine fresh start:
@@ -1415,38 +1448,110 @@ def queue_retry(
     `PROPOSING`, or the worktree is gone -- does this fall back to removing
     the worktree and branch entirely, matching `git.worktree.
     sweep_stale_worktrees`'s own "start over" posture for a task that
-    genuinely never produced anything worth keeping."""
+    genuinely never produced anything worth keeping.
+
+    **Repeat-block guard**: `attempt_count` resetting to 0 on every retry
+    means a task's own `max_attempts` budget has no memory of *why* it kept
+    blocking across earlier runs -- a task that has blocked for the
+    identical reason `retries.repeat_block_threshold` times before (real
+    evidence: `error_max_turns`, 3 times, 3 separate runs, in this project's
+    own acceptance run) gets refused here instead of a silent 4th round of
+    attempts. `--force` overrides -- use it once a human (or a different
+    fix) has actually addressed the recurring reason, not to make the
+    message go away."""
     cfg = _load(config)
     task = get_task(cfg.paths.db_path, task_id)
     if task is None:
         err_console.print(f"[red]no such task: {task_id!r}[/red]")
         raise typer.Exit(code=1)
 
-    clear_worktree = True
-    if task.worktree_path is not None:
-        worktree_path = Path(task.worktree_path)
-        spec_id = Path(task.spec_path).stem
-        propose_commit = (
-            find_last_commit_touching(worktree_path, f"openspec/changes/{spec_id}/tasks.md")
-            if worktree_path.is_dir()
-            else None
+    history = list_task_failures(cfg.paths.db_path, task_id)
+    repeat = detect_repeat_block(history, threshold=cfg.retries.repeat_block_threshold)
+    if repeat is not None and not force:
+        kind = "signature" if repeat.is_deterministic else "stage+summary"
+        err_console.print(
+            f"[red]refusing to retry {task_id!r}: the same failure ({kind} "
+            f"{repeat.class_key!r}) has now blocked this task "
+            f"{len(repeat.occurrences)} times[/red]"
         )
-        if propose_commit is not None:
-            reset_worktree_to_commit(worktree_path, propose_commit)
-            clear_worktree = False
-            console.print(
-                "[dim]kept the already-proposed OpenSpec change, discarded the "
-                "failed implementation attempt[/dim]"
+        for occ in repeat.occurrences:
+            err_console.print(
+                f"  [dim]{occ.timestamp}[/dim]  run={occ.run_id or '-'}  "
+                f"attempt={occ.attempt_number}  {occ.error_summary}"
             )
-        else:
-            resolved_repo, _project_harness = _resolve_project_repo(repo, cfg)
-            remove_worktree(
-                repo_path=resolved_repo, worktree_path=worktree_path, branch=f"task/{spec_id}"
-            )
+        err_console.print(
+            "[dim]this almost certainly needs a real fix, not another retry -- "
+            "pass --force once you've actually addressed it[/dim]"
+        )
+        raise typer.Exit(code=1)
+
+    # v6: an `environment_error` at `COMMITTING`/`MERGING` is the only case
+    # where nothing before the failed stage needs discarding at all --
+    # `IMPLEMENTING`/`VALIDATING`/`REVIEWING` already succeeded on this
+    # exact worktree. Resuming there instead of the worktree-reset dance
+    # below is what `task.machine.run_task`'s own `resume_at` param exists
+    # for (see its docstring, and `store.writer.queue_resume_at`'s).
+    last_block = next((f for f in reversed(history) if f.next_action == "block"), None)
+    resume_stage: TaskStatus | None = None
+    if (
+        last_block is not None
+        and last_block.failure_type == "environment_error"
+        and last_block.failure_stage in ("commit", "merge")
+    ):
+        resume_stage = (
+            TaskStatus.COMMITTING if last_block.failure_stage == "commit" else TaskStatus.MERGING
+        )
+
     writer = StoreWriter(cfg.paths.db_path)
     try:
-        result = writer.queue_retry(task_id, clear_worktree=clear_worktree)
-        emit_state_changed(EventEmitter(writer), result)
+        if resume_stage is not None:
+            result = writer.queue_resume_at(task_id, resume_stage)
+            emit_state_changed(EventEmitter(writer), result)
+            console.print(
+                f"[dim]resuming directly at {resume_stage.value} -- the implementation "
+                "already passed validation"
+                + (" and review" if resume_stage is TaskStatus.MERGING else "")
+                + ", nothing to redo[/dim]"
+            )
+        else:
+            clear_worktree = True
+            if task.worktree_path is not None:
+                worktree_path = Path(task.worktree_path)
+                spec_id = Path(task.spec_path).stem
+                propose_commit = (
+                    find_last_commit_touching(worktree_path, f"openspec/changes/{spec_id}/tasks.md")
+                    if worktree_path.is_dir()
+                    else None
+                )
+                resolved_repo, project_harness = _resolve_project_repo(repo, cfg)
+                if propose_commit is not None:
+                    reset_worktree_to_commit(worktree_path, propose_commit)
+                    clear_worktree = False
+                    console.print(
+                        "[dim]kept the already-proposed OpenSpec change, discarded the "
+                        "failed implementation attempt[/dim]"
+                    )
+                    # `reset_worktree_to_commit`'s `git clean -fdx` discards the
+                    # worktree's `.agent/<harness>/` back to whatever was
+                    # committed as of `propose_commit` -- stale if Cosmo's own
+                    # harness templates (guardrail hooks, settings.json) changed
+                    # since this worktree was first created. Unlike
+                    # `create_worktree`'s two call sites, a kept-worktree retry
+                    # never re-syncs on its own; do it here so a fixed guardrail
+                    # actually applies to the retried attempt, not just to the
+                    # next brand-new worktree.
+                    harness_name, _source = resolve_harness_name(
+                        None, project_harness, cfg.harness.name
+                    )
+                    sync_harness_assets(worktree_path, harness_name, emitter=EventEmitter(writer))
+                else:
+                    remove_worktree(
+                        repo_path=resolved_repo,
+                        worktree_path=worktree_path,
+                        branch=f"task/{spec_id}",
+                    )
+            result = writer.queue_retry(task_id, clear_worktree=clear_worktree)
+            emit_state_changed(EventEmitter(writer), result)
     except TaskNotFoundError:
         err_console.print(f"[red]no such task: {task_id!r}[/red]")
         raise typer.Exit(code=1) from None

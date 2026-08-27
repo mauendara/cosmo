@@ -182,6 +182,37 @@ class StoreWriter:
                 task_id, run_id=run_id, from_state=from_state, to_state="queued", now=now
             )
 
+    def queue_resume_at(self, task_id: str, stage: TaskStatus) -> TransitionResult:
+        """`stage` is `COMMITTING` or `MERGING` -- both callers (`cli.main.
+        queue_retry`) already checked this task's most recent terminal block
+        was an `environment_error` at that exact stage, with everything
+        before it (`IMPLEMENTING`/`VALIDATING`, and `REVIEWING` when
+        `stage` is `MERGING`) already having succeeded.
+
+        Unlike `queue_retry`, this deliberately does **not** touch
+        `attempt_count` or `worktree_path`: neither was consumed or
+        invalidated by an `environment_error` at `COMMITTING`/`MERGING`
+        (spec 6.2's "does not count toward the task's retry limit" --
+        `task.machine`'s own module docstring), so there is nothing to
+        reset. The worktree stays exactly as `IMPLEMENTING`/`VALIDATING`/
+        `REVIEWING` left it -- resuming here means *not* discarding that
+        work, which is the entire point."""
+        now = utcnow_iso()
+        with self._conn:
+            from_state = self._current_status(task_id)
+            self._conn.execute(
+                """
+                UPDATE task_queue
+                SET status = 'queued', blocked_reason = NULL, resume_at_stage = ?,
+                    updated_at = ?
+                WHERE task_id = ?
+                """,
+                (stage.value, now, task_id),
+            )
+            return self._record_transition(
+                task_id, run_id=None, from_state=from_state, to_state="queued", now=now
+            )
+
     def queue_block(
         self,
         task_id: str,
@@ -218,12 +249,22 @@ class StoreWriter:
         `worktree_path`). `run_id` defaults to `None` for every caller
         outside a run (the CLI's standalone `queue retry`/`queue block`
         commands, which have no run to attribute to) -- `task.machine.
-        run_task` (Phase 8) is the one caller that now passes a real value."""
+        run_task` (Phase 8) is the one caller that now passes a real value.
+
+        Also unconditionally clears `resume_at_stage` (v6: `queue_resume_at`
+        below) -- every real transition, whatever state it's headed to, is
+        the resume hint actually being consumed. `run_task` reads it once at
+        its own entry and its very next action is always a `queue_
+        transition` call (into `COMMITTING` or `MERGING` directly, or into
+        `IMPLEMENTING` for the ordinary case) -- so clearing it here, rather
+        than via a second write from `run_task` itself, needs no new call
+        site and can't be skipped by a caller that forgets to."""
         now = utcnow_iso()
         with self._conn:
             from_state = self._current_status(task_id)
             self._conn.execute(
-                "UPDATE task_queue SET status = ?, updated_at = ? WHERE task_id = ?",
+                "UPDATE task_queue SET status = ?, resume_at_stage = NULL, updated_at = ? "
+                "WHERE task_id = ?",
                 (to_state.value, now, task_id),
             )
             return self._record_transition(

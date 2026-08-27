@@ -105,15 +105,44 @@ def find_last_commit_touching(worktree_path: Path, relative_path: str) -> str | 
     return sha or None
 
 
-def reset_worktree_to_commit(worktree_path: Path, commit: str) -> None:
+def reset_worktree_to_commit(
+    worktree_path: Path, commit: str, *, docker_bin: str = "docker"
+) -> None:
     """Hard-resets `worktree_path` to `commit`, then discards every
     untracked file/directory -- used by a genuine retry that wants to
     discard a failed `IMPLEMENTING` attempt (committed or not, tracked or
     not -- e.g. a scaffolded `frontend/` never `git add`ed) while keeping
     an already-valid `PROPOSING` commit intact, rather than removing the
-    whole worktree and starting over from `base_branch`."""
+    whole worktree and starting over from `base_branch`.
+
+    `git clean -fdx` alone can leave root-owned entries behind -- the same
+    root-owned-by-a-gate-container problem `remove_worktree` already has a
+    fallback for (confirmed live: a real blocked task's `node_modules_old`
+    survived `git clean -fdx` intact, root ownership unchanged). A dry-run
+    clean immediately after the real one lists exactly what didn't actually
+    go; each such entry gets the same throwaway-root-container removal
+    `_force_remove_root_owned` already does for whole-worktree teardown.
+    Without this, a retried attempt inherits the exact cruft the *previous*
+    attempt couldn't clean up either, permission-denied in a loop."""
     _run_git(worktree_path, "reset", "--hard", commit)
     _run_git(worktree_path, "clean", "-fdx")
+    for leftover in _remaining_clean_targets(worktree_path):
+        _force_remove_root_owned(leftover, docker_bin=docker_bin)
+
+
+def _remaining_clean_targets(worktree_path: Path) -> list[Path]:
+    """What a dry-run `git clean -fdxn` still lists right after the real
+    `git clean -fdx` ran -- i.e., entries the real clean could not actually
+    remove."""
+    result = _run_git(worktree_path, "clean", "-fdxn")
+    if result.returncode != 0:
+        return []
+    prefix = "Would remove "
+    return [
+        worktree_path / line.removeprefix(prefix).rstrip("/")
+        for line in result.stdout.splitlines()
+        if line.startswith(prefix)
+    ]
 
 
 _CLEANUP_IMAGE = "alpine:3.21"

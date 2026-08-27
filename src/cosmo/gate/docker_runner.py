@@ -11,6 +11,7 @@ real writer.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import time
 import urllib.error
@@ -38,8 +39,36 @@ def container_flags(gate: GateConfig, run_id: str, task_id: str) -> list[str]:
     container uniformly (build/unit/e2e), not only the Chromium-driving e2e
     one -- the memory/shm rationale is specific to Chromium, but a larger
     `/dev/shm` never hurts a Maven or npm build, and one code path beats a
-    branch that only some callers remember to take."""
-    return ["--ipc=host", f"--shm-size={gate.shm_size}", *container_labels(run_id, task_id)]
+    branch that only some callers remember to take.
+
+    `--user`/`HOME` close a real, confirmed bug: every gate container's
+    default image user is root, so anything a build/e2e stage writes into
+    the bind-mounted worktree (`node_modules`, `dist`, `target`) lands
+    root-owned on the host. The unprivileged `IMPLEMENTING` harness session
+    can then never clean those files up itself -- `rm`, `sudo`, and even a
+    cross-filesystem `mv` (copy-then-delete, and the delete half needs
+    write permission on the *file's own* parent dir) all fail with
+    `Permission denied`. Confirmed live on this host, twice (Phase 6/7's
+    `git.worktree.remove_worktree._force_remove_root_owned`, and a real
+    Phase 10 acceptance-run task that spent a whole retry trying and failing
+    to relocate a root-owned `node_modules_old` before Cosmo's own secrets
+    gate re-flagged it). Verified by hand against the real `node`, `maven`,
+    and `mcr.microsoft.com/playwright` images with this exact flag pair
+    (Playwright launches fine as a non-root UID; its own Docker image
+    already runs headless Chromium with an equivalent `--no-sandbox`
+    posture, confirmed separately). `HOME=/tmp` (not the bind mount) gives
+    npm/Maven's cache a writable home without leaving dotfiles in the
+    worktree -- ephemeral per `--rm` container, same tradeoff `--rm` already
+    makes for everything else in it."""
+    return [
+        "--ipc=host",
+        f"--shm-size={gate.shm_size}",
+        "--user",
+        f"{os.getuid()}:{os.getgid()}",
+        "-e",
+        "HOME=/tmp",
+        *container_labels(run_id, task_id),
+    ]
 
 
 @dataclass(frozen=True, slots=True)

@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from cosmo.store import StoreWriter, TaskNotFoundError, get_task, list_tasks
-from cosmo.store.enums import BlockedReason, FailureStage, FailureType, NextAction
+from cosmo.store.enums import BlockedReason, FailureStage, FailureType, NextAction, TaskStatus
 
 
 def test_queue_add_then_list_round_trips_a_dag(tmp_path: Path) -> None:
@@ -93,6 +93,49 @@ def test_queue_retry_unknown_task_raises(tmp_path: Path) -> None:
     writer = StoreWriter(tmp_path / "cosmo.db")
     with pytest.raises(TaskNotFoundError):
         writer.queue_retry("nonexistent")
+    writer.close()
+
+
+def test_queue_resume_at_sets_stage_without_touching_attempt_count_or_worktree(
+    tmp_path: Path,
+) -> None:
+    """Unlike `queue_retry`, `queue_resume_at` must not reset `attempt_count`
+    or `worktree_path` -- an `environment_error` at `COMMITTING`/`MERGING`
+    never consumed the retry budget and the worktree still has the good,
+    already-validated-and-reviewed work sitting on it (the entire point of
+    resuming there instead of discarding it)."""
+    db_path = tmp_path / "cosmo.db"
+    writer = StoreWriter(db_path)
+    writer.queue_add(task_id="add-foo", spec_path="p1", max_attempts=2)
+    writer.queue_begin_attempt("add-foo")
+    writer.queue_set_worktree_path("add-foo", Path("/some/worktree"))
+    writer.queue_block("add-foo", BlockedReason.ENVIRONMENT)
+
+    writer.queue_resume_at("add-foo", TaskStatus.MERGING)
+    resumed = get_task(db_path, "add-foo")
+    assert resumed is not None
+    assert resumed.status == "queued"
+    assert resumed.blocked_reason is None
+    assert resumed.resume_at_stage == "merging"
+    assert resumed.attempt_count == 1  # untouched
+    assert resumed.worktree_path == "/some/worktree"  # untouched
+    writer.close()
+
+
+def test_queue_transition_clears_resume_at_stage(tmp_path: Path) -> None:
+    """`resume_at_stage` is consumed exactly once, by the first real
+    transition after it was set -- `task.machine.run_task`'s own next move
+    on resuming is always a `queue_transition` call, so this is what
+    actually clears the hint (see `queue_transition`'s own docstring)."""
+    db_path = tmp_path / "cosmo.db"
+    writer = StoreWriter(db_path)
+    writer.queue_add(task_id="add-foo", spec_path="p1", max_attempts=2)
+    writer.queue_resume_at("add-foo", TaskStatus.COMMITTING)
+
+    writer.queue_transition("add-foo", TaskStatus.COMMITTING)
+    task = get_task(db_path, "add-foo")
+    assert task is not None
+    assert task.resume_at_stage is None
     writer.close()
 
 

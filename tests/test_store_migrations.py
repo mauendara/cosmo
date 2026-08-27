@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -259,6 +260,68 @@ def test_migration_7_preserves_existing_run_state_rows_and_accepts_crashed(
     conn.close()
 
 
+def test_migration_7_succeeds_against_a_real_database_with_referencing_rows(
+    tmp_path: Path,
+) -> None:
+    """Reproduces a real bug found against the Phase 10 acceptance run's own
+    database: migrations 1-6 applied long ago, when `run_state` was still
+    empty, then real `IMPLEMENTING` attempts wrote `task_failures` rows that
+    reference an existing `run_id` -- exactly the shape migration 7's
+    recreate-copy-swap of `run_state` must tolerate, not just an empty
+    table. Before the fix, `DROP TABLE run_state` raised
+    `sqlite3.IntegrityError: FOREIGN KEY constraint failed` under
+    `foreign_keys=ON` because `task_failures.run_id` still pointed at it."""
+    db_path = tmp_path / "cosmo.db"
+    conn = connect_writer(db_path)
+    migration_1_through_6 = [m for m in MIGRATIONS if m.version <= 6]
+    script = "BEGIN;\n"
+    for m in migration_1_through_6:
+        script += m.sql + "\n"
+    script += (
+        "CREATE TABLE schema_migrations ("
+        "    version INTEGER PRIMARY KEY, description TEXT NOT NULL, applied_at TEXT NOT NULL"
+        ");\n"
+    )
+    for m in migration_1_through_6:
+        script += f"INSERT INTO schema_migrations VALUES ({m.version}, 'x', 't0');\n"
+    script += "COMMIT;"
+    conn.executescript(script)
+
+    conn.execute(
+        """
+        INSERT INTO run_state (
+            run_id, status, harness, permission_mode, max_turns, base_branch,
+            started_at, updated_at
+        ) VALUES ('run-1', 'stopped', 'claude', 'dontAsk', 80, 'develop', 't0', 't0')
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO task_queue (
+            task_id, spec_path, status, attempt_count, max_attempts, created_at, updated_at
+        ) VALUES ('t1', 'openspec/changes/t1', 'blocked', 3, 2, 't0', 't0')
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO task_failures (
+            task_id, run_id, attempt_number, failure_type, failure_stage, error_summary,
+            will_retry, next_action, timestamp
+        ) VALUES ('t1', 'run-1', 3, 'timeout', 'implement', 'implement timed out',
+                   0, 'block', 't0')
+        """
+    )
+    conn.commit()
+
+    applied = migrate(conn)
+    assert applied == [m.version for m in MIGRATIONS if m.version > 6]
+
+    row = conn.execute("SELECT run_id FROM task_failures WHERE task_id = 't1'").fetchone()
+    assert row[0] == "run-1"
+    assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+    conn.close()
+
+
 def test_migration_8_adds_failure_signature_defaulting_to_null(tmp_path: Path) -> None:
     conn = connect_writer(tmp_path / "cosmo.db")
     migrate(conn)
@@ -291,4 +354,46 @@ def test_migration_8_adds_failure_signature_defaulting_to_null(tmp_path: Path) -
         "SELECT failure_signature FROM task_failures WHERE task_id = 't1'"
     ).fetchone()
     assert reread[0] == "missing_lockfile"
+    conn.close()
+
+
+def test_migration_9_adds_resume_at_stage_defaulting_to_null(tmp_path: Path) -> None:
+    conn = connect_writer(tmp_path / "cosmo.db")
+    migrate(conn)
+    conn.execute(
+        """
+        INSERT INTO task_queue (
+            task_id, spec_path, status, attempt_count, max_attempts, created_at, updated_at
+        ) VALUES ('t1', 'openspec/changes/t1', 'queued', 0, 2, 't0', 't0')
+        """
+    )
+    conn.commit()
+    row = conn.execute("SELECT resume_at_stage FROM task_queue WHERE task_id = 't1'").fetchone()
+    assert row[0] is None
+
+    for value in ("committing", "merging"):
+        conn.execute("UPDATE task_queue SET resume_at_stage = ? WHERE task_id = 't1'", (value,))
+        conn.commit()
+        reread = conn.execute(
+            "SELECT resume_at_stage FROM task_queue WHERE task_id = 't1'"
+        ).fetchone()
+        assert reread[0] == value
+    conn.close()
+
+
+def test_migration_9_rejects_a_resume_at_stage_outside_the_two_allowed_values(
+    tmp_path: Path,
+) -> None:
+    conn = connect_writer(tmp_path / "cosmo.db")
+    migrate(conn)
+    conn.execute(
+        """
+        INSERT INTO task_queue (
+            task_id, spec_path, status, attempt_count, max_attempts, created_at, updated_at
+        ) VALUES ('t1', 'openspec/changes/t1', 'queued', 0, 2, 't0', 't0')
+        """
+    )
+    conn.commit()
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute("UPDATE task_queue SET resume_at_stage = 'implementing' WHERE task_id = 't1'")
     conn.close()

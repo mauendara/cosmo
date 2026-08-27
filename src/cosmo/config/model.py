@@ -64,6 +64,17 @@ class RetryConfig(_Strict):
     max_attempts: int = Field(gt=0)
     delay_min: int = Field(ge=0)
     delay_max: int = Field(ge=0)
+    # A task's own `max_attempts` budget resets to 0 on every `queue retry`
+    # regardless of *why* it blocked -- nothing otherwise remembers that the
+    # same task has already blocked for the identical reason across earlier
+    # runs. `store.failure_signature.detect_repeat_block` compares the most
+    # recent terminal block's class key against this many prior ones; a
+    # `queue retry` refuses (report, not another silent 2-attempt budget)
+    # once it's exceeded, requiring `--force` to proceed anyway. Real
+    # evidence for the default: a real acceptance-run task blocked on the
+    # identical `error_max_turns` reason 3 separate times before this
+    # existed, each time silently handed 2 more attempts.
+    repeat_block_threshold: int = Field(gt=0)
 
     @model_validator(mode="after")
     def _delay_ordered(self) -> RetryConfig:

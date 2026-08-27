@@ -43,6 +43,11 @@
             "type": "command",
             "command": "python3 \"$CLAUDE_PROJECT_DIR/.agent/claude/hooks/commit_integrity_guard.py\"",
             "timeout": 5000
+          },
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.agent/claude/hooks/background_task_guard.py\"",
+            "timeout": 5000
           }
         ]
       }
