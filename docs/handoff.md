@@ -10,15 +10,31 @@ that v4 exists, real `cosmo spec add`/`cosmo spec queue` fan-outs — your
 call, see "A real decision this session left open" below), run unattended
 overnight under systemd, post-run review against the spec's own claims.
 
-**One session of genuine prep happened ahead of Phase 10 itself** (not the
-acceptance run — Phase 10 proper is still not started): a new project
-template (`templates/projects/vite-react-local/`), a real gate bug it
+**Multiple sessions of genuine prep happened ahead of Phase 10 itself** (not
+the acceptance run — Phase 10 proper is still not started): a new project
+template (`templates/projects/vite-react-local/`), real gate bugs it
 surfaced and fixed, a project-agnostic guardrail widening, an agent-template
-polish pass, a Claude Code attribution setting, and a `cosmo init` git-identity
-step. None of this is Phase 10 scope creep — read the state doc's "Phase 10
-prep" section (right after "v4 workflow changes — Complete") in full before
-doing anything; it's short, and several of its decisions (especially the git
-identity one) change what "Get oriented" below used to say.
+polish pass, a Claude Code attribution setting, a `cosmo init` git-identity
+step, a real headless-permissions bug (`--allowedTools`, deviation 38) found
+running `cosmo spec add` for real, a `cosmo spec add` idempotency fix
+(deviation 40), and a `gate.frontend_image` bump to `node:24.19-bookworm`
+plus toolchain-version-pinning doc guardrails (deviations 41-42) found by
+the user's own real `cosmo run` against `vite-react-local`. None of this is
+Phase 10 scope creep — read the state doc's "Phase 10 prep" section (right
+after "v4 workflow changes — Complete") in full before doing anything; it
+has grown across sessions and is no longer short, and several of its
+decisions (especially the git identity one, and the permissions/toolchain
+fixes) change what "Get oriented" below used to say.
+
+**A real `cosmo run` already happened against `/home/dev/delta/cosmo-tests/
+todo-frontend-app` (run `fb254309566b4de0817847e29b455ab6`, real cost
+$4.66) before deviations 41-42 landed** — `scaffold-app` is `BLOCKED`
+(`code_failure`, 3 failed attempts) and 4 more tasks are stalled behind it;
+see the state doc's "Decisions made" prose for the full failure chain. Once
+the Docker gate image bump is confirmed (real opt-in `COSMO_GATE_DOCKER_E2E=1`
+suite, in progress as this was written), `cosmo queue retry scaffold-app`
++ `cosmo run` against that same repo is the natural next real-world check —
+worth doing before Phase 10 proper, not folded silently into it.
 
 ## Read these first, in this order
 
@@ -98,9 +114,14 @@ existed) says "5-10 genuine OpenSpec changes, queued the old way." Now that
 door (`cosmo queue add` still works, but is no longer what a real user is
 pointed at), running Phase 10 entirely through the old direct-OpenSpec path
 would prove the overnight loop but never actually exercise `REVIEWING`/
-`FINISHING` or the raw-spec fan-out for real — both of which currently have
-**zero real-`claude -p` verification** (see the state doc's v4 "Things that
-will matter later"). A mixed run — some tasks via `cosmo spec add`/`spec
+`FINISHING` for real — both still have **zero real-`claude -p`
+verification** (see the state doc's v4 "Things that will matter later"). The
+raw-spec fan-out half (`cosmo spec add`) *is* now verified for real, same
+session as the git-identity work: it uncovered and fixed a real bug where
+`dontAsk` mode could never write files at all in a headless worktree
+(Claude Code's workspace-trust gate silently discards `permissions.allow`
+from `.claude/settings.json`; fixed via `--allowedTools` on the adapter's
+own argv — see the state doc's "Phase 10 prep" deviation 38). A mixed run — some tasks via `cosmo spec add`/`spec
 queue`, some via direct `cosmo queue add` — would cover more real ground in
 one overnight shot than either alone. This is a real, unresolved call for
 whoever runs Phase 10, not a decision already made on your behalf — confirm

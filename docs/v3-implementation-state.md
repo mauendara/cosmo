@@ -2323,6 +2323,14 @@ every commit in the repo instead of two.
 | `src/cosmo/git/merge.py` | `author: tuple[str, str] \| None` throughout (`_git`/`_assert_ready`/`attempt_merge_ladder`/`merge_task`) -- `None` omits the `-c user.name=...`/`-c user.email=...` override entirely |
 | `src/cosmo/task/machine.py` | `_do_merging` and `_git_commit_decisions_log` both branch on `config.git.unified_identity` to decide `None` vs. the explicit tuple |
 | `tests/test_bootstrap_git_identity.py`, `tests/test_cli_init.py`, `tests/test_git_merge.py`, `tests/test_task_machine.py` | New/extended coverage for all of the above, including the pre-existing `test_rerunning_init_...` test which now needs `input="n\n"` since a second `cosmo init` against the same repo hits the new prompt |
+| `templates/harness/claude/settings.json` | `permissions.allow: ["Write", "Edit", "Bash"]` added (see deviation 38) |
+| `src/cosmo/harness/claude/adapter.py` (`_build_argv`) | `--allowedTools Write Edit Bash` added (see deviation 38) |
+| `tests/test_harness_claude_adapter.py` | New `test_argv_carries_allowed_tools_regardless_of_settings_json` |
+| `src/cosmo/cli/main.py` (`spec_add`) | Warns and asks for confirmation before re-invoking the harness when `docs/specs/<name>-spec/tasks/*.md` already exist for that spec; declining reuses the existing files and returns without touching the harness at all (see deviation 40) |
+| `tests/test_cli_spec.py` | New `test_spec_add_with_existing_task_files_and_declined_confirmation_skips_the_harness`, `test_spec_add_with_existing_task_files_and_confirmed_reruns_the_harness` |
+| `src/cosmo/config/defaults.toml` (`gate.frontend_image`) | Bumped `node:20.18-bookworm` -> `node:24.19-bookworm` (see deviation 41) |
+| `templates/projects/vite-react-local/docs/frontend/architecture.md`, `templates/projects/java-spring-react/docs/frontend/architecture.md` | "Key dependencies" gains a Vite/Node compatibility note tied to `gate.frontend_image`; "Vite 5's preview server" generalized to "Vite's preview server" now that no major is pinned (see deviation 41) |
+| `templates/harness/claude/CLAUDE.md` | New "Toolchain versions -- pin, don't take 'latest'" section: don't let a package manager resolve whatever's newest against a gate image that isn't pinned to match; always commit the real lockfile the install step produced (see deviation 42) |
 
 ### Decisions made during this work
 
@@ -2358,6 +2366,106 @@ in the new template's own docs. Widened `PROTECTED_PATTERNS` to also cover
 `.tsx`/`.jsx` spec/test variants; `annotation_guard.py`'s skip-annotation
 patterns needed no change (they match on content, not file path, so they
 already applied inside a `.tsx` file same as any other).
+
+**`cosmo spec add` could never write files in `dontAsk` mode -- the real gap
+was Claude Code's workspace-trust dialog, not a missing `permissions.allow`
+entry.** Found running `cosmo spec add todo-list` for real against
+`vite-react-local`'s scratch target repo: the headless session did the
+enrichment correctly (invoked `spec-enrichment`, read every relevant `docs/`
+file, decomposed into well-formed tasks) but every `Write`/`Edit`-create/
+`Bash mkdir` call was denied with "Permission to use \<tool\> has been denied
+because Claude Code is running in don't ask mode," and the session gave up
+and returned the task content as prose instead of writing it. First
+hypothesis -- `templates/harness/claude/settings.json` had no
+`permissions.allow` block at all, so nothing matched in `dontAsk` mode --
+was real but insufficient: added `permissions.allow: ["Write", "Edit",
+"Bash"]` to the template, re-synced it into the scratch repo via `cosmo
+init`, and reran. Identical failure. The raw CLI stderr (not part of
+stream-json, easy to miss) explained why: `Ignoring 3 permissions.allow
+entries from .claude/settings.json: this workspace has not been trusted.`
+Claude Code gates *all* settings-file-sourced permission rules behind an
+interactive trust dialog that `-p` mode explicitly skips showing (per
+`claude --help`) without ever granting -- so a freshly-synced worktree,
+which by construction has never been through that dialog and never can be in
+an unattended run, silently loses its entire allow list every single time,
+with no error surfaced anywhere in the adapter-visible stream. Confirmed the
+mechanism directly against the real `claude` binary in an isolated scratch
+directory outside Cosmo entirely: `permissions.allow` in `.claude/
+settings.json` alone denied Write/Bash every time; the same tool names
+passed as the CLI's own `--allowedTools Write Edit Bash` executed
+immediately, unaffected by workspace trust, because that gate applies only
+to settings-*file* permission rules, not CLI-flag ones. Fixed by adding
+`--allowedTools Write Edit Bash` to `ClaudeCodeAdapter._build_argv` --
+per-invocation, like `--permission-mode` and `--setting-sources` already
+are, rather than a mutable global-state workaround (e.g. programmatically
+marking every worktree path "trusted" in `~/.claude.json`, which would need
+re-doing for every fresh worktree Phase 5 creates and depends on an
+undocumented internal file format). `permissions.allow` stays in
+`settings.json` too, for the case a human runs `claude` interactively in a
+synced repo outside Cosmo and accepts the trust dialog themselves. Re-ran
+`cosmo spec add todo-list` against the same scratch repo after the fix:
+6 `*-task.md` files written for real and the preview table rendered,
+confirming both this fix and the previously-unverified spec-enrichment
+fan-out noted earlier this session.
+
+**`cosmo spec add` re-invoked the harness unconditionally, even when nothing
+had changed -- real, billed cost for a no-op.** Found running it a second
+time against the same spec that had already produced 6 task files: the
+fresh session (no memory of the prior run) read the spec, the docs, and the
+existing task files, judged them still correct, and made zero `Write`
+calls -- but that judgment cost ~$0.48 and 25 turns to reach, and nothing
+about the CLI signaled a re-run was even happening versus a fresh one.
+Fixed per deviation 40: `spec_add` now checks `tasks_dir` before resolving
+the harness at all and asks first; declining reuses the existing files
+(verified for real against the same repo -- zero new harness log, byte-
+identical files, instant).
+
+**A real `cosmo run` (the user's own, not this session's) surfaced two
+compounding, unrelated bugs in `vite-react-local`'s scaffold task, neither
+about the permissions/harness work above.** `scaffold-app` failed 3 times
+and was permanently blocked: attempts 1-2 hit `npm ci`'s `EUSAGE` (no
+committed `package-lock.json`) -- identical failure both times despite
+`retry_context` correctly surfacing the exact npm error on attempt 2, so a
+prose retry hint alone wasn't enough; attempt 3 got past the lockfile issue
+but hit a real environment mismatch: `npm install` resolved current Vite
+(8.2.2), whose `engines.node` (`^20.19.0 || >=22.12.0`, confirmed via
+`npm view vite engines`) the then-pinned `gate.frontend_image`
+(`node:20.18-bookworm`) doesn't satisfy, surfacing as an opaque `rolldown`
+native-binding crash rather than a clear version-mismatch message. The
+template's own `architecture.md` had already implicitly assumed Vite 5
+elsewhere (its "Gate compatibility" section's Host-header guidance) without
+ever pinning it, so "latest" had silently drifted two majors past what the
+doc was actually written against.
+
+First fix attempted -- pinning `Vite 5.x` explicitly in the template doc --
+works and was verified for real (`npm view vite@5 engines`:
+`^18.0.0 || >=20.0.0`, satisfied by 20.18), but only defers the same class
+of failure to whenever Vite (or any dependency) next raises its floor.
+User pushed back on shipping an aging pin as the "definitive" fix rather
+than modernizing both sides -- correct call: deviation 41 instead bumps the
+shared `gate.frontend_image` to `node:24.19-bookworm` and drops the
+version-specific pin in favor of an explicit doc note tying the two
+together, so a future Vite bump is "check `npm view vite engines` against
+what the gate image is" rather than "guess and find out from a cryptic
+Docker error." Verified for real, not just from registry metadata: a real
+`npm create vite@latest --template react-ts && npm install && npm run
+build` inside `node:24.19-bookworm` (real `docker run`, not a fixture)
+built cleanly with Vite 8.2.2, and the full opt-in real-Docker gate suite
+(`COSMO_GATE_DOCKER_E2E=1 pytest tests/test_gate_fixture_e2e.py
+tests/test_task_fixture_e2e.py`, 7 tests, real containers throughout, not
+mocked) passed end to end against the bumped image in 10m43s -- build, unit,
+e2e, the diff gate, the gitleaks backstop, and flaky-test classification all
+still work with the new image, not just the isolated Vite build. `java-spring-react`'s own frontend docs had
+the identical unpinned-Vite gap (same shared `gate.frontend_image`) and got
+the same doc fix for consistency, even though today's failure was only ever
+exercised through `vite-react-local`.
+
+Deviation 42 generalizes the lockfile half of this into
+`templates/harness/claude/CLAUDE.md` rather than only `vite-react-local`'s
+own docs, since "don't trust `npm install`/`pip install`/etc.'s latest
+resolution against an unpinned gate image, and always commit the real
+lockfile" is a project-agnostic failure class, not specific to this one
+template or to Vite.
 
 | # | Deviation | Spec ref | Phase | Rationale |
 |---|---|---|---|---|
@@ -2398,4 +2506,8 @@ already applied inside a `.tsx` file same as any other).
 | 35 | `test_path_guard.py`'s `PROTECTED_PATTERNS` gains `**/*.spec.tsx`, `**/*.test.tsx`, `**/*.spec.jsx`, `**/*.test.jsx` beyond spec 2.5's literal `.ts`-only list | §2.5 | 10 prep | Spec 2.5's literal patterns leave every React component test (`.test.tsx`) unprotected in any TS+JSX project, not only this one -- found writing `vite-react-local`'s `testing.md` |
 | 36 | `cosmo init` gains a git-identity step (`bootstrap.git_identity`, `cli.main._ensure_git_identity`): warns and asks before replacing an existing target-repo git identity, seeds `config.git.commit_author_name`/`commit_author_email` when none exists, `--git-author-name`/`--git-author-email` for scripted use | §3.4, §10.4 | 10 prep | Neither worktree creation (Phase 5) nor `cosmo init` (Phase 4) ever gave the implementer's own ad hoc commits a guaranteed identity; a fresh host with no global `~/.gitconfig` would make the first IMPLEMENTING commit fail outright |
 | 37 | `GitConfig.unified_identity` added (bool, default `False`) | §3.4 | 10 prep | User direction: support both "Cosmo's own bookkeeping commits use a distinct synthetic identity" (default) and "every commit in the repo uses one identity" as an explicit, durable config choice, not a one-off |
-| 38 | `git.merge`'s `author` parameter widened to `tuple[str, str] \| None` (`_git`, `_assert_ready`, `attempt_merge_ladder`, `merge_task`) | §3.4 | 10 prep | Mechanical requirement of deviation 37: `None` is how `unified_identity=True` tells `_git` to omit the `-c` override and inherit the repo's local git config instead |
+| 38 | `--allowedTools Write Edit Bash` added to the Claude adapter's argv, alongside (not instead of) `templates/harness/claude/settings.json`'s new `permissions.allow` | §2.3, §2.5 | 10 prep | Neither the spec nor `claude --help` documents that Claude Code's workspace-trust gate silently discards every settings-file `permissions.allow` entry for a directory that's never been through the interactive trust dialog -- true of every headless worktree by construction; found by hand running `cosmo spec add` for real, confirmed against the real binary in isolation |
+| 39 | `git.merge`'s `author` parameter widened to `tuple[str, str] \| None` (`_git`, `_assert_ready`, `attempt_merge_ladder`, `merge_task`) | §3.4 | 10 prep | Mechanical requirement of deviation 37: `None` is how `unified_identity=True` tells `_git` to omit the `-c` override and inherit the repo's local git config instead |
+| 40 | `cosmo spec add` warns and asks for confirmation before re-invoking the harness when `tasks_dir` already has files, rather than always re-running unconditionally | v4 plan's raw-spec front door | 10 prep | Found running it twice for real against the same spec: the harness re-invocation is billed, real usage every time, with no code-level idempotency check at all -- a second run with nothing changed still cost real money to re-verify (and re-confirm) the same output |
+| 41 | `gate.frontend_image` bumped `node:20.18-bookworm` -> `node:24.19-bookworm`; the Vite version pin added by deviation-adjacent doc work earlier this session was reverted in favor of an explicit compatibility note instead | §1, §6.1 | 10 prep | Found running a real `cosmo run` (not this session's own harness calls -- the user's, in their own shell, on the same target repo): the scaffold task's `npm install` resolved current Vite (8.2.2, requiring Node >=20.19/22.13 per `npm view vite engines`), incompatible with the old pinned image, and failed the gate's build stage with an opaque `rolldown` native-binding error. Pinning Vite back down to an old major was the first fix attempted and works, but only defers the same class of failure; bumping the shared gate image is the actual fix, verified for real both narrowly (`npm create vite@latest --template react-ts && npm install && npm run build` inside `node:24.19-bookworm`, real Docker run, succeeded) and broadly (the opt-in real-Docker gate suite, `COSMO_GATE_DOCKER_E2E=1`, against the existing `vite@^5.4.9`-pinned fixture repo) |
+| 42 | `templates/harness/claude/CLAUDE.md` gains a "Toolchain versions -- pin, don't take 'latest'" section, project-agnostic across every template | Not named in the spec | 10 prep | Same real run as deviation 41 also failed twice on a missing `package-lock.json` before the version mismatch -- the harness's retry got the exact npm error via `retry_context` and still repeated the identical mistake. Nothing told it to run a real `npm install` and commit the lockfile, or to check a gate image's pinned version before trusting a package manager's "latest." This is a reusable failure class (any template, any package manager), not specific to `vite-react-local`, so it belongs in the shared harness policy doc, not one template's own docs |

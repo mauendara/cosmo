@@ -4,6 +4,11 @@
     "commit": ""
   },
   "permissions": {
+    "allow": [
+      "Write",
+      "Edit",
+      "Bash"
+    ],
     "deny": [
       "Read(./.env*)",
       "Read(./secrets/**)",

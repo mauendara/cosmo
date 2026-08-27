@@ -125,6 +125,53 @@ def test_spec_add_copies_in_a_raw_spec_via_from_and_reports_when_the_harness_wri
     assert "no *-task.md files were written" in result.stderr
 
 
+def test_spec_add_with_existing_task_files_and_declined_confirmation_skips_the_harness(
+    tmp_path: Path,
+) -> None:
+    """Regression: `spec add` used to always re-invoke the harness even when
+    `tasks_dir` already had files from a prior run -- real, billed usage for
+    a no-op. Declining the confirmation must reuse the existing files
+    untouched and never reach harness resolution at all."""
+    repo = tmp_path / "target"
+    repo.mkdir()
+    _register(repo)
+    (repo / "docs" / "specs").mkdir(parents=True)
+    (repo / "docs" / "specs" / "demo-spec.md").write_text("# Demo\n", encoding="utf-8")
+    body = "---\ntask_id: demo-backend\ndepends_on: []\ntitle: Backend\n---\n\nbody\n"
+    task_path = _write_task_file(repo, "demo", "backend-task.md", body)
+
+    result = runner.invoke(
+        app, ["spec", "add", "demo", "--repo", str(repo), "--harness", "fake"], input="n\n"
+    )
+
+    assert result.exit_code == 0, result.stdout
+    assert "task file(s) already exist" in result.stdout
+    assert "harness not run" in result.stdout
+    assert "harness:" not in result.stdout
+    assert task_path.read_text(encoding="utf-8") == body
+
+
+def test_spec_add_with_existing_task_files_and_confirmed_reruns_the_harness(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "target"
+    repo.mkdir()
+    _register(repo)
+    (repo / "docs" / "specs").mkdir(parents=True)
+    (repo / "docs" / "specs" / "demo-spec.md").write_text("# Demo\n", encoding="utf-8")
+    _write_task_file(
+        repo, "demo", "backend-task.md", "---\ntask_id: demo-backend\ndepends_on: []\n---\n\nb\n"
+    )
+
+    result = runner.invoke(
+        app, ["spec", "add", "demo", "--repo", str(repo), "--harness", "fake"], input="y\n"
+    )
+
+    assert result.exit_code == 0, result.stdout
+    assert "task file(s) already exist" in result.stdout
+    assert "harness:" in result.stdout
+
+
 def test_spec_queue_inserts_one_task_per_file_with_the_right_batch_id(tmp_path: Path) -> None:
     repo = tmp_path / "target"
     repo.mkdir()

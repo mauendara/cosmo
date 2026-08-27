@@ -64,7 +64,7 @@ to exist) -- see `testing.md`.
 
 The gate's e2e stage reaches `vite preview` by its Docker network container
 hostname, not `localhost` -- Playwright and the frontend run in separate
-containers on a shared network. Vite 5's preview server rejects any other
+containers on a shared network. Vite's preview server rejects any other
 Host header by default (a DNS-rebinding guard) and fails with "Blocked
 request. This host ... is not allowed", which surfaces in Playwright as a
 confusing "element not found" rather than a clear cause. Set both of these
@@ -82,10 +82,25 @@ preview: {
 
 ## Key dependencies
 
-- **Vite** for dev server + build -- fast HMR, native ESM.
+- **Vite** for dev server + build -- fast HMR, native ESM. This template's
+  own gate build stage runs inside a fixed Node image (`gate.frontend_image`,
+  `node:24.19-bookworm` as of this writing), which satisfies current Vite's
+  `engines.node` requirement (`^20.19.0 || >=22.12.0` as of Vite 8) with
+  headroom. If a future Vite major raises that floor again, bump
+  `gate.frontend_image` to match rather than pinning Vite to an old major --
+  check `npm view vite engines` against whatever this repo's `docs/` (or a
+  prior task's committed `package.json`) says the gate image actually is
+  before assuming `npm install`'s "latest" is safe. A mismatch here fails
+  the gate with an opaque native-binding error, not a clear version-mismatch
+  message.
 - **TypeScript**, strict mode. A type error is a build failure, not a
   warning to fix later.
 - **Tailwind** for styling -- see `styling.md`.
 - **Playwright** for e2e, run headless against the built app inside the
   validation gate's Docker container -- never against a developer's locally
   running dev server, so the gate result reflects what actually ships.
+
+Run a real `npm install` (never hand-author `package.json` without actually
+running it) and commit the `package-lock.json` it produces alongside
+`package.json` -- the gate always runs `npm ci`, which requires an existing,
+valid lockfile and fails outright without one.

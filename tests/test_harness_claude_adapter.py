@@ -89,6 +89,25 @@ def test_argv_restricts_setting_sources_to_project_only(tmp_path: Path) -> None:
     assert argv[argv.index("--setting-sources") + 1] == "project"
 
 
+def test_argv_carries_allowed_tools_regardless_of_settings_json(tmp_path: Path) -> None:
+    """Regression pin for a real bug found in `cosmo spec add`: on a
+    directory that has never been through Claude Code's interactive
+    workspace-trust dialog -- true of every headless worktree, created fresh
+    per task -- the CLI silently ignores `permissions.allow` from
+    `.claude/settings.json` entirely and denies Write/Edit/Bash outright,
+    with no error the adapter can see in the stream-json output. Verified by
+    a real invocation both ways: settings.json's allow list alone denied
+    every Write/Bash call in a fresh directory; the same list passed via
+    `--allowedTools` executed normally, unaffected by workspace trust. This
+    only pins the flag's presence in the constructed argv."""
+    adapter = _adapter(tmp_path)
+    argv = adapter._build_argv("hello")  # noqa: SLF001
+
+    assert "--allowedTools" in argv
+    idx = argv.index("--allowedTools")
+    assert argv[idx + 1 : idx + 4] == ["Write", "Edit", "Bash"]
+
+
 def test_env_carries_task_id_and_db_path_for_the_guardrail_hooks(tmp_path: Path) -> None:
     """The test-path guard hook (templates/harness/claude/hooks/
     test_path_guard.py) is a separate OS process with no other way to ask

@@ -63,7 +63,7 @@ ipc_host = true
 # the task worktree root.
 backend_image = "maven:3.9.9-eclipse-temurin-21"
 backend_dir = "backend"
-frontend_image = "node:20.18-bookworm"
+frontend_image = "node:24.19-bookworm"
 frontend_dir = "frontend"
 
 stage_timeout_seconds = 1800

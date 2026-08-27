@@ -77,6 +77,26 @@ own deterministic commits (the `COMMITTING` step's decisions-log entry,
 merge/rebase commits, spec 3.4) already carry no such trailer either. This
 is not something to work around by adding the trailer back by hand.
 
+## Toolchain versions -- pin, don't take "latest"
+
+The validation gate builds inside a fixed Docker image per language/stack
+(`gate.backend_image`/`gate.frontend_image` in Cosmo's own config -- if you
+need the exact tag, check an existing `package.json`/`pom.xml`/lockfile
+already committed in this repo from a prior task, or this project's own
+`docs/`). A package manager's "latest" is not pinned to that image and can
+silently outpace it over time -- letting `npm install`/`pip install`/etc.
+resolve whatever is newest today is how a scaffold looks fine in this
+session but fails the gate's build stage with an opaque native-binding or
+version-resolution error instead of a clear "incompatible version" message.
+If this project's own `docs/` names a specific version or major range for a
+dependency, follow it exactly rather than defaulting to whatever a package
+manager resolves on its own; if it doesn't name one, prefer an older,
+already-widely-supported major over the newest release. Always commit the
+real lockfile your install step actually produced (`package-lock.json`,
+etc.) -- the gate's install step is a clean, from-scratch one (e.g.
+`npm ci`), which fails outright without one; hand-authoring a manifest
+without running the real install command is the same mistake.
+
 ## Project knowledge
 
 `docs/` in this repository holds architecture and decision notes that are

@@ -21,7 +21,17 @@ local-vs-server-state boundary.
 
 ## Key dependencies
 
-- **Vite** for dev server + build -- fast HMR, native ESM.
+- **Vite** for dev server + build -- fast HMR, native ESM. The gate's build
+  stage runs inside a fixed Node image (`gate.frontend_image`,
+  `node:24.19-bookworm` as of this writing), which satisfies current Vite's
+  `engines.node` requirement (`^20.19.0 || >=22.12.0` as of Vite 8) with
+  headroom. If a future Vite major raises that floor again, bump
+  `gate.frontend_image` to match rather than pinning Vite to an old major --
+  check `npm view vite engines` against whatever this repo's `docs/` (or a
+  prior task's committed `package.json`) says the gate image actually is
+  before assuming `npm install`'s "latest" is safe. A mismatch here fails
+  the gate with an opaque native-binding error, not a clear version-mismatch
+  message.
 - **TypeScript**, strict mode. A type error is a build failure, not a
   warning to fix later.
 - **Tailwind** for styling -- see `styling.md`.
@@ -34,7 +44,7 @@ local-vs-server-state boundary.
 
 The gate's e2e stage reaches `vite preview` by its Docker network container
 hostname, not `localhost` -- Playwright and the frontend run in separate
-containers on a shared network (Phase 6). Vite 5's preview server rejects
+containers on a shared network (Phase 6). Vite's preview server rejects
 any other Host header by default (a DNS-rebinding guard) and fails with
 "Blocked request. This host ... is not allowed", which surfaces in Playwright
 as a confusing "element not found" rather than a clear cause. Set
