@@ -397,3 +397,55 @@ def test_migration_9_rejects_a_resume_at_stage_outside_the_two_allowed_values(
     with pytest.raises(sqlite3.IntegrityError):
         conn.execute("UPDATE task_queue SET resume_at_stage = 'implementing' WHERE task_id = 't1'")
     conn.close()
+
+
+def test_migration_10_preserves_existing_run_state_rows_and_accepts_blocked_remaining(
+    tmp_path: Path,
+) -> None:
+    """v7: migration 10 recreate-copy-swaps `run_state` again (same recipe
+    as migration 7) to widen `stop_reason` for the queue_empty-vs-blocked
+    gap fix."""
+    db_path = tmp_path / "cosmo.db"
+    conn = connect_writer(db_path)
+    migrate(conn)
+    conn.execute(
+        """
+        INSERT INTO run_state (
+            run_id, status, harness, permission_mode, max_turns, base_branch,
+            started_at, updated_at
+        ) VALUES ('run-1', 'running', 'claude', 'dontAsk', 80, 'develop', 't0', 't0')
+        """
+    )
+    conn.commit()
+
+    conn.execute(
+        "UPDATE run_state SET status = 'stopped', stop_reason = 'blocked_remaining' "
+        "WHERE run_id = 'run-1'"
+    )
+    conn.commit()
+    row = conn.execute(
+        "SELECT status, stop_reason FROM run_state WHERE run_id = 'run-1'"
+    ).fetchone()
+    assert row[0] == "stopped"
+    assert row[1] == "blocked_remaining"
+    conn.close()
+
+
+def test_migration_10_rejects_a_stop_reason_outside_the_known_values(tmp_path: Path) -> None:
+    db_path = tmp_path / "cosmo.db"
+    conn = connect_writer(db_path)
+    migrate(conn)
+    conn.execute(
+        """
+        INSERT INTO run_state (
+            run_id, status, harness, permission_mode, max_turns, base_branch,
+            started_at, updated_at
+        ) VALUES ('run-1', 'running', 'claude', 'dontAsk', 80, 'develop', 't0', 't0')
+        """
+    )
+    conn.commit()
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            "UPDATE run_state SET stop_reason = 'not_a_real_reason' WHERE run_id = 'run-1'"
+        )
+    conn.close()

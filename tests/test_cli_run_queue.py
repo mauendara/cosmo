@@ -152,3 +152,23 @@ def test_a_paused_or_non_terminal_outcome_exits_nonzero(
 
     assert result.exit_code == 1
     assert "paused" in result.output
+
+
+def test_blocked_remaining_exits_nonzero_and_is_not_styled_as_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """v7: a stop caused by every remaining task being BLOCKED must read as
+    a failure (nonzero exit, not green) -- it used to share QUEUE_EMPTY's
+    exit-0/green treatment, which is exactly the bug this stop reason
+    exists to fix."""
+    _register(tmp_path)
+    monkeypatch.setattr(
+        cli_main,
+        "run_queue",
+        lambda **_kw: _outcome(status=RunStatus.STOPPED, stop_reason=StopReason.BLOCKED_REMAINING),
+    )
+
+    result = runner.invoke(app, ["run", "--repo", str(tmp_path)])
+
+    assert result.exit_code == 1
+    assert "blocked_remaining" in result.output

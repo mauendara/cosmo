@@ -116,6 +116,11 @@ class StopReason(enum.Enum):
     next `cosmo run`'s startup reconciliation -- under Cosmo's strictly
     serial, single-process design (spec 5), only possible if the process
     that owned it died."""
+    BLOCKED_REMAINING = "blocked_remaining"
+    """v7: `resolve_execution_order` returned nothing to run, but at least
+    one task actually `BLOCKED` this run (as opposed to a genuinely empty or
+    finished queue) -- distinct from `QUEUE_EMPTY` so it is never treated as
+    a successful stop (see `cli.main._RUN_SUCCESSFUL_STOP_REASONS`)."""
 
 
 class HeartbeatSource(enum.Enum):

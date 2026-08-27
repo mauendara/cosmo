@@ -10,12 +10,28 @@ from pathlib import Path
 
 import pytest
 
+from cosmo.config import load_config
+from cosmo.config.model import CostConfig
 from cosmo.events.emitter import EventEmitter
 from cosmo.events.envelope import EventType
-from cosmo.run.recovery import RunLockHeldError, acquire_run_lock, reconcile_interrupted_tasks
-from cosmo.store.enums import RunStatus, TaskStatus
+from cosmo.run.recovery import (
+    RunLockHeldError,
+    acquire_run_lock,
+    reconcile_interrupted_tasks,
+    requeue_cost_blocked_tasks,
+)
+from cosmo.store.enums import BlockedReason, RunStatus, TaskStatus
 from cosmo.store.reader import get_run, get_task, list_events, list_task_failures
 from cosmo.store.writer import StoreWriter
+
+_NO_USER_CONFIG = Path("/nonexistent/config.toml")
+
+
+def _cost_config(*, max_cost_per_task_usd: float) -> CostConfig:
+    return CostConfig(
+        max_cost_per_run_usd=0.0, max_cost_per_task_usd=max_cost_per_task_usd, warn_at_fraction=0.8
+    )
+
 
 # -- acquire_run_lock ---------------------------------------------------------
 
@@ -233,4 +249,99 @@ def test_reconcile_is_a_no_op_on_a_healthy_startup(tmp_path: Path) -> None:
 
     assert outcome.requeued_task_ids == []
     assert outcome.crashed_run_ids == []
+    writer.close()
+
+
+# -- requeue_cost_blocked_tasks (v7) ------------------------------------------
+
+
+def test_a_cost_blocked_task_still_over_the_ceiling_is_left_alone(tmp_path: Path) -> None:
+    db_path = tmp_path / "cosmo.db"
+    writer = StoreWriter(db_path)
+    emitter = EventEmitter(writer)
+    writer.queue_add(task_id="a", spec_path="openspec/changes/a", max_attempts=2)
+    writer.task_cost_add("a", 2.0)
+    writer.queue_block("a", BlockedReason.COST)
+    cfg = load_config(config_path=_NO_USER_CONFIG).model_copy(
+        update={"cost": _cost_config(max_cost_per_task_usd=1.0)}
+    )
+
+    requeued = requeue_cost_blocked_tasks(
+        db_path=db_path, writer=writer, emitter=emitter, config=cfg, run_id="new-run"
+    )
+
+    assert requeued == []
+    task = get_task(db_path, "a")
+    assert task is not None
+    assert task.status == "blocked"
+    assert task.blocked_reason == "cost"
+    assert list_events(db_path, event_type=EventType.TASK_COST_REQUEUED.value) == []
+    writer.close()
+
+
+def test_a_cost_blocked_task_under_a_raised_ceiling_is_requeued(tmp_path: Path) -> None:
+    db_path = tmp_path / "cosmo.db"
+    writer = StoreWriter(db_path)
+    emitter = EventEmitter(writer)
+    writer.queue_add(task_id="a", spec_path="openspec/changes/a", max_attempts=2)
+    writer.queue_transition(task_id="a", to_state=TaskStatus.IMPLEMENTING)
+    writer.queue_begin_attempt("a")  # attempt_count -> 1
+    writer.queue_set_worktree_path("a", Path("/tmp/some/kept/worktree"))
+    writer.task_cost_add("a", 2.0)
+    writer.queue_block("a", BlockedReason.COST)
+    # task_transitions.run_id holds a real FK to run_state(run_id) -- the
+    # new run's own row must already exist, same ordering reconcile_
+    # interrupted_tasks's own tests already establish.
+    writer.run_create(
+        run_id="new-run",
+        harness="claude",
+        permission_mode="dontAsk",
+        max_turns=80,
+        base_branch="develop",
+    )
+    # A human raised the ceiling above the task's already-spent $2 since the
+    # block happened.
+    cfg = load_config(config_path=_NO_USER_CONFIG).model_copy(
+        update={"cost": _cost_config(max_cost_per_task_usd=5.0)}
+    )
+
+    requeued = requeue_cost_blocked_tasks(
+        db_path=db_path, writer=writer, emitter=emitter, config=cfg, run_id="new-run"
+    )
+
+    assert requeued == ["a"]
+    task = get_task(db_path, "a")
+    assert task is not None
+    assert task.status == "queued"
+    assert task.blocked_reason is None
+    assert task.attempt_count == 1, "not this task's fault -- nothing failed, nothing to reset"
+    assert task.worktree_path == "/tmp/some/kept/worktree"
+
+    events = list_events(db_path, event_type=EventType.TASK_COST_REQUEUED.value)
+    assert len(events) == 1
+    assert events[0].task_id == "a"
+    writer.close()
+
+
+def test_a_non_cost_blocked_task_is_left_alone_regardless_of_cost_config(tmp_path: Path) -> None:
+    db_path = tmp_path / "cosmo.db"
+    writer = StoreWriter(db_path)
+    emitter = EventEmitter(writer)
+    writer.queue_add(task_id="a", spec_path="openspec/changes/a", max_attempts=2)
+    writer.queue_block("a", BlockedReason.CODE_FAILURE)
+    # An enormous ceiling would trivially "clear" a cost block -- must have
+    # no effect at all on a different blocked_reason.
+    cfg = load_config(config_path=_NO_USER_CONFIG).model_copy(
+        update={"cost": _cost_config(max_cost_per_task_usd=1_000_000.0)}
+    )
+
+    requeued = requeue_cost_blocked_tasks(
+        db_path=db_path, writer=writer, emitter=emitter, config=cfg, run_id="new-run"
+    )
+
+    assert requeued == []
+    task = get_task(db_path, "a")
+    assert task is not None
+    assert task.status == "blocked"
+    assert task.blocked_reason == "code_failure"
     writer.close()

@@ -302,7 +302,10 @@ def test_per_task_cost_ceiling_blocks_one_task_and_the_queue_continues(tmp_path:
         writer.close()
 
     assert outcome.status is RunStatus.STOPPED
-    assert outcome.stop_reason is StopReason.QUEUE_EMPTY
+    # v7: a task actually blocked this run, so the empty order is reported
+    # as BLOCKED_REMAINING, not QUEUE_EMPTY -- this exact scenario (a block
+    # that looks like a clean finish) is the gap v7 closes.
+    assert outcome.stop_reason is StopReason.BLOCKED_REMAINING
     assert outcome.summary.completed == 1
     assert outcome.summary.blocked_by_reason.get("cost") == 1
 
@@ -316,12 +319,131 @@ def test_per_task_cost_ceiling_blocks_one_task_and_the_queue_continues(tmp_path:
     assert cheap.status == "done"
 
 
+def test_a_cost_blocked_task_is_auto_requeued_and_completes_once_the_ceiling_is_raised(
+    tmp_path: Path,
+) -> None:
+    """v7 item 3, end to end: no manual `queue retry` in between -- the
+    startup call to `run.recovery.requeue_cost_blocked_tasks` alone picks
+    the task back up once a later `run_queue` invocation's own config
+    raises `max_cost_per_task_usd` above what was already spent."""
+    low_ceiling = _fast_config(
+        tmp_path,
+        cost=CostConfig(max_cost_per_run_usd=0.0, max_cost_per_task_usd=1.0, warn_at_fraction=0.8),
+    )
+    repo = _repo_on_develop(tmp_path)
+    writer = StoreWriter(low_ceiling.paths.db_path)
+    writer.queue_add(task_id="solo", spec_path="openspec/changes/solo", max_attempts=2)
+    emitter = EventEmitter(writer)
+    adapter = FakeHarnessAdapter(
+        low_ceiling,
+        # propose reports more than the $1 ceiling -- IMPLEMENTING is never
+        # attempted, task blocks on cost.
+        script=ScriptedCall(outcome=FakeOutcome.SUCCESS, total_cost_usd=2.0),
+    )
+    gate = FakeGate(ScriptedGateResult(passed=True))
+
+    try:
+        first_outcome = run_queue(
+            config=low_ceiling,
+            writer=writer,
+            emitter=emitter,
+            adapter=adapter,
+            repo_path=repo,
+            base_branch="develop",
+            harness_name="claude",
+            gate_runner=_gate_runner(gate),
+        )
+    finally:
+        writer.close()
+
+    assert first_outcome.stop_reason is StopReason.BLOCKED_REMAINING
+    blocked = get_task(low_ceiling.paths.db_path, "solo")
+    assert blocked is not None
+    assert blocked.status == "blocked"
+    assert blocked.blocked_reason == "cost"
+
+    raised_ceiling = low_ceiling.model_copy(
+        update={
+            "cost": CostConfig(
+                max_cost_per_run_usd=0.0, max_cost_per_task_usd=5.0, warn_at_fraction=0.8
+            )
+        }
+    )
+    writer = StoreWriter(raised_ceiling.paths.db_path)
+    try:
+        emitter = EventEmitter(writer)
+        second_adapter = FakeHarnessAdapter(
+            raised_ceiling,
+            script=[
+                ScriptedCall(outcome=FakeOutcome.SUCCESS, total_cost_usd=1.0),  # propose
+                ScriptedCall(outcome=FakeOutcome.SUCCESS),  # implement
+            ],
+        )
+        second_outcome = run_queue(
+            config=raised_ceiling,
+            writer=writer,
+            emitter=emitter,
+            adapter=second_adapter,
+            repo_path=repo,
+            base_branch="develop",
+            harness_name="claude",
+            gate_runner=_gate_runner(gate),
+        )
+    finally:
+        writer.close()
+
+    assert second_outcome.status is RunStatus.STOPPED
+    assert second_outcome.stop_reason is StopReason.QUEUE_EMPTY
+    assert second_outcome.summary.completed == 1
+
+    done = get_task(raised_ceiling.paths.db_path, "solo")
+    assert done is not None
+    assert done.status == "done"
+
+
+def test_a_lone_blocked_task_stops_with_blocked_remaining_not_queue_empty(tmp_path: Path) -> None:
+    """v7's headline scenario: one task, it blocks, nothing else is queued
+    -- `resolve_execution_order` returns `[]` exactly as it would for a
+    genuinely empty/finished queue, but this must not read as a clean,
+    successful stop (green output, exit 0)."""
+    cfg = _fast_config(tmp_path)
+    repo = _repo_on_develop(tmp_path)
+    writer = StoreWriter(cfg.paths.db_path)
+    writer.queue_add(task_id="solo", spec_path="openspec/changes/solo", max_attempts=2)
+    emitter = EventEmitter(writer)
+    adapter = FakeHarnessAdapter(cfg, script=ScriptedCall(outcome=FakeOutcome.ENVIRONMENT_FAILURE))
+    gate = FakeGate(ScriptedGateResult(passed=True))
+
+    try:
+        outcome = run_queue(
+            config=cfg,
+            writer=writer,
+            emitter=emitter,
+            adapter=adapter,
+            repo_path=repo,
+            base_branch="develop",
+            harness_name="claude",
+            gate_runner=_gate_runner(gate),
+        )
+    finally:
+        writer.close()
+
+    assert outcome.status is RunStatus.STOPPED
+    assert outcome.stop_reason is StopReason.BLOCKED_REMAINING
+    assert outcome.summary.blocked_by_reason.get("environment") == 1
+
+    solo = get_task(cfg.paths.db_path, "solo")
+    assert solo is not None
+    assert solo.status == "blocked"
+
+
 def test_queue_empty_reports_queued_tasks_stalled_on_an_unmet_dependency(tmp_path: Path) -> None:
     """A task can be `queued` yet permanently unschedulable -- its
     `depends_on` names a task that will never reach `done` (here, one
-    `blocked` by the per-task cost ceiling). `QUEUE_EMPTY` alone doesn't
-    distinguish that from a genuinely empty queue; `stalled_queued_tasks`
-    is what lets a caller tell the two apart without a separate `queue ls`."""
+    `blocked` by the per-task cost ceiling). `stop_reason` alone (v7:
+    `BLOCKED_REMAINING`, since a task did block this run) doesn't say which
+    *other* tasks are stuck behind it; `stalled_queued_tasks` is what lets a
+    caller tell that apart without a separate `queue ls`."""
     cfg = _fast_config(
         tmp_path,
         cost=CostConfig(max_cost_per_run_usd=0.0, max_cost_per_task_usd=1.0, warn_at_fraction=0.8),
@@ -360,7 +482,7 @@ def test_queue_empty_reports_queued_tasks_stalled_on_an_unmet_dependency(tmp_pat
         writer.close()
 
     assert outcome.status is RunStatus.STOPPED
-    assert outcome.stop_reason is StopReason.QUEUE_EMPTY
+    assert outcome.stop_reason is StopReason.BLOCKED_REMAINING
     assert outcome.summary.completed == 0
     assert outcome.summary.stalled_queued_tasks == ["downstream"]
 

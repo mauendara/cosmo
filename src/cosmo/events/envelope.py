@@ -58,6 +58,13 @@ class EventType(enum.Enum):
     *not* paused on because `quota.bypass_5h_with_credits` is set -- the
     operator has opted in to spending real usage-credit money past the
     included subscription allowance. Always `severity=warning`."""
+    TASK_COST_REQUEUED = "task.cost_requeued"
+    """v7: `run.recovery.requeue_cost_blocked_tasks` found a `blocked`/
+    `cost` task no longer over the *current* `max_cost_per_task_usd` (a
+    human raised the ceiling, or disabled it, between runs) and cleared the
+    block. Always `severity=info` -- nothing failed here, unlike `task.
+    interrupted`; emitted once per requeued task, before it's transitioned
+    back to `queued`."""
 
 
 @dataclass(frozen=True, slots=True)

@@ -1,23 +1,57 @@
-# Handoff — Phase 10 acceptance run complete; three more real bugs found and fixed closing out the open-items list
+# Handoff — v7 items 1+3 implemented (BLOCKED_REMAINING stop reason + cost-block auto-requeue); v6 deliberately deferred
 
 You are picking up Cosmo mid-build. **Phases 0-9, the v4 workflow-changes
-feature, the v5 improvements plan, and Phase 10's own acceptance-run prep
-(deviations 59-67, the prior handoff) are all implemented.** **This
-session's own work: the Phase 10 acceptance run against
-`/home/dev/delta/cosmo-tests/todo-frontend-app` reached full completion for
-the first time** (all six queued tasks — `scaffold-app`, `todo-data-model`,
-`use-local-storage-hook`, `use-todos-hook`, `todo-ui`, `todo-e2e` — reached
-`done`), and then the user asked to deliberately work through the previous
-handoff's own "what still needs validating" list item by item. Doing both
-found and fixed three more real bugs (deviations 68-70) — read
+feature, the v5 improvements plan, and Phase 10's own acceptance-run
+(deviations 59-70, the prior handoff) are all implemented.** **This
+session's own work: implemented items 1 and 3 of
+[v7-complete-queue-done-fixes-plan.md](v7-complete-queue-done-fixes-plan.md)**
+(deviation 71) — read
 [v3-implementation-state.md](v3-implementation-state.md)'s cumulative
-deviations table, entries **68-70**, before doing anything else; this
-document summarizes them, the table has the precise file:line-grounded
-detail. The table's own "Phase 10 — acceptance run" section has been
-reconciled with this session's work already — that housekeeping step is
-done, not left for you.
+deviations table, entry **71**, before doing anything else; this document
+summarizes it, the table has the precise file:line-grounded detail.
 
-## What actually happened this session
+**What changed, in one paragraph**: `run.loop.run_queue` used to report
+`StopReason.QUEUE_EMPTY` (green output, exit code 0, treated as success)
+for two different situations — a genuinely finished/empty queue, and every
+remaining task being stuck `BLOCKED` with a real, un-actioned failure. The
+Phase 10 acceptance run's own timing data showed this was the dominant cost
+in that run (`scaffold-app` alone spent 10h15m of its 19h37m total sitting
+`queued`/`blocked` with nobody noticing) — see v7's own "Context" section
+for the full breakdown. Item 1 fixes the observability gap: a new
+`StopReason.BLOCKED_REMAINING` (migration 10) is chosen instead whenever
+`summary.blocked_by_reason` is non-empty, which — with no further CLI
+change needed — already yields yellow styling and a nonzero exit code
+(`cli.main._RUN_SUCCESSFUL_STOP_REASONS` simply excludes it). Item 3 closes
+one specific, bounded case of the underlying stuck-ness: a task blocked on
+`blocked_reason=cost` can now only ever legitimately clear by a human
+raising `max_cost_per_task_usd` between runs (the stored cost never goes
+down) — `run.recovery.requeue_cost_blocked_tasks`, called unconditionally
+at `run_queue` startup alongside the existing `reconcile_interrupted_tasks`,
+re-evaluates every such task against the *current* config and clears the
+ones no longer over ceiling, preserving `attempt_count`/`worktree_path`
+since nothing about the task itself failed.
+
+**v7 items 2 and 4 remain open, deliberately deferred** — item 2 (get
+`cosmo notify watch` actually configured and running with a real Telegram
+bot token/chat id) needs credentials not available this session; item 4
+(whether future spec batches should be authored with more parallel
+branches) is a question for the *next* spec batch's authoring, not code.
+
+**v6 ([v6-project-template-aware-stuff-plan.md](v6-project-template-aware-stuff-plan.md))
+was explicitly asked about this session and deliberately not started** —
+its own Status line already says it needs a real second stack (a
+Python/FastAPI or plain Node/Express backend, or similar) to prove the
+abstraction before it's buildable, and the user confirmed: they'll do that
+second-stack testing themselves, then come back to it. Don't start v6
+opportunistically; wait for that.
+
+## What happened in the prior session (Phase 10 acceptance run)
+
+Kept as-is below for its own detail — the summary above already covers
+*this* session's own work (v7 items 1+3). This section, "Where the
+acceptance run actually stands right now", and "What still needs
+validating" all describe state as of the *end of the acceptance-run
+session*, one session before this handoff's own top summary.
 
 **Part 1 — a live gap reported by the user.** The user started a `cosmo
 run` and reported, watching it live: no visible task id, no visible task
@@ -159,10 +193,11 @@ Real, honest gaps — not fixed this session, and not fixable casually:
 |---|---|---|
 | [v3-cosmo-autonomous-agent-spec.md](v3-cosmo-autonomous-agent-spec.md) | The authoritative specification | **Source of truth** for the original 0-10 plan. v1 and v2 are superseded — read them only for history |
 | [v3-implementation-plan.md](v3-implementation-plan.md) | 11-phase build plan | The map for Phase 10 (its own section, near the end). **Do not edit** — it's the agreed scope; record decisions in `v3-implementation-state.md` instead |
-| [v3-implementation-state.md](v3-implementation-state.md) | What actually exists, plus decisions and gotchas | Read the cumulative deviations table's entries **68-70** in full before doing anything — this session's own real findings. The "Phase 10 — acceptance run" section has already been reconciled with this session's completion; no stale narrative left there |
+| [v3-implementation-state.md](v3-implementation-state.md) | What actually exists, plus decisions and gotchas | Read the cumulative deviations table's entries **68-71** in full before doing anything —68-70 are the prior session's real findings, 71 is this session's v7 work |
 | [v4-changes-to-workflow-plan.md](v4-changes-to-workflow-plan.md) | The raw-spec-workflow feature design | Implemented — see its own Status line |
 | [v5-improvements-plan.md](v5-improvements-plan.md) | Crash/pause resume, Telegram notifications, `--follow`, live-terminal observability, the quota-bypass flag, harness failure-pattern research (§5) | Implemented, parts 1-4/6-7 plus part 5's Class 1 — see its own Status line |
-| [v6-project-template-aware-stuff-plan.md](v6-project-template-aware-stuff-plan.md) | Making the gate/failure-classifier project-template-aware, for stacks beyond Java+Spring/Vite+React | **Not started — design record only.** Needs a real second stack before it's buildable, not opportunistic generalization |
+| [v6-project-template-aware-stuff-plan.md](v6-project-template-aware-stuff-plan.md) | Making the gate/failure-classifier project-template-aware, for stacks beyond Java+Spring/Vite+React | **Not started — design record only.** Needs a real second stack before it's buildable; the user is doing that testing themselves before this gets picked up again — don't start it opportunistically |
+| [v7-complete-queue-done-fixes-plan.md](v7-complete-queue-done-fixes-plan.md) | Closing the "queue_empty looks like done" gap found auditing the Phase 10 acceptance run's own timing data | **Items 1+3 implemented this session** (deviation 71) — see its own Status line. Items 2 (real Telegram credentials needed) and 4 (a spec-authoring question, not code) remain open |
 
 `v1-*` and `v2-*` in this folder are earlier spec drafts, fully superseded.
 `simple-template-handoff.md`/`old-agents-skills/` are historical, already
@@ -172,41 +207,41 @@ fully consumed.
 
 ```
 /home/dev/delta/cosmo/          # working branch: develop
-├── docs/                       # the six documents above
-├── deploy/                     # cosmo-run.service + cosmo-notify.service, README
-│   │                              StartLimitIntervalSec/StartLimitBurst moved
-│   │                              [Service] -> [Unit] this session (deviation 69)
-├── templates/                  # harness + project templates (source of truth)
-│   └── harness/claude/skills/spec-enrichment/SKILL.md  # unchanged this session
+├── docs/                       # the seven documents above (v7 added this session)
+├── deploy/                     # cosmo-run.service + cosmo-notify.service, README (unchanged
+│                                  this session)
+├── templates/                  # harness + project templates (unchanged this session)
 ├── src/cosmo/
-│   ├── checks.py, doctor.py, config/, harness/
-│   ├── bootstrap/                # cosmo init: openspec/docs/symlinks/git-identity/git-branch
-│   │   ├── git_branch.py           # new `commit_bootstrap_output` this session (deviation 69)
-│   │   └── init.py                 # `run_init` itself unchanged -- the commit call lives in
-│   │                                  `cli.main.init`, after `_ensure_git_identity`
-│   ├── watchdog.py, retention.py
-│   ├── git/{merge,worktree,secrets}.py
-│   ├── gate/                     # Phase 6: the Docker validation gate (unchanged this session,
-│   │                                confirmed clean across many more real runs)
-│   ├── task/                     # Phase 7/v4: the per-task state machine
-│   │   └── machine.py              # `_do_finishing` gains `_git_commit_archive` this session
-│   │                                  (deviation 69); commits `openspec archive`'s own output
-│   ├── run/                      # Phase 8/9: run-level state machine, DAG, breaker, quota, cost
-│   │   └── recovery.py             # `reconcile_interrupted_tasks`'s `run_id` param is now
-│   │                                  `str | None` this session (deviation 70)
-│   ├── spec/                     # v4: *-task.md frontmatter parsing (unchanged this session)
-│   ├── store/                    # SQLite schema, StoreWriter, reader queries (unchanged)
-│   └── cli/main.py               # `_print_emit` gains `TASK_STATE_CHANGED` + escaping this
-│                                    session (deviation 68); `run_cmd`'s single-`--task` path
-│                                    gains lock acquisition + worktree sweep + reconciliation
-│                                    before its own status check (deviation 70)
-├── tests/                       # 506 passing + 9 opt-in real-Docker/real-openspec
-│   ├── test_cli.py                 # `_print_emit` regression tests (deviation 68)
-│   ├── test_task_reviewing.py      # `_do_finishing` archive-commit regression test (69)
-│   ├── test_bootstrap_git_branch.py  # new file: `commit_bootstrap_output` unit tests (69)
-│   ├── test_cli_init.py            # `cosmo init` leaves a clean commit; SKIPPED_DIRTY guard (69)
-│   └── test_cli_run.py             # crash-reconciliation-before-status-check, held-lock
-│                                      error (70)
+│   ├── checks.py, doctor.py, config/, harness/, bootstrap/, watchdog.py, retention.py,
+│   │   git/, gate/, task/, spec/                       # all unchanged this session
+│   ├── run/
+│   │   ├── loop.py                 # `run_queue`'s `if not order:` branch now picks
+│   │   │                              BLOCKED_REMAINING over QUEUE_EMPTY when anything
+│   │   │                              blocked this run (deviation 71); calls the new
+│   │   │                              `requeue_cost_blocked_tasks` at startup alongside
+│   │   │                              `reconcile_interrupted_tasks`
+│   │   └── recovery.py             # new `requeue_cost_blocked_tasks` (deviation 71) --
+│   │                                  same "startup, nothing running yet" family as
+│   │                                  `reconcile_interrupted_tasks`, `acquire_run_lock`
+│   ├── store/
+│   │   ├── enums.py                 # `StopReason` gains `BLOCKED_REMAINING` (71)
+│   │   ├── migrations.py            # migration 10: `run_state.stop_reason` widened (71)
+│   │   └── writer.py                # new `queue_unblock` (71) -- unlike `queue_retry`,
+│   │                                    preserves `attempt_count`/`worktree_path`
+│   ├── events/envelope.py           # new `EventType.TASK_COST_REQUEUED` (71)
+│   └── cli/main.py                  # unchanged this session -- `_RUN_SUCCESSFUL_STOP_
+│                                        REASONS` already excludes anything not explicitly
+│                                        listed, so BLOCKED_REMAINING gets the right exit
+│                                        code/styling for free
+├── tests/                       # 514 passing + 9 opt-in real-Docker/real-openspec
+│   ├── test_run_loop.py            # BLOCKED_REMAINING branch (new + 2 updated assertions
+│   │                                  that used to say QUEUE_EMPTY for this exact bug),
+│   │                                  cost-block auto-requeue end to end (71)
+│   ├── test_run_recovery.py        # `requeue_cost_blocked_tasks` unit tests: still-over-
+│   │                                  ceiling left alone, raised-ceiling requeued, non-cost
+│   │                                  reasons never touched (71)
+│   ├── test_store_migrations.py    # migration 10 regression tests (71)
+│   └── test_cli_run_queue.py       # BLOCKED_REMAINING exits nonzero (71)
 └── check.sh                     # ruff + format + mypy --strict + pytest
 ```
 
@@ -214,7 +249,7 @@ fully consumed.
 
 ```bash
 cd /home/dev/delta/cosmo
-git log --oneline           # this session's Phase 10 completion commit should be at HEAD
+git log --oneline           # this session's v7 items 1+3 commit should be at HEAD
 git branch --show-current   # should say develop
 ./check.sh                  # must be green before you change anything
 cosmo doctor                # core checks + harness checks in two tables
@@ -330,7 +365,7 @@ session, more than once.
 ## When you finish (whatever "finish" means for the next session)
 
 1. `./check.sh` green (if any code changed at all).
-2. Record any new deviation in the cumulative table (next number is **71**).
+2. Record any new deviation in the cumulative table (next number is **72**).
 3. If Phase 10's own acceptance run against `todo-frontend-app` is still
    fully `done` and nothing regressed it, there is no more Phase 10
    backlog left to reconcile — a fresh spec batch queued against it is new

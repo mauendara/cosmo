@@ -182,6 +182,30 @@ class StoreWriter:
                 task_id, run_id=run_id, from_state=from_state, to_state="queued", now=now
             )
 
+    def queue_unblock(self, task_id: str, *, run_id: str | None = None) -> TransitionResult:
+        """Clears a `blocked` task back to `queued` without touching
+        `attempt_count` or `worktree_path` -- used by `run.recovery.
+        requeue_cost_blocked_tasks` (v7), where nothing failed: the cost
+        guard fires *before* an attempt starts (`task.machine.run_task`'s
+        `check_run_guard`), so there is nothing to discard, unlike `queue_
+        retry`'s deliberate fresh-start semantics (which exist for a real
+        failed attempt)."""
+        now = utcnow_iso()
+        with self._conn:
+            from_state = self._current_status(task_id)
+            self._conn.execute(
+                """
+                UPDATE task_queue
+                SET status = 'queued', blocked_reason = NULL, resume_at_stage = NULL,
+                    updated_at = ?
+                WHERE task_id = ?
+                """,
+                (now, task_id),
+            )
+            return self._record_transition(
+                task_id, run_id=run_id, from_state=from_state, to_state="queued", now=now
+            )
+
     def queue_resume_at(self, task_id: str, stage: TaskStatus) -> TransitionResult:
         """`stage` is `COMMITTING` or `MERGING` -- both callers (`cli.main.
         queue_retry`) already checked this task's most recent terminal block

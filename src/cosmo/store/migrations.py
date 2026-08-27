@@ -461,6 +461,41 @@ ALTER TABLE task_queue ADD COLUMN resume_at_stage TEXT
     CHECK (resume_at_stage IS NULL OR resume_at_stage IN ('committing', 'merging'));
 """
 
+# ============================================================================
+# Migration 10 -- v7: `run_state.stop_reason` gains 'blocked_remaining'.
+#
+# Distinguishes "the queue is genuinely empty/finished" from "nothing is
+# schedulable because every remaining task is BLOCKED" -- both used to share
+# `queue_empty`, which `cli.main` then rendered green/exit-0 either way (the
+# dominant cost in the Phase 10 acceptance run's own timing data: see
+# docs/v7-complete-queue-done-fixes-plan.md). Same recreate-copy-swap recipe
+# as migration 7, since SQLite has no `ALTER TABLE ... DROP CONSTRAINT`.
+# ============================================================================
+_SCHEMA_V10 = """
+CREATE TABLE run_state_v4 (
+    run_id          TEXT PRIMARY KEY,
+    status          TEXT NOT NULL CHECK (status IN ('idle', 'running', 'paused', 'stopped')),
+    harness         TEXT NOT NULL,
+    permission_mode TEXT NOT NULL,
+    max_turns       INTEGER NOT NULL,
+    base_branch     TEXT NOT NULL,
+    pause_reason    TEXT CHECK (pause_reason IN (
+                        'circuit_breaker', 'quota_exhausted_5h', 'quota_exhausted_weekly'
+                    )),
+    stop_reason     TEXT CHECK (stop_reason IN (
+                        'completed', 'max_time', 'queue_empty', 'cost_limit_reached',
+                        'manual', 'quota_exhausted_weekly', 'disk_low', 'crashed',
+                        'blocked_remaining'
+                    )),
+    started_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL,
+    stopped_at      TEXT
+);
+INSERT INTO run_state_v4 SELECT * FROM run_state;
+DROP TABLE run_state;
+ALTER TABLE run_state_v4 RENAME TO run_state;
+"""
+
 MIGRATIONS: list[Migration] = [
     Migration(1, "initial schema: events, queue, progress, run state, cost, history", _SCHEMA_V1),
     Migration(2, "task_failures.failure_stage gains secrets (gate gitleaks backstop)", _SCHEMA_V2),
@@ -488,6 +523,11 @@ MIGRATIONS: list[Migration] = [
         9,
         "task_queue gains resume_at_stage (v6, resume COMMITTING/MERGING in place)",
         _SCHEMA_V9,
+    ),
+    Migration(
+        10,
+        "run_state.stop_reason gains blocked_remaining (v7, queue_empty-vs-blocked gap)",
+        _SCHEMA_V10,
     ),
 ]
 

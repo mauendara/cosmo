@@ -1,7 +1,10 @@
 """Startup crash recovery (v5 improvements plan part 1): a task interrupted
 mid-flight by a killed/crashed `cosmo run` process is not silently lost
 forever, and a stale process lock stops two `cosmo run` invocations from
-racing the same queue.
+racing the same queue. Also home to a second, independent startup
+reconciliation concern (v7): `requeue_cost_blocked_tasks` re-evaluates
+`blocked`/`cost` tasks against the *current* config, since that block can
+only ever legitimately clear between runs, never mid-run.
 
 Called from `run.loop.run_queue` immediately alongside the existing
 `git.worktree.sweep_stale_worktrees` call -- same "nothing is running at
@@ -17,12 +20,22 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from cosmo.config.model import CosmoConfig
 from cosmo.events.emitter import EventEmitter
 from cosmo.events.envelope import EventType
 from cosmo.events.helpers import emit_state_changed
-from cosmo.store.enums import FailureStage, FailureType, NextAction, RunStatus, Severity, StopReason
+from cosmo.run.cost import task_cost_ceiling_reached
+from cosmo.store.enums import (
+    BlockedReason,
+    FailureStage,
+    FailureType,
+    NextAction,
+    RunStatus,
+    Severity,
+    StopReason,
+)
 from cosmo.store.enums import TaskStatus as TS
-from cosmo.store.reader import list_running_runs, list_tasks
+from cosmo.store.reader import get_task_cost, list_running_runs, list_tasks
 from cosmo.store.writer import StoreWriter
 
 _INTERRUPTIBLE_STATUSES = frozenset(
@@ -131,6 +144,48 @@ def reconcile_interrupted_tasks(
         crashed.append(run.run_id)
 
     return ReconcileOutcome(requeued_task_ids=requeued, crashed_run_ids=crashed)
+
+
+def requeue_cost_blocked_tasks(
+    *,
+    db_path: Path,
+    writer: StoreWriter,
+    emitter: EventEmitter,
+    config: CosmoConfig,
+    run_id: str | None,
+) -> list[str]:
+    """v7: a `blocked`/`cost` task's own stored cost (`task_cost.total_cost_
+    usd`) never decreases, so the guard that blocked it
+    (`run.loop._run_one_task`'s `check_run_guard`) can only ever legitimately
+    clear between runs -- a human raised `max_cost_per_task_usd` (or
+    disabled `task_limit_enabled`) since the block happened. Re-checks every
+    such task against the *current* config at startup and clears the ones no
+    longer over the ceiling; anything still over it is left alone. Cheap and
+    safe to call unconditionally even when nothing changed: `check_run_
+    guard` re-evaluates the identical condition on the very next attempt,
+    before any harness call, so a wrong/no-op requeue costs nothing -- it
+    just flips `blocked -> queued -> blocked` and stops there. Deliberately
+    scoped to `cost` alone: every other `BlockedReason` needs a human
+    judgment call about whether retrying makes sense at all (the repeat-
+    block guard on `cli.main.queue_retry` exists precisely because blind
+    auto-retry of a real failure is usually wrong)."""
+    requeued: list[str] = []
+    for task in list_tasks(db_path):
+        if task.status != TS.BLOCKED.value or task.blocked_reason != BlockedReason.COST.value:
+            continue
+        if task_cost_ceiling_reached(get_task_cost(db_path, task.task_id), config.cost):
+            continue
+        emitter.emit(
+            event_type=EventType.TASK_COST_REQUEUED,
+            severity=Severity.INFO,
+            run_id=run_id,
+            task_id=task.task_id,
+            payload={"task_cost_usd": get_task_cost(db_path, task.task_id)},
+        )
+        transition = writer.queue_unblock(task.task_id, run_id=run_id)
+        emit_state_changed(emitter, transition)
+        requeued.append(task.task_id)
+    return requeued
 
 
 class RunLockHeldError(RuntimeError):

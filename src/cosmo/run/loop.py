@@ -40,7 +40,11 @@ from cosmo.run.breaker import CircuitBreaker
 from cosmo.run.cost import check_run_cost, task_cost_ceiling_reached
 from cosmo.run.dag import DagCycleError, resolve_execution_order
 from cosmo.run.quota import HeuristicTracker, QuotaSignal, decide, observe_harness_result
-from cosmo.run.recovery import acquire_run_lock, reconcile_interrupted_tasks
+from cosmo.run.recovery import (
+    acquire_run_lock,
+    reconcile_interrupted_tasks,
+    requeue_cost_blocked_tasks,
+)
 from cosmo.run.types import RunOutcome, RunSummary
 from cosmo.store.enums import BlockedReason, RunStatus, Severity, StopReason, TaskStatus
 from cosmo.store.reader import (
@@ -205,6 +209,14 @@ def _run_queue_locked(
     # and `task_failures`/`task_transitions` both hold a real foreign key
     # to `run_state(run_id)`.
     reconcile_interrupted_tasks(db_path=db_path, writer=writer, emitter=emitter, run_id=run_id)
+    # v7: a second, independent startup reconciliation -- re-evaluates
+    # blocked/cost tasks against *this* invocation's config, since that
+    # block can only ever legitimately clear between runs (see the
+    # function's own docstring). Placement mirrors reconcile_interrupted_
+    # tasks above: unconditional, fresh-and-resumed-run-alike.
+    requeue_cost_blocked_tasks(
+        db_path=db_path, writer=writer, emitter=emitter, config=config, run_id=run_id
+    )
 
     breaker = CircuitBreaker(config.circuit_breaker)
     heuristic = HeuristicTracker(config.quota)
@@ -268,7 +280,18 @@ def _run_queue_locked(
             summary.stalled_queued_tasks = sorted(
                 t.task_id for t in current_tasks if t.status == "queued"
             )
-            final_status, stop_reason = RunStatus.STOPPED, StopReason.QUEUE_EMPTY
+            # v7: distinguishes "genuinely nothing left to do" from "nothing
+            # is schedulable because every remaining task is BLOCKED" -- both
+            # used to collapse into QUEUE_EMPTY, which cli.main then rendered
+            # green/exit-0 either way (see docs/v7-complete-queue-done-fixes-
+            # plan.md; the dominant cost in the Phase 10 acceptance run's own
+            # timing data was exactly this gap going unnoticed for hours).
+            final_status = RunStatus.STOPPED
+            stop_reason = (
+                StopReason.BLOCKED_REMAINING
+                if summary.blocked_by_reason
+                else StopReason.QUEUE_EMPTY
+            )
             break
 
         task_id = order[0]
