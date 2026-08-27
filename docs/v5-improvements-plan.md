@@ -3,7 +3,12 @@
 ## Status
 
 **Design record, not yet implemented — every open decision resolved
-(see "Decisions" below), ready to build against.** Written the same way
+(see "Decisions" below) for parts 1-4 and 6-7, ready to build against.**
+**Part 5 is the one exception**: it's real research/diagnosis, not a
+finished spec — it names concrete next steps but leaves their shape
+(the failure-signature taxonomy's field/schema, the scope of the
+session-management-tool audit) for a follow-up decision pass, deliberately
+not decided here. Written the same way
 [v4-changes-to-workflow-plan.md](v4-changes-to-workflow-plan.md) was before
 its own build started: grounded in the real code as it exists today, with
 file:line citations, not a restatement of the original spec's prose. Read
@@ -233,9 +238,10 @@ was separately paused before the first was resumed).
   (`store/writer.py:332-363`), then proceeds exactly like a normal
   `run_queue()` invocation.
 
-**Decided:** a resumed run gets a **fresh** `timeouts.run_wall_clock_hours`
-budget starting from the moment of resume, not an accounting of time spent
-paused — matches "the operator explicitly chose to continue this session
+**Decided:** a resumed run gets a **fresh** `timeouts.run_wall` budget
+(seconds, despite the name — `defaults.toml`'s `run_wall = 36000`,
+`loop.py:139`) starting from the moment of resume, not an accounting of
+time spent paused — matches "the operator explicitly chose to continue this session
 now," and avoids extra bookkeeping (would paused/sleeping time count
 against it too?) for limited real benefit.
 
@@ -279,6 +285,18 @@ one HTTP call" reasoning `watchdog.py` already uses for `sd_notify`.
   for an unexpectedly long time" is itself a real crash-detection signal
   that part 1's reconciliation can't give you until the *next* `cosmo run`
   starts — the watcher can raise it immediately.
+- **Decided — the staleness threshold itself:** new `[notify]` field
+  `stale_after_seconds: int = 1800`. Chosen against the real cadence
+  already observed in the live `events` table this session — `task.
+  heartbeat` rows land far more often than every 30 minutes whenever a task
+  is genuinely active (source `mtime`, tied to `[progress].
+  poll_interval_seconds = 7`), so 1800s of total silence in a run that
+  hasn't reached a terminal `run_state` status is already anomalous, not a
+  guess tuned to nothing. This has to be a message the watcher constructs
+  itself, not a row read from `events` — if the run process is truly dead,
+  nothing new is ever written for the watcher to find, so "the table has
+  been silent for `stale_after_seconds`" is the signal, not a payload field
+  on some event that will never arrive.
 - This decoupled design also directly provides the polling primitive part
   4 needs — one mechanism serves both, not two.
 
@@ -333,6 +351,21 @@ common `code_error @ build` signatures — "no package-lock.json", the
 `node_modules`, etc. — surfaced as a real field on the failure record or
 event payload, not left buried in free-text `error_detail`.
 
+**Decided — the schema shape:** a new nullable `task_failures.
+failure_signature: str | None` column (migration 7), populated by a small,
+deterministic classifier — string/substring matching against
+`error_detail`, no model call, no prose-parsing (matches spec 4's own
+posture of preferring structured signals — `session_id`, `total_cost_usd`,
+the `system/api_retry` shape — over parsing free text). Starting taxonomy,
+deliberately small rather than exhaustive: `missing_lockfile` (the
+`npm ci`/no-`package-lock.json` shape hit 3 of tonight's 5 real rows),
+`node_engine_mismatch` (deviation 41's shape), `enoent_node_modules`; anything
+unmatched stays `None` rather than forcing a guess. Surfaced everywhere
+`error_summary` already is — `cosmo events tail --payload`, `cosmo report`,
+`cosmo queue failures <id>` — so "how many of our failures are actually the
+same root cause" becomes a real query instead of a manual `error_detail`
+read.
+
 **Class 2: a harness session that starts real background work, then ends
 its own turn assuming a resumption that a one-shot `claude -p` call never
 provides.** Deviation 48's fix (a new CLAUDE.md section) targets the one
@@ -342,24 +375,197 @@ prose guidance has already been shown not to reliably prevent a recurring
 mistake once in this exact session (Class 1's own history — the lockfile
 guidance was added, then the identical failure recurred on the very next
 real attempt, for the *unrelated* reason of the session ending mid-install
-rather than forgetting to commit). Two concrete next steps worth real
-investigation, not just more prose:
-- **Deny `ScheduleWakeup` outright** via `permissions.deny` in
-  `templates/harness/claude/settings.json`, the same enforcement-over-
-  reminder posture already used for test-path/annotation/commit-integrity
-  guardrails (`CLAUDE.md`'s own "Guardrails" table) — a headless `claude
-  -p` session has no legitimate use for a tool whose entire purpose is
-  "resume me later," so there's no cost to blocking it outright rather than
-  hoping the model reads and follows a paragraph about it.
-- **Audit the rest of the session-management tool surface**
-  (`Monitor`, `TaskOutput`, `TaskStop`, backgrounded `Bash` calls generally)
-  for the same headless-safety question before denying anything else --
-  unlike `ScheduleWakeup`, some of these (e.g. `Monitor`) may be legitimately
-  useful *within* the same turn to actively wait on a background command
-  without ending it, and denying those would remove the correct way to
-  handle a slow install, not just the broken one. This needs checking
-  against the real tool surface (`claude --help` / the harness's own tool
-  list in a real `stream-json` `system/init` event), not guessed.
+rather than forgetting to commit).
+
+**A permission-based block is not the settled fix this section originally
+assumed — checked for real this session, not shipped on the obvious
+guess.** The originally proposed fix was denying `ScheduleWakeup` via
+`permissions.deny`. Two things now argue against committing to that as-is:
+
+- **Direct evidence from tonight's own failed attempt 3.** Its actual
+  invocation carried `--allowedTools Write Edit Bash` — an *allow-list*
+  restricted to exactly three tools — yet its own activity trace shows it
+  calling `ScheduleWakeup`, `ToolSearch`, and `TaskOutput` anyway, none of
+  which are in that list. So `--allowedTools` did not gate those calls at
+  all in the one real case we have.
+- **Research into Claude Code's own documented behavior** (not fully
+  authoritative — based on community-reported issues, not the primary
+  permissions docs, so treat the specifics as directional rather than
+  certain) points the same way: `--allowedTools` is additive on top of a
+  built-in default tool set that `ScheduleWakeup`/`ToolSearch`/`TaskOutput`
+  and similar session-management tools belong to, and there is no
+  documented, supported flag to make an allow-list exclusive. Whether
+  `permissions.deny` (settings.json) shares this gap or enforces
+  differently is explicitly *not* settled by the docs either way.
+
+**Decided:** don't adopt `permissions.deny` as the fix on the strength of a
+plausible mental model alone — this codebase's own rule is "check by hand,
+then trust it," and this is exactly a case where the obvious guess already
+failed once (`--allowedTools`, same shape of mechanism). Before writing this
+into a real change: run a cheap, real, throwaway `claude -p` session with
+`permissions.deny: ["ScheduleWakeup"]` set and something that would trigger
+it, and observe whether the call is actually blocked. If it is, add it
+alongside the existing CLAUDE.md prose as defense-in-depth, not instead of
+it. If it isn't, stop trying to prevent the call and say so explicitly in
+`CLAUDE.md` rather than continuing to imply a fix exists that doesn't.
+
+**Decided — the actual proven safety net stays primary, and gets watched,
+not re-guessed.** What genuinely recovered from tonight's real instance of
+this failure was `implementing_stall`'s existing 1200s wall-clock timer —
+it worked correctly, the first time it was ever tested for real, costing
+about 20 real minutes before the task was auto-requeued. That number isn't
+being changed here on the strength of a single data point; it's exactly the
+kind of thing Phase 10's overnight acceptance run (this document's own
+motivating context) is positioned to confirm or retune with more real
+samples — folding into the plan's pre-existing Open Item 2 (§3.3 timeout
+retuning) rather than inventing a second, competing timeout-tuning thread.
+
+### 6. `cosmo run`'s own live terminal shows tool-call chatter but no state transitions — new, added after a real gap this session
+
+Not one of the original four problem areas either, and distinct from part D/4's
+gap (a *second*, unattached terminal/session seeing nothing until it polls).
+This is about the *one* terminal already running `cosmo run` and being
+watched live by a human — it turns out that terminal doesn't show the thing
+that actually matters most, either.
+
+Real reproduction, same night, same `scaffold-app` task: while a live `cosmo
+run` sat in the operator's terminal, two real, consequential things happened
+that produced *zero* visible output there. (1) `implementing_stall`'s 1200s
+timer correctly killed a wedged attempt and auto-requeued the task
+(`task_transitions` ids 38-39: `implementing → failed_retry → queued`). (2)
+Minutes later the same run hit a real, `confirmed: true` `quota_exhausted_5h`
+pause (`events` row #226: `resume_delay_seconds: 8716.04`) and is, right now,
+sitting in a plain `time.sleep()` inside `_handle_quota_pause_or_stop`
+(`run/loop.py:410`) until it wakes itself. Both are exactly the kind of thing
+an operator watching the live feed needs to know immediately — and both had
+to be reconstructed after the fact from `cosmo events tail --payload` and raw
+`task_transitions`/`task_failures` reads, including hand-computing the
+resume wall-clock time from a raw seconds float, because nothing printed it.
+
+The reason is simple once traced: the live terminal's only feed is the
+`on_activity` callback added in `b923c00` (`cli.main._print_activity`,
+`cli/main.py:99-104`), which by its own docstring is deliberately narrow —
+one dim line per harness tool call, "never written to the events DB." That
+boundary (part D above) is correct and should stay — but it means the
+terminal a human is actually staring at subscribes to *none* of the coarse,
+already-persisted lifecycle events (`TASK_STATE_CHANGED`, `RUN_PAUSED`,
+`RUN_RESUMED`, `TASK_BLOCKED`, `RUN_STOPPED`, `RUN_SUMMARY`) that `cosmo
+events tail` can already show — it just never automatically does, in the one
+place an operator is already looking.
+
+**Minimal fix, no new infrastructure:** every one of those events already
+flows through the single `EventEmitter.emit()` chokepoint
+(`events/emitter.py:30`), bound for the run's whole lifetime to one
+`StoreWriter`. Give it an optional `on_emit: Callable[[Event], None] | None`
+hook, called after the DB insert succeeds (mirrors `on_activity`'s own
+"presentation is a CLI concern, the emitter itself stays ignorant of it"
+shape). `cli.main`'s `run`/`queue run` commands wire a sibling to
+`_print_activity` that prints one line per `on_emit` call — filtered to
+`WARNING`+ severity plus the lifecycle-shaped `INFO` events (`RUN_STARTED`,
+`RUN_RESUMED`, `RUN_SUMMARY`), the same severity-based judgment part 3's
+`min_severity` already had to make, not a second, differently-drawn line.
+`TASK_STATE_CHANGED` only fires on an actual transition, never on
+`task.heartbeat` (a separate, much chattier event type already excluded by
+filtering on `event_type`), so this doesn't reintroduce the noise `on_
+activity` deliberately avoids.
+
+Two presentation details worth getting right, both directly motivated by
+this session's real confusion:
+- Style these lines visually distinct from `on_activity`'s dim per-tool-call
+  chatter (bold, severity-colored) — interleaved in the same stream, not a
+  second pane or command, so a human skimming a long scrollback can tell "the
+  state actually changed" from "yet another Bash call" at a glance.
+- Render `RUN_PAUSED`'s `resume_delay_seconds` as a human wall-clock ETA
+  (`resume at 2026-08-27T05:10Z`), computed once at print time from `wall_
+  clock_now() + resume_delay_seconds` — not the raw float this session had to
+  convert by hand to answer "when will it come back."
+
+This composes with, and doesn't duplicate, parts 3/4: the Telegram sink and
+`cosmo events tail --follow` exist for *unattended* or remote observability
+(no one physically watching); this is specifically about the attached
+terminal a human already has open having the coarse signal too, at the cost
+of one new emitter hook and no new table, command, or process.
+
+### 7. An opt-in flag to keep going past a confirmed 5h quota pause via usage credits — new, added after a real test this session
+
+Discovered live during this same night's Phase 10 acceptance run, not one of
+the original four problem areas. While `bdf4ab101aee...` sat correctly
+`PAUSED` on a real, `confirmed: true` `quota_exhausted_5h` signal (part 6's
+own event #226), a manual side-channel `claude -p "hi"` succeeded
+immediately — proof the account's Anthropic **usage credits** (an
+account-level pay-as-you-go top-up past the subscription plan's included
+allowance; distinct from the console/API-key billing `adapter.py` already
+scrubs, part-C/`BILLING_ENV_VAR` above) were covering calls despite the
+5-hour window still being nominally active. Nothing in `quota.decide()`
+today can take advantage of that: a confirmed `five_hour` signal always
+means `PAUSED` + a full `sleep(resume_delay_seconds)`, unconditionally,
+whether or not the account could actually keep going.
+
+**Why this isn't just "skip the pause in `decide()`":** usage credits
+convert what has always been, architecturally, a flat-rate/cost-free
+subscription allowance into real, metered per-token spend once the
+included allowance runs out — and that is *exactly* the situation this
+codebase already has a guard for, just never turned on. `CostConfig`'s own
+docstring: *"A ceiling of 0.0 means 'no hard stop' — the posture for a
+subscription-billed harness, where section 7.1 usage windows govern
+instead"* (`config/model.py:82-84`); `run/cost.py`'s own module docstring:
+*"Inert for the v1 subscription-billed Claude adapter... implemented in
+full anyway so a future per-token adapter needs no new mechanism, only
+non-zero config"* (`run/cost.py:1-7`). In other words: the cost ceiling was
+built and tested specifically for the day subscription billing stops being
+free, and left disabled because until tonight nothing made that true. A
+flag that bypasses the 5h pause recreates precisely the scenario that
+ceiling exists for — so it must not ship without also addressing the
+ceiling, or the one guard already built for this would stay silently off.
+
+The good news: no new cost-tracking plumbing is needed. The Claude adapter
+already reports real `total_cost_usd` on every terminal result regardless
+of billing mode (`reports_native_cost=True`, `adapter.py:70,352`), and
+`get_run_cost`/`check_run_cost` (`run/cost.py:26-33`) already sum and gate
+on it — built and unit-tested since it was written, just never exercised
+for real because subscription-only billing reports ~$0 until credits start
+covering calls. The missing piece is genuinely only the `decide()` branch
+and its config gate, not new accounting.
+
+Proposed shape:
+
+- New `QuotaConfig` field `bypass_5h_with_credits: bool = false` — off by
+  default, an explicit opt-in, matching this codebase's consistent posture
+  on anything that changes unattended-spend behavior (same posture as
+  part 3's `[notify]` `enabled = false` default).
+- **Decided — the one substantive design call here:** enabling it
+  *requires* `cost.max_cost_per_run_usd > 0` (and ideally
+  `max_cost_per_task_usd > 0`) at the same time, validated at config-load
+  time in `config/model.py`'s existing `_Strict` validators, refusing to
+  start with a clear error otherwise. Don't let the bypass exist without
+  its own backstop turned on — the same "don't ship the risky half without
+  its safety half" instinct part 3 already applied to keeping Telegram
+  delivery out of the crash-prone run process.
+- `quota.decide()`: when `signal.window == "five_hour"` and
+  `config.bypass_5h_with_credits` is true, skip the `PAUSED` branch
+  entirely and return a decision that lets `run_queue` `continue`
+  immediately instead of sleeping — no new `RunStatus`/`PauseReason`
+  needed. `weekly` is deliberately untouched by this flag: nothing tonight
+  tested whether credits ride through a *weekly* cap the same way, and
+  `decide()`'s existing "don't guess, actually stop" posture for `weekly`
+  shouldn't be loosened without its own real confirmation later.
+- Still emit a visible signal even though the run doesn't pause — new
+  `EventType.QUOTA_BYPASSED` (`quota.bypassed`), `WARNING` severity,
+  payload `{resets_at, run_cost_so_far_usd}` — so part 6's live-terminal
+  hook, `cosmo events tail`, and part 3's Telegram sink all still surface
+  "spending real money past the included allowance right now." Proceeding
+  with zero visible signal would be strictly worse than today's silent
+  pause.
+
+**Explicitly not attempted:** detecting whether credits are actually
+enabled or have remaining balance. Nothing in the `claude` CLI's
+`stream-json` output exposes that (confirmed via the same research that
+surfaced the usage-credits docs above) — this stays a human's informed
+opt-in ("I have credits, let it ride"), never something cosmo infers. If
+credits run out mid-run, calls should start failing for real and ordinary
+retry/circuit-breaker/cost-ceiling handling takes over — this itself needs
+real-world confirmation once the flag exists, not assumed correct on paper,
+matching this whole document's own "check by hand, then trust it" rule.
 
 ## What does not change
 
@@ -404,6 +610,16 @@ implicit in whichever way was easiest to code:
    `cosmo-run.service`, rather than staying a manually-started process.
 5. **A simple pidfile lock ships as part of part 1**, not a separate
    follow-up — see part 1's own "Decided" note above for the shape.
+6. **The live `cosmo run` terminal gets a second, coarse-grained print hook
+   (`on_emit`) alongside the existing fine-grained `on_activity`**, rather
+   than either replacing `on_activity` or requiring a second terminal/
+   `--follow` session to see state transitions and pauses — see part 6.
+7. **`bypass_5h_with_credits` requires a non-zero `cost.max_cost_per_run_usd`
+   at config-load time, refused otherwise** — the bypass must not exist
+   without the spend ceiling it recreates the need for; see part 7.
+8. **`cosmo notify watch`'s staleness threshold is `[notify].
+   stale_after_seconds = 1800`**, self-constructed by the watcher rather
+   than read from an `events` row — see part 3's own "Decided" note.
 
 ## Verification (once implemented)
 
@@ -422,3 +638,17 @@ coverage is necessary but not sufficient:
   circuit-breaker-tripped `PAUSED` run; a real Telegram bot token/chat id
   receiving a real message end to end, including one sent by `cosmo
   notify watch` *after* the run-loop process it's watching was killed.
+- **Part 6, real invocation:** watch a real `cosmo run` terminal through an
+  actual `implementing_stall`/circuit-breaker/quota-pause event and confirm
+  the coarse line actually prints, is visually distinct from `on_activity`
+  chatter, and (for `RUN_PAUSED`) renders a correct human wall-clock ETA —
+  not just a unit test asserting `on_emit` was called with the right `Event`.
+- **Part 7, real invocation:** with `bypass_5h_with_credits=true` and a real
+  usage-credits-covered account, confirm a real confirmed `five_hour` signal
+  does *not* pause the run, `quota.bypassed` is emitted and visible in both
+  `cosmo events tail` and part 6's live terminal, and — separately — confirm
+  config load actually refuses to start when the flag is `true` but
+  `cost.max_cost_per_run_usd` is left at `0`.
+- **Part 5 has no verification step here on purpose** — it isn't a finished
+  spec yet (see "Status" above); verification gets written alongside
+  whatever concrete design comes out of its own follow-up decision pass.
