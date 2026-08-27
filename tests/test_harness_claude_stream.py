@@ -18,6 +18,7 @@ from cosmo.harness.claude.stream import (
     StreamReader,
     classify_line,
     describe_tool_call,
+    extract_quota_signal,
 )
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "stream_json"
@@ -76,6 +77,21 @@ def test_api_retry_is_the_primary_quota_signal_in_both_observed_shapes() -> None
     }
     assert reader.latest_rate_limit is rate_limit_events[1]
     assert reader.terminal_result is not None
+
+
+def test_a_lone_allowed_status_rate_limit_event_is_not_a_quota_signal() -> None:
+    """Real bug, found by hand against a genuine overnight run: a
+    `rate_limit_event` fires once per session purely as informational
+    telemetry -- `status: "allowed"` on every ordinary call, carrying a real
+    `resetsAt` the window reaches regardless of whether anything was ever
+    actually rate-limited. A call that fails for an unrelated reason
+    (`error_max_turns` here, exactly as captured) must not be reported as a
+    *confirmed* quota exhaustion just because that routine event happened to
+    stream by. See docs/v3-implementation-state.md for the full capture."""
+    reader = _replay("rate_limit_allowed_only.ndjson")
+
+    assert reader.latest_rate_limit is not None
+    assert extract_quota_signal(reader) == (None, None)
 
 
 def test_truncated_stream_yields_complete_lines_and_drops_the_partial_tail() -> None:
@@ -164,6 +180,27 @@ def test_describe_tool_call_truncates_a_long_detail() -> None:
     assert line is not None
     assert len(line) == 100
     assert line.endswith("…")
+
+
+def test_describe_tool_call_collapses_the_worktree_prefix_before_truncating() -> None:
+    """Found by hand watching a real `cosmo run`: the worktree's absolute
+    path alone (`/home/.../work/<run_id>/<task_id>/frontend/...`) ate the
+    entire 100-char cap, so every activity line truncated before the actual
+    filename ever appeared. The collapse must happen before truncation, not
+    after -- this pins that ordering, not just that collapsing happens."""
+    worktree = Path("/home/dev/.local/share/cosmo/work/deadbeef/scaffold-app")
+    long_path = f"{worktree}/frontend/package-lock.json"
+    payload = _tool_use_payload("Edit", {"file_path": long_path})
+
+    line = describe_tool_call(payload, cwd=worktree)
+
+    assert line == "Edit: ./frontend/package-lock.json"
+
+
+def test_describe_tool_call_without_cwd_leaves_the_path_untouched() -> None:
+    payload = _tool_use_payload("Edit", {"file_path": "/some/absolute/path.py"})
+
+    assert describe_tool_call(payload) == "Edit: /some/absolute/path.py"
 
 
 def test_describe_tool_call_returns_none_for_a_tool_result_only_event() -> None:

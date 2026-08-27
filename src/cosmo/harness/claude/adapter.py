@@ -302,7 +302,9 @@ class ClaudeCodeAdapter(HarnessAdapter):
         raw_log_path = (
             self.config.paths.log_dir / "harness" / task_id / f"{uuid.uuid4().hex}.ndjson"
         )
-        reader = StreamReader(on_event=_relay_activity(on_activity) if on_activity else None)
+        reader = StreamReader(
+            on_event=_relay_activity(on_activity, cwd=self.cwd) if on_activity else None
+        )
 
         process = ManagedProcess(
             argv,
@@ -356,18 +358,27 @@ class ClaudeCodeAdapter(HarnessAdapter):
         )
 
 
-def _relay_activity(on_activity: Callable[[str], None]) -> Callable[[ClassifiedEvent], None]:
+def _relay_activity(
+    on_activity: Callable[[str], None], *, cwd: Path | None = None
+) -> Callable[[ClassifiedEvent], None]:
     """Bridges `StreamReader`'s Claude-specific `ClassifiedEvent`s to the
     harness-agnostic `on_activity(line: str)` hook (item 3) -- only tool
     calls and the one session-start heartbeat are worth a human's attention
     live; every other heartbeat is already accounted for by `task.progress`
-    (spec 4's liveness signal), not repeated here."""
+    (spec 4's liveness signal), not repeated here.
+
+    `cwd`, when given, is the task's worktree root, passed through to
+    `describe_tool_call` so it can collapse that prefix *before* its own
+    length cap truncates the line -- doing the collapse here, after
+    truncation, would be too late: a long absolute worktree path already
+    eats the whole cap before the actual filename is ever reached (see
+    `describe_tool_call`'s own docstring)."""
     seen_session_start = False
 
     def _on_event(event: ClassifiedEvent) -> None:
         nonlocal seen_session_start
         if event.kind is ClassifiedKind.TOOL_CALL:
-            line = describe_tool_call(event.payload)
+            line = describe_tool_call(event.payload, cwd=cwd)
             if line is not None:
                 on_activity(line)
             return

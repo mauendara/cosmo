@@ -1,0 +1,3 @@
+{"type":"system","subtype":"init","cwd":"/tmp","session_id":"allowed-only-session"}
+{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1787807400,"rateLimitType":"five_hour","overageStatus":"allowed","overageResetsAt":1788220800,"isUsingOverage":false},"session_id":"allowed-only-session"}
+{"type":"result","subtype":"error_max_turns","is_error":true,"duration_ms":574451,"num_turns":81,"session_id":"allowed-only-session","total_cost_usd":2.378}

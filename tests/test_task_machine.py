@@ -162,6 +162,52 @@ def test_happy_path_reaches_done_with_a_complete_event_trail(tmp_path: Path) -> 
         writer.close()
 
 
+def test_proposing_is_skipped_when_the_worktree_already_has_a_complete_change(
+    tmp_path: Path,
+) -> None:
+    """Found by hand against a real overnight run: a task requeued mid-run
+    (a quota/wall-clock guard) reuses its worktree (`run.loop._run_one_task`'s
+    own worktree-reuse branch) but `run_task` still called `_do_proposing`
+    unconditionally -- a second real, billed harness call to re-author a
+    change that was already fully proposed and hadn't changed. A worktree
+    whose `openspec/changes/<spec_id>/tasks.md` already exists (simulating
+    that reuse) must skip straight to `PROPOSED` without ever calling
+    `adapter.propose`."""
+    cfg, repo, writer, emitter, ctx = _setup(tmp_path)
+    spec_id = Path(ctx.spec_path).stem
+    change_dir = ctx.worktree_path / "openspec" / "changes" / spec_id
+    change_dir.mkdir(parents=True)
+    (change_dir / "tasks.md").write_text("- [x] 1.1 Already done\n", encoding="utf-8")
+
+    adapter = FakeHarnessAdapter(
+        cfg, cwd=ctx.worktree_path, script=ScriptedCall(FakeOutcome.SUCCESS)
+    )
+    gate = FakeGate(ScriptedGateResult(passed=True))
+
+    try:
+        status = run_task(
+            ctx=ctx,
+            config=cfg,
+            writer=writer,
+            emitter=emitter,
+            adapter=adapter,
+            repo_path=repo,
+            gate_runner=_gate_runner(gate),
+        )
+
+        assert status is TaskStatus.DONE
+        assert "propose" not in {call[0] for call in adapter.calls}
+
+        transitions = [
+            e.payload["to_state"]
+            for e in reversed(list_events(cfg.paths.db_path, task_id=ctx.task_id, limit=200))
+            if e.event_type == "task.state_changed"
+        ]
+        assert transitions[:2] == ["proposing", "proposed"]
+    finally:
+        writer.close()
+
+
 def test_retry_exhaustion_blocks_with_code_failure(tmp_path: Path) -> None:
     cfg, repo, writer, emitter, ctx = _setup(tmp_path)
     adapter = FakeHarnessAdapter(

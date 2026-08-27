@@ -27,6 +27,7 @@ import json
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 
@@ -139,11 +140,21 @@ _TOOL_INPUT_KEYS: dict[str, str] = {
 }
 
 
-def describe_tool_call(payload: dict[str, Any]) -> str | None:
+def describe_tool_call(payload: dict[str, Any], *, cwd: Path | None = None) -> str | None:
     """A short, human-readable line for a `ClassifiedKind.TOOL_CALL` event's
     payload -- live terminal feedback during `cosmo run` (item 3), never a
     decision signal. Returns `None` if the payload has no `tool_use` block
-    to describe (e.g. a `tool_result`-only turn)."""
+    to describe (e.g. a `tool_result`-only turn).
+
+    `cwd`, when given, is the task's worktree root. `detail` (a `file_path`,
+    a `Bash` command, ...) is very often that same absolute path or a
+    command embedding it (`/home/.../work/<run_id>/<task_id>/frontend/...`)
+    -- found by hand watching a real `cosmo run`: at 100+ characters, that
+    prefix alone ate the entire `_MAX_ACTIVITY_LINE` cap below, truncating
+    every single line before the actual filename ever appeared. Collapsing
+    the worktree prefix to `.` (accurate -- it *is* the harness's own cwd)
+    must happen before the cap is applied, not after, or the useful part of
+    the line is already gone by the time there's anything left to shorten."""
     message = payload.get("message")
     if not isinstance(message, dict):
         return None
@@ -162,6 +173,8 @@ def describe_tool_call(payload: dict[str, Any]) -> str | None:
         detail = tool_input.get(key) if key and isinstance(tool_input, dict) else None
         if not isinstance(detail, str) or not detail:
             return name
+        if cwd is not None:
+            detail = detail.replace(str(cwd), ".")
         line = f"{name}: {detail}"
         return line if len(line) <= _MAX_ACTIVITY_LINE else line[: _MAX_ACTIVITY_LINE - 1] + "…"
 
@@ -250,6 +263,19 @@ def extract_quota_signal(reader: StreamReader) -> tuple[str | None, str | None]:
 
     info = event.payload.get("rate_limit_info")
     if isinstance(info, dict):
+        # A `rate_limit_event` fires routinely, once per session, purely as
+        # informational telemetry about the current window -- `status` is
+        # `"allowed"` on every ordinary call, carrying a real `resetsAt` the
+        # window will naturally reach regardless of whether anything was
+        # ever actually rate-limited. Only a `status` other than `"allowed"`
+        # is real evidence this call was impacted. Found by hand: a real
+        # `error_max_turns` failure (nothing to do with quota) got reported
+        # as a *confirmed* quota exhaustion because this branch trusted
+        # `rateLimitType`/`resetsAt` unconditionally -- the lone
+        # `rate_limit_event` on that call had `status: "allowed"` the whole
+        # time. See docs/v3-implementation-state.md for the full capture.
+        if info.get("status") == "allowed":
+            return None, None
         window = _normalize_window(info.get("rateLimitType"))
         resets_epoch = info.get("resetsAt")
         resets_at = (

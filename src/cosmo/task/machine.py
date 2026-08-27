@@ -419,6 +419,26 @@ def _do_proposing(
         emitter, writer.queue_transition(task_id, TaskStatus.PROPOSING, run_id=run_id)
     )
 
+    spec_id = Path(ctx.spec_path).stem
+    tasks_md = ctx.worktree_path / "openspec" / "changes" / spec_id / "tasks.md"
+    if tasks_md.is_file() and tasks_md.stat().st_size > 0:
+        # A worktree reused within this same run (a requeue -- see
+        # `run.loop._run_one_task`'s worktree-reuse branch, e.g. after a
+        # quota/wall-clock guard sent this task back to `QUEUED` mid-run)
+        # already has a complete OpenSpec change from an earlier PROPOSING
+        # pass in this exact attempt. `tasks.md` is the last artifact
+        # `propose()`'s own workflow produces (proposal -> design -> specs
+        # -> tasks, per `skills/openspec-workflow/SKILL.md`), so its
+        # presence means PROPOSING already finished here -- re-running it
+        # would be a second real, billed harness call for work that's
+        # already done. A genuinely fresh worktree (a real retry, or a new
+        # run) never has this file -- it's a brand-new checkout of the
+        # target repo's current `docs/`/spec content -- so this only ever
+        # skips the reused-worktree case, never a real first attempt.
+        if on_activity is not None:
+            on_activity(f"proposing: skipped -- {spec_id} already proposed in this worktree")
+        return TaskStatus.PROPOSED
+
     for local_attempt in range(1, _PROPOSING_MAX_LOCAL_ATTEMPTS + 1):
         if check_run_guard is not None:
             guard_action = check_run_guard()
