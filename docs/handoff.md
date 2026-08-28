@@ -481,7 +481,7 @@ session, more than once.
 ## When you finish (whatever "finish" means for the next session)
 
 1. `./check.sh` green (if any code changed at all).
-2. Record any new deviation in the cumulative table (next number is **77**).
+2. Record any new deviation in the cumulative table (next number is **78**).
 3. If Phase 10's own acceptance run against `todo-frontend-app` is still
    fully `done` and nothing regressed it, there is no more Phase 10
    backlog left to reconcile — a fresh spec batch queued against it is new

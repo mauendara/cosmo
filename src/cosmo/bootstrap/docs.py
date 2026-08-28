@@ -44,4 +44,11 @@ def copy_project_docs(
         shutil.copy2(src_file, dest_file)
         created.append(rel)
 
+    # `docs/specs/` is deliberately not part of any project template's own
+    # `docs/` (spec-batch content, not stack boilerplate) -- but it should
+    # still exist right after `cosmo init` so it's discoverable, rather than
+    # only appearing the first time `cosmo spec add` is run. Not counted in
+    # `created`/`skipped`, which track template files only.
+    (dest_root / "specs").mkdir(parents=True, exist_ok=True)
+
     return DocsCopyResult(created=created, skipped=skipped)

@@ -32,6 +32,18 @@ def test_first_run_creates_every_file_preserving_subdirectories(tmp_path: Path) 
     assert result.skipped == []
 
 
+def test_docs_specs_directory_is_created_even_though_no_template_ships_it(
+    tmp_path: Path,
+) -> None:
+    templates_root = _fixture_templates_root(tmp_path)
+    target = tmp_path / "target"
+    target.mkdir()
+
+    copy_project_docs("widget-stack", target, templates_root=templates_root)
+
+    assert (target / "docs" / "specs").is_dir()
+
+
 def test_rerun_never_overwrites_an_existing_file_by_default(tmp_path: Path) -> None:
     templates_root = _fixture_templates_root(tmp_path)
     target = tmp_path / "target"
