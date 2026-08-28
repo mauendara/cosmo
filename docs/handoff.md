@@ -44,7 +44,15 @@ session, predating deviation 69's `[Service]`→`[Unit]` fix for
 `StartLimitIntervalSec`/`StartLimitBurst`) was patched to match the repo's
 own `deploy/cosmo-notify.service` and is now `enabled`+`active (running)`
 via `systemctl --user`. Only item 4 remains open — a spec-authoring
-question for the *next* batch, not code.
+question for the *next* batch, not code, and now partly answered: the
+scheduler (`run.dag.resolve_execution_order` + `run.loop.run_queue`'s main
+loop) already interleaves independent branches correctly when a task
+blocks, since it recomputes the full eligible set every iteration, not just
+one task ahead — `todo-frontend-app`'s own spec batch never exercised this
+for real only because its chain had no independent branch to begin with.
+The one real exception (still open, not settled): a circuit-breaker trip
+pauses the *whole* run, independent branches included, by design (spec
+6.5) — see v7's own item 4 note for the full reasoning.
 
 **v6 ([v6-project-template-aware-stuff-plan.md](v6-project-template-aware-stuff-plan.md))
 was explicitly asked about this session and deliberately not started** —

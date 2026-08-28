@@ -169,6 +169,25 @@ change:
    batch whether independent branches exist before assuming serial-by-default
    is always fine, not a mandate to restructure this one after the fact.
 
+   **Clarified, later same session, in response to a direct question**: the
+   scheduler itself already does the right thing here, for an ordinary
+   block. `run.dag.resolve_execution_order` returns *every* currently-
+   eligible task each pass (not just one), and `run.loop.run_queue`'s main
+   loop recomputes that full list after every single task finishes — so
+   when task A blocks, task B (no dependency on A, direct or transitive) is
+   still eligible next iteration and runs regardless. Nothing in `todo-
+   frontend-app`'s own run ever exercised this for real, only because that
+   spec batch's chain had no independent branch to exercise it *with* — not
+   because the scheduler serializes independent work. The one real
+   exception: a block that trips the **circuit breaker** (spec 6.5,
+   repeated *distinct-task* `environment_error`) pauses the *whole* run,
+   independent branches included, until a human runs `cosmo run resume` —
+   deliberate, since a breaker trip means "the environment itself looks
+   broken," a different situation from one task's own code being wrong.
+   Whether that breaker-pause-the-whole-run posture should also change
+   (pause only the affected branch) is a *further* open question, not
+   settled by this note and not implemented.
+
 **Cross-reference, not part of this document's own scope**: the handoff's
 existing open item on `REVIEWING`/`VALIDATING` timeout retuning
 (§3.3, "Open Item 2") now has two more real data points from this run — two
