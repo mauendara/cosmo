@@ -492,7 +492,9 @@ def _do_proposing(
 
         result = run_with_wall_clock_timeout(
             lambda: adapter.propose(
-                Path(ctx.spec_path), {"task_id": task_id}, on_activity=on_activity
+                Path(ctx.spec_path),
+                {"task_id": task_id, "spec_id": spec_id},
+                on_activity=on_activity,
             ),
             wall_s=float(config.timeouts.proposing_wall),
             cancel=lambda: adapter.cancel(task_id),

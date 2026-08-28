@@ -1,14 +1,86 @@
-# Handoff — v7 items 1+3 implemented (BLOCKED_REMAINING stop reason + cost-block auto-requeue); v6 deliberately deferred
+# Handoff — three real cross-project/observability bugs fixed against a second real target repo (deviations 74-76); v6 still deferred
 
 You are picking up Cosmo mid-build. **Phases 0-9, the v4 workflow-changes
-feature, the v5 improvements plan, and Phase 10's own acceptance-run
-(deviations 59-70, the prior handoff) are all implemented.** **This
-session's own work: implemented items 1 and 3 of
-[v7-complete-queue-done-fixes-plan.md](v7-complete-queue-done-fixes-plan.md)**
-(deviation 71) — read
+feature, the v5 improvements plan, Phase 10's own acceptance-run, and v7
+items 1+3 (the prior handoff) are all implemented.** **This session's own
+work: three real bugs (deviations 74-76), all found and fixed live driving
+a real `cosmo run` against `habits-frontend-app`** — the first time this
+store has ever had *two* real target repos in it at once (the existing
+`todo-frontend-app` acceptance-run repo, plus this new one) — read
 [v3-implementation-state.md](v3-implementation-state.md)'s cumulative
-deviations table, entry **71**, before doing anything else; this document
-summarizes it, the table has the precise file:line-grounded detail.
+deviations table, entries **74-76**, before doing anything else; this
+document summarizes them, the table has the precise file:line-grounded
+detail.
+
+**Deviation 74 — cross-project `task_id` collision.** `task_queue.task_id`
+is a single global primary key shared by *every* project's `cosmo.db`, but
+`templates/harness/claude/skills/spec-enrichment/SKILL.md` only ever
+promised a task_id "unique within this spec." `habits-frontend-app`'s
+`habit-tracker` spec batch picked `task_id: scaffold-app` for its scaffold
+task — the exact id `todo-frontend-app`'s batch had already used and
+finished. Two real failures resulted: `habit-date-lib`/`habit-types-and-
+persistence`'s `depends_on: [scaffold-app]` looked satisfied by the *other*
+project's `done` row, even though `habits-frontend-app` was never
+scaffolded; and `cli.main.spec_queue`'s batch-insert loop hard-exited on
+the first collision it hit, silently dropping every task alphabetically
+after it — confirmed live across three separate `cosmo spec queue`
+invocations before the cause was found. Fixed: `spec_queue` now namespaces
+every task_id/`depends_on` edge in a batch (`f"{name}-{task_id}"`) before
+the cycle check and insert, `_render_spec_preview` shows the namespaced
+ids so the preview matches what actually gets queued, and a rerun on an
+already-(partially-)queued batch is now a clean no-op instead of a hard
+exit.
+
+**Deviation 75 — `VALIDATING` printed nothing to the live terminal, pass
+or fail.** Same class of gap as deviation 68 (`TASK_STATE_CHANGED`), found
+the same way: a user watching a real `cosmo run` saw the gate run for tens
+of seconds with zero visible output. A *passing* `task.validation_result`
+is `severity=info` and wasn't in `_print_emit`'s allowlist at all (dropped
+silently); a *failing* one cleared the severity filter but had no `detail`
+case of its own, printing as a bare `>> task.validation_result`. Fixed:
+added to the allowlist, plus a new `_validation_result_detail` summarizing
+`passed=…, unit=pass/FAIL (Np/Nf/Ns), e2e=pass/FAIL (…)` and pointing at
+`cosmo queue failures <task_id>` on failure (the real `error_summary`/
+`error_detail` deliberately stay out of this event's payload per spec 9.2).
+
+**Deviation 76 — `openspec archive` failed on every single task in the
+batch.** `task.machine._do_finishing`'s own docstring already documented
+the assumption that a propose session names its `openspec new change`
+`Path(spec_path).stem` — but nothing ever told the propose session that;
+`openspec-workflow/SKILL.md` only said "use a short kebab-case name."
+Confirmed live: every task in the real `habit-tracker` batch fired
+`TASK_FINISHING_FAILED` (`Change 'scaffold-app-task' not found. Available
+changes: scaffold-app`, same shape for every task after it) because the
+propose session reasonably stripped the task file's own `-task` suffix
+instead of matching the assumed convention verbatim. Fixed at the actual
+source of the mismatch, not by trying to recover the real name after the
+fact: `_do_proposing` now threads `spec_id` into `adapter.propose(...)`'s
+context, and `ClaudeCodeAdapter.propose` pins the exact required change
+name into the prompt.
+
+**All three found and fixed in one continuous live session**, not from a
+design doc — `habits-frontend-app`'s real `habit-tracker` spec batch (9
+tasks) was driven through a real `cosmo run` end to end while these were
+found; by the end of this session 4 of its 9 tasks were `done` (`habit-
+tracker-scaffold-app`, `habit-date-lib`, `habit-types-and-persistence`,
+`habit-streak-lib`), with `use-habits-hook` deliberately left `blocked`
+(reason `environment`, no real failure — a human asked for the run to stop
+cleanly there) so a *fresh* `cosmo run` would actually pick up deviations
+75-76 for the remaining 5 tasks (this run's own long-lived process had
+already imported the old code before the fix landed on disk, confirmed by
+comparing the process start time against the file mtimes — editable
+installs only help a *new* process/import, not one already running).
+`docs/handoff.md`/`v3-implementation-state.md` are this repo's own; nothing
+in `habits-frontend-app` was touched except its own repo-local `docs/
+specs/habit-tracker-spec/tasks/*.md` (renamed the colliding task_id) and
+manually re-running `openspec archive` for the three tasks that finished
+`PROPOSING` before deviation 76 landed — both real, necessary interventions
+in that repo, not part of this repo's own change.
+
+## What happened in the prior session (v7 items 1+3 implemented; v6 deliberately deferred)
+
+Kept as-is below for its own detail — the summary above already covers
+*this* session's own work (deviations 74-76).
 
 **What changed, in one paragraph**: `run.loop.run_queue` used to report
 `StopReason.QUEUE_EMPTY` (green output, exit code 0, treated as success)
@@ -228,7 +300,7 @@ Real, honest gaps — not fixed this session, and not fixable casually:
 |---|---|---|
 | [v3-cosmo-autonomous-agent-spec.md](v3-cosmo-autonomous-agent-spec.md) | The authoritative specification | **Source of truth** for the original 0-10 plan. v1 and v2 are superseded — read them only for history |
 | [v3-implementation-plan.md](v3-implementation-plan.md) | 11-phase build plan | The map for Phase 10 (its own section, near the end). **Do not edit** — it's the agreed scope; record decisions in `v3-implementation-state.md` instead |
-| [v3-implementation-state.md](v3-implementation-state.md) | What actually exists, plus decisions and gotchas | Read the cumulative deviations table's entries **68-71** in full before doing anything —68-70 are the prior session's real findings, 71 is this session's v7 work |
+| [v3-implementation-state.md](v3-implementation-state.md) | What actually exists, plus decisions and gotchas | Read the cumulative deviations table's entries **74-76** in full before doing anything — this session's own real findings, driving a real `cosmo run` against a second real target repo (`habits-frontend-app`) |
 | [v4-changes-to-workflow-plan.md](v4-changes-to-workflow-plan.md) | The raw-spec-workflow feature design | Implemented — see its own Status line |
 | [v5-improvements-plan.md](v5-improvements-plan.md) | Crash/pause resume, Telegram notifications, `--follow`, live-terminal observability, the quota-bypass flag, harness failure-pattern research (§5) | Implemented, parts 1-4/6-7 plus part 5's Class 1 — see its own Status line |
 | [v6-project-template-aware-stuff-plan.md](v6-project-template-aware-stuff-plan.md) | Making the gate/failure-classifier project-template-aware, for stacks beyond Java+Spring/Vite+React | **Not started — design record only.** Needs a real second stack before it's buildable; the user is doing that testing themselves before this gets picked up again — don't start it opportunistically |
@@ -242,49 +314,51 @@ fully consumed.
 
 ```
 /home/dev/delta/cosmo/          # working branch: develop
-├── docs/                       # the seven documents above (v7 added this session)
-├── deploy/                     # cosmo-run.service + cosmo-notify.service, README (unchanged
-│                                  this session)
-├── templates/                  # harness + project templates (unchanged this session)
+├── docs/                       # handoff.md + v3-implementation-state.md updated this session;
+│                                  no new plan doc added
+├── deploy/                     # unchanged this session
+├── templates/
+│   └── harness/claude/skills/
+│       ├── spec-enrichment/SKILL.md       # unchanged -- still only promises task_id unique
+│       │                                     *within* a spec; deviation 74 fixes this at the
+│       │                                     insertion layer instead, deliberately (an
+│       │                                     enrichment-prompt convention isn't enforceable)
+│       └── openspec-workflow/SKILL.md     # unchanged -- still just says "short kebab-case
+│                                             name"; deviation 76 fixes the mismatch at the
+│                                             propose-prompt layer instead, same reasoning
 ├── src/cosmo/
-│   ├── checks.py, doctor.py, config/, harness/, bootstrap/, watchdog.py, retention.py,
-│   │   git/, gate/, task/, spec/                       # all unchanged this session
-│   ├── run/
-│   │   ├── loop.py                 # `run_queue`'s `if not order:` branch now picks
-│   │   │                              BLOCKED_REMAINING over QUEUE_EMPTY when anything
-│   │   │                              blocked this run (deviation 71); calls the new
-│   │   │                              `requeue_cost_blocked_tasks` at startup alongside
-│   │   │                              `reconcile_interrupted_tasks`
-│   │   └── recovery.py             # new `requeue_cost_blocked_tasks` (deviation 71) --
-│   │                                  same "startup, nothing running yet" family as
-│   │                                  `reconcile_interrupted_tasks`, `acquire_run_lock`
-│   ├── store/
-│   │   ├── enums.py                 # `StopReason` gains `BLOCKED_REMAINING` (71)
-│   │   ├── migrations.py            # migration 10: `run_state.stop_reason` widened (71)
-│   │   └── writer.py                # new `queue_unblock` (71) -- unlike `queue_retry`,
-│   │                                    preserves `attempt_count`/`worktree_path`
-│   ├── events/envelope.py           # new `EventType.TASK_COST_REQUEUED` (71)
-│   └── cli/main.py                  # unchanged this session -- `_RUN_SUCCESSFUL_STOP_
-│                                        REASONS` already excludes anything not explicitly
-│                                        listed, so BLOCKED_REMAINING gets the right exit
-│                                        code/styling for free
-├── tests/                       # 514 passing + 9 opt-in real-Docker/real-openspec
-│   ├── test_run_loop.py            # BLOCKED_REMAINING branch (new + 2 updated assertions
-│   │                                  that used to say QUEUE_EMPTY for this exact bug),
-│   │                                  cost-block auto-requeue end to end (71)
-│   ├── test_run_recovery.py        # `requeue_cost_blocked_tasks` unit tests: still-over-
-│   │                                  ceiling left alone, raised-ceiling requeued, non-cost
-│   │                                  reasons never touched (71)
-│   ├── test_store_migrations.py    # migration 10 regression tests (71)
-│   └── test_cli_run_queue.py       # BLOCKED_REMAINING exits nonzero (71)
-└── check.sh                     # ruff + format + mypy --strict + pytest
+│   ├── checks.py, doctor.py, config/, bootstrap/, watchdog.py, retention.py, git/, gate/,
+│   │   spec/, run/, store/, events/                    # all unchanged this session
+│   ├── task/machine.py              # `_do_proposing` now threads `spec_id` into
+│   │                                    `adapter.propose(...)`'s context dict (76)
+│   ├── harness/claude/adapter.py     # `propose()` reads `context["spec_id"]` and pins the
+│   │                                    exact required `openspec new change` name into the
+│   │                                    prompt, falling back to `spec_path.stem` (76)
+│   └── cli/main.py                  # new `_namespace_batch` (74); `spec_queue` namespaces
+│                                        every id/`depends_on` edge before the cycle check and
+│                                        insert, and is now idempotent against its own prior
+│                                        partial runs (74); `_render_spec_preview` shows
+│                                        namespaced ids (74); `_print_emit` gains
+│                                        `TASK_VALIDATION_RESULT` in its allowlist plus a new
+│                                        `_validation_result_detail` (75)
+├── tests/                       # 524 passing (up from 514), 9 skipped
+│   ├── test_cli_spec.py             # 4 existing tests' assertions updated (they'd coincided
+│   │                                   with already-namespaced-looking ids by chance, not by
+│   │                                   any real rule); 3 new tests for deviation 74
+│   │                                   (cross-project reuse, external depends_on left bare,
+│   │                                   rerun-is-a-no-op)
+│   ├── test_cli.py                  # 2 new `_print_emit` tests for deviation 75 (passing
+│   │                                   and failing validation results)
+│   └── test_harness_claude_adapter.py  # 2 new `propose()` prompt tests for deviation 76
+│                                          (pinned name, and the fallback with no `spec_id`)
+└── check.sh                     # ruff + format + mypy --strict + pytest -- all green
 ```
 
 ## Get oriented (2 minutes)
 
 ```bash
 cd /home/dev/delta/cosmo
-git log --oneline           # this session's v7 items 1+3 commit should be at HEAD
+git log --oneline           # this session's deviations 74-76 commit should be at HEAD
 git branch --show-current   # should say develop
 ./check.sh                  # must be green before you change anything
 cosmo doctor                # core checks + harness checks in two tables
@@ -299,15 +373,22 @@ repo's own local config has one); `cosmo init` against a real target repo
 seeds one automatically. `gitleaks` is on PATH, `docker` works, and so is
 the real `openspec` CLI (`1.6.0` this session).
 
-**This host's WSL2 genuinely has systemd enabled**, confirmed working
-again this session (real `systemctl --user` units, `systemd 259`). A
-`cosmo-run.service` user unit was left `enabled` (harmless — it only runs
-`cosmo run` against `todo-frontend-app`, which has nothing queued right
-now, so it starts, finds `queue_empty`, and exits cleanly); check `systemctl
---user status cosmo-run.service` if curious. `cosmo-notify.service` was
-deliberately stopped and disabled this session (it restart-loops forever
-without Telegram config, which this host doesn't have) — leave it disabled
-until real credentials exist.
+**This host's WSL2 genuinely has systemd enabled** (real `systemctl --user`
+units, `systemd 259`). A `cosmo-run.service` user unit is still `enabled`
+(last real run: exited cleanly, `queue_empty`, against `todo-frontend-app`,
+4.5h before this session started — no active timer re-triggering it found
+this session, but it will start again on the next login/boot). Re-verified
+this session: `acquire_run_lock` is **one `cosmo run` at a time per
+`data_dir`, not per project** — a single lock file
+(`~/.local/share/cosmo/cosmo-run.lock`) shared by *every* target repo. Now
+that a second real project (`habits-frontend-app`) exists in this store,
+that service starting against `todo-frontend-app` at the wrong moment would
+refuse (or be refused by) a manual `cosmo run` against `habits-frontend-app`
+with `RunLockHeldError` — not a bug, just something to actually check
+(`systemctl --user status cosmo-run.service`) before assuming a lock
+conflict is anything else. `cosmo-notify.service` remains deliberately
+stopped and disabled (restart-loops forever without Telegram config, which
+this host doesn't have) — leave it disabled until real credentials exist.
 
 **One real environment gotcha remains from early phases**: **`npm install`
 can hang indefinitely on this host if a previous run was killed
@@ -400,10 +481,15 @@ session, more than once.
 ## When you finish (whatever "finish" means for the next session)
 
 1. `./check.sh` green (if any code changed at all).
-2. Record any new deviation in the cumulative table (next number is **74**).
+2. Record any new deviation in the cumulative table (next number is **77**).
 3. If Phase 10's own acceptance run against `todo-frontend-app` is still
    fully `done` and nothing regressed it, there is no more Phase 10
    backlog left to reconcile — a fresh spec batch queued against it is new
-   work, not a continuation.
+   work, not a continuation. `habits-frontend-app`'s `habit-tracker` batch
+   is a separate, real, still-in-flight run (4/9 tasks done, `use-habits-
+   hook` deliberately `blocked` pending a fresh `cosmo run`) — not this
+   repo's own backlog, but worth checking `cosmo queue ls`/`cosmo report`
+   against the real store if you want to know whether deviations 75-76
+   actually held up cleanly for its remaining 5 tasks.
 4. Commit to `develop` with a message explaining *why*, in the style of the
    existing commit history.

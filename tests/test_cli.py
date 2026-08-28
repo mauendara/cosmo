@@ -663,3 +663,88 @@ def test_print_emit_still_filters_out_chatty_info_events(monkeypatch: pytest.Mon
     cli_main._print_emit(event)
 
     assert buf.getvalue() == ""
+
+
+def test_print_emit_shows_a_passing_validation_result(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Found live: a passing `task.validation_result` is `Severity.INFO` and
+    wasn't in `_EMIT_LIFECYCLE_INFO_TYPES` -- an operator watching `cosmo
+    run` saw the VALIDATING stage run a real Docker gate for tens of seconds
+    and print nothing at all, on either outcome."""
+    from rich.console import Console
+
+    buf = io.StringIO()
+    monkeypatch.setattr(cli_main, "console", Console(file=buf, width=200))
+
+    event = Event(
+        event_id="e1",
+        run_id="run-1",
+        task_id="scaffold-app-task",
+        timestamp="2026-08-27T18:22:52.542+00:00",
+        sequence=1,
+        event_type=EventType.TASK_VALIDATION_RESULT.value,
+        severity=Severity.INFO,
+        schema_version=1,
+        payload={
+            "passed": True,
+            "duration_seconds": 12.5,
+            "unit": {"passed": True, "passed_count": 4, "failed_count": 0, "skipped_count": 0},
+            "e2e": {"passed": True, "passed_count": 2, "failed_count": 0, "skipped_count": 0},
+            "flaky_detected": [],
+            "quarantined_skipped": [],
+        },
+    )
+
+    cli_main._print_emit(event)
+
+    output = buf.getvalue()
+    assert "task.validation_result" in output
+    assert "scaffold-app-task" in output
+    assert "passed=True" in output
+    assert "unit=pass (4p/0f/0s)" in output
+    assert "e2e=pass (2p/0f/0s)" in output
+    assert "queue failures" not in output
+
+
+def test_print_emit_shows_a_failing_validation_result_with_stage_breakdown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`error_summary`/`error_detail` deliberately live in `task_failures`,
+    not this event's payload (spec 9.2) -- the live line can't show them, but
+    it must at least show which stage failed and point at where the rest is."""
+    from rich.console import Console
+
+    buf = io.StringIO()
+    monkeypatch.setattr(cli_main, "console", Console(file=buf, width=200))
+
+    event = Event(
+        event_id="e1",
+        run_id="run-1",
+        task_id="habit-tracker-scaffold-app",
+        timestamp="2026-08-27T18:22:52.542+00:00",
+        sequence=1,
+        event_type=EventType.TASK_VALIDATION_RESULT.value,
+        severity=Severity.WARNING,
+        schema_version=1,
+        payload={
+            "passed": False,
+            "duration_seconds": 54.3,
+            "unit": {"passed": True, "passed_count": 0, "failed_count": 0, "skipped_count": 0},
+            "e2e": {
+                "passed": False,
+                "passed_count": None,
+                "failed_count": None,
+                "skipped_count": None,
+            },
+            "flaky_detected": [],
+            "quarantined_skipped": [],
+        },
+    )
+
+    cli_main._print_emit(event)
+
+    output = buf.getvalue()
+    assert "task.validation_result" in output
+    assert "passed=False" in output
+    assert "unit=pass" in output
+    assert "e2e=FAIL" in output
+    assert "cosmo queue failures habit-tracker-scaffold-app" in output

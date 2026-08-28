@@ -77,6 +77,61 @@ def test_argv_carries_model_from_config(tmp_path: Path) -> None:
     assert argv[argv.index("--model") + 1] == adapter.config.harness.model
 
 
+def test_propose_prompt_pins_the_change_name_to_spec_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Found live: `_do_finishing`'s `openspec archive` and `_do_proposing`'s
+    own reused-worktree check both assume the change a propose session
+    creates is named `spec_id` (`Path(spec_path).stem`) -- but nothing ever
+    told the propose session that. Left to its own judgment it picked a
+    different, reasonable-looking name (stripping a task file's `-task`
+    suffix), and the archive step failed non-fatally on every single task
+    (`Change 'scaffold-app-task' not found. Available changes: scaffold-app`).
+    The prompt must name the exact required change id, not just describe the
+    change's location."""
+    adapter = _adapter(tmp_path)
+    captured: dict[str, object] = {}
+
+    def _fake_invoke(
+        self: ClaudeCodeAdapter, *, task_id: str, prompt: str, on_activity: object
+    ) -> None:
+        captured["task_id"] = task_id
+        captured["prompt"] = prompt
+        return None
+
+    monkeypatch.setattr(ClaudeCodeAdapter, "_invoke", _fake_invoke)
+
+    adapter.propose(
+        Path("docs/specs/habit-tracker-spec/tasks/scaffold-app-task.md"),
+        {"task_id": "habit-tracker-scaffold-app", "spec_id": "scaffold-app"},
+    )
+
+    assert "openspec new change scaffold-app" in str(captured["prompt"])
+    assert "openspec new change scaffold-app-task" not in str(captured["prompt"])
+
+
+def test_propose_prompt_falls_back_to_spec_path_stem_without_spec_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A caller that doesn't thread `spec_id` through (a raw `queue add`
+    task, not a spec-batch one) still gets a deterministic, pinned name --
+    the same fallback `task_id` already uses one line above."""
+    adapter = _adapter(tmp_path)
+    captured: dict[str, object] = {}
+
+    def _fake_invoke(
+        self: ClaudeCodeAdapter, *, task_id: str, prompt: str, on_activity: object
+    ) -> None:
+        captured["prompt"] = prompt
+        return None
+
+    monkeypatch.setattr(ClaudeCodeAdapter, "_invoke", _fake_invoke)
+
+    adapter.propose(Path("openspec/changes/add-foo"), {"task_id": "add-foo"})
+
+    assert "openspec new change add-foo" in str(captured["prompt"])
+
+
 def test_argv_restricts_setting_sources_to_project_only(tmp_path: Path) -> None:
     """Regression pin for the Phase 3 finding: a headless run must not
     inherit the operator's global ~/.claude hooks/plugins. Verified against

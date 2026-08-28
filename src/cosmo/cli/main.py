@@ -134,8 +134,46 @@ _EMIT_LIFECYCLE_INFO_TYPES = frozenset(
         EventType.RUN_RESUMED.value,
         EventType.RUN_SUMMARY.value,
         EventType.TASK_STATE_CHANGED.value,
+        EventType.TASK_VALIDATION_RESULT.value,
     }
 )
+
+
+def _validation_result_detail(event: Event) -> str:
+    """Found live: a passing `task.validation_result` (`severity=info`) was
+    filtered out entirely by `_print_emit`'s severity gate -- the VALIDATING
+    stage printed nothing at all while it ran a real Docker gate for tens of
+    seconds. A failing one (`severity=warning`) did clear the gate, but with
+    no `detail` case of its own it printed as a bare `>> task.validation_result`
+    with no pass/fail breakdown -- indistinguishable from "nothing happened"
+    at a glance. `error_summary`/`error_detail` deliberately live in
+    `task_failures` instead of this event's payload (spec 9.2), so this only
+    summarizes what the payload actually carries and points at `cosmo queue
+    failures` for the rest."""
+    payload = event.payload
+    parts = [f"passed={payload.get('passed')}"]
+    for stage_name in ("unit", "e2e"):
+        stage = payload.get(stage_name)
+        if not isinstance(stage, dict):
+            continue
+        label = "pass" if stage.get("passed") else "FAIL"
+        passed_n, failed_n, skipped_n = (
+            stage.get("passed_count"),
+            stage.get("failed_count"),
+            stage.get("skipped_count"),
+        )
+        counts = (
+            f" ({passed_n}p/{failed_n}f/{skipped_n}s)"
+            if passed_n is not None or failed_n is not None
+            else ""
+        )
+        parts.append(f"{stage_name}={label}{counts}")
+    detail = f" [{event.task_id}] " + ", ".join(parts)
+    if not payload.get("passed"):
+        detail += f" -- see `cosmo queue failures {event.task_id}` for detail"
+    return escape(detail)
+
+
 _EMIT_SEVERITY_STYLE = {"info": "cyan", "warning": "yellow", "error": "red", "critical": "bold red"}
 
 
@@ -162,6 +200,8 @@ def _print_emit(event: Event) -> None:
         from_state = event.payload.get("from_state")
         to_state = event.payload.get("to_state")
         detail = escape(f" [{event.task_id}] {from_state} -> {to_state}")
+    elif event.event_type == EventType.TASK_VALIDATION_RESULT.value:
+        detail = _validation_result_detail(event)
     try:
         when = datetime.fromisoformat(event.timestamp).strftime("%H:%M:%SZ")
     except ValueError:
@@ -1140,6 +1180,21 @@ def _cycle_check(cfg: CosmoConfig, *, candidates: dict[str, list[str]]) -> None:
         raise typer.Exit(code=1)
 
 
+def _namespace_batch(name: str, task_files: list[SpecTaskFile]) -> dict[str, str]:
+    """Bare `task_id` -> namespaced id (`f"{name}-{task_id}"`), one entry per
+    task in this batch. `task_queue.task_id` is a single global primary key
+    shared by every Cosmo-managed project's `cosmo.db`, but `SKILL.md`'s own
+    contract only promises a task_id is "unique within this spec" -- two
+    unrelated repos enriched from the same template can and do pick the same
+    natural id (`scaffold-app` twice, found live). Namespacing at insertion
+    time keeps that contract honest without asking the enrichment harness (or
+    a human hand-editing the preview) to think about global uniqueness.
+    `depends_on` entries not present in this map are left untouched -- an
+    intentional reference to an id already queued outside this batch, the one
+    case `SKILL.md` documents as allowed."""
+    return {tf.task_id: f"{name}-{tf.task_id}" for tf in task_files}
+
+
 def _insert_queued_task(
     writer: StoreWriter,
     *,
@@ -1217,14 +1272,18 @@ def _spec_tasks_dir(repo: Path, name: str) -> Path:
 
 
 def _render_spec_preview(name: str, task_files: list[SpecTaskFile]) -> None:
+    """Shows the *namespaced* task_id/depends_on (`_namespace_batch`) -- what
+    a human edits here should match what `cosmo spec queue` actually inserts,
+    not the bare on-disk id."""
+    namespace = _namespace_batch(name, task_files)
     table = Table(title=f"{name}-spec tasks", title_justify="left")
     for col in ("task_id", "title", "depends_on", "priority", "allow_test_edits", "file"):
         table.add_column(col)
     for tf in task_files:
         table.add_row(
-            tf.task_id,
+            namespace[tf.task_id],
             tf.title,
-            ", ".join(tf.depends_on) or "-",
+            ", ".join(namespace.get(d, d) for d in tf.depends_on) or "-",
             str(tf.priority),
             "yes" if tf.allow_test_edits else "-",
             tf.path.name,
@@ -1380,30 +1439,69 @@ def spec_queue(
         err_console.print(f"[red]no *-task.md files found under {tasks_dir}[/red]")
         raise typer.Exit(code=1)
 
+    # `task_queue.task_id` is a global primary key shared by every
+    # Cosmo-managed project's `cosmo.db`, but `SKILL.md` only promises a
+    # task_id is unique *within this spec* -- namespace every id/depends_on
+    # edge in this batch (`_namespace_batch`) before anything downstream
+    # (cycle check, insert) sees it, so an unrelated project's task file
+    # picking the same natural id (e.g. `scaffold-app`) can never collide
+    # with -- or look "done" on behalf of -- this batch's own task.
+    namespace = _namespace_batch(name, task_files)
+
     # Checked atomically across the whole batch before any of it is
     # inserted -- a cycle introduced by hand-editing one file between `spec
     # add` and `spec queue` should reject the whole batch, not queue half
     # of it and then fail partway through.
-    _cycle_check(cfg, candidates={tf.task_id: tf.depends_on for tf in task_files})
+    _cycle_check(
+        cfg,
+        candidates={
+            namespace[tf.task_id]: [namespace.get(d, d) for d in tf.depends_on] for tf in task_files
+        },
+    )
 
     spec_batch_id = f"{name}-spec"
+    inserted = 0
+    skipped = 0
     writer = StoreWriter(cfg.paths.db_path)
     try:
         for tf in task_files:
+            namespaced_id = namespace[tf.task_id]
+            existing = get_task(cfg.paths.db_path, namespaced_id)
+            if existing is not None:
+                # Re-running `spec queue` on a batch that already partially
+                # (or fully) landed is a no-op, not an error -- found live: a
+                # cross-project id collision truncated a batch partway
+                # through, and there was no way to resume it short of
+                # `cosmo queue add`-ing the remaining tasks by hand. A
+                # collision against a *different* batch's task is still a
+                # real conflict worth failing loudly on.
+                if existing.spec_batch_id == spec_batch_id:
+                    console.print(f"[dim]{namespaced_id} already queued, skipping[/dim]")
+                    skipped += 1
+                    continue
+                err_console.print(f"[red]task {namespaced_id!r} already queued[/red]")
+                raise typer.Exit(code=1)
             result = _insert_queued_task(
                 writer,
-                task_id=tf.task_id,
+                task_id=namespaced_id,
                 spec_path=str(tf.path),
-                depends_on=tf.depends_on,
+                depends_on=[namespace.get(d, d) for d in tf.depends_on],
                 priority=tf.priority,
                 max_attempts=cfg.retries.max_attempts,
                 allow_test_edits=tf.allow_test_edits,
                 spec_batch_id=spec_batch_id,
             )
             emit_state_changed(EventEmitter(writer), result)
+            inserted += 1
     finally:
         writer.close()
-    console.print(f"[green]queued[/green] {len(task_files)} task(s) from {spec_batch_id}")
+    if skipped:
+        console.print(
+            f"[green]queued[/green] {inserted} task(s) from {spec_batch_id} "
+            f"({skipped} already queued, skipped)"
+        )
+    else:
+        console.print(f"[green]queued[/green] {len(task_files)} task(s) from {spec_batch_id}")
 
 
 @queue_app.command("ls")

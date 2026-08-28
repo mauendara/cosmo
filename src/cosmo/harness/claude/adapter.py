@@ -150,8 +150,19 @@ class ClaudeCodeAdapter(HarnessAdapter):
         # (§10.3); Phase 3's scope (§2.1-2.3, §4, §7.2) is invocation and
         # stream parsing, not prompt engineering. Revisit once Phase 4 exists.
         task_id = str(context.get("task_id", spec_path.stem))
+        # `_do_finishing`'s `openspec archive` call and `_do_proposing`'s own
+        # reused-worktree check both assume the change this session creates
+        # is named `spec_id` (`Path(spec_path).stem`) -- found live: with
+        # nothing pinning that down, the propose session picked its own
+        # (reasonable-looking) name instead, e.g. stripping a task file's
+        # `-task` suffix, and every later step assuming `spec_id` silently
+        # missed the real change. Pinning the name here, rather than trying
+        # to recover it after the fact, is what actually keeps this in sync.
+        spec_id = str(context.get("spec_id", spec_path.stem))
         prompt = (
             f"Run OpenSpec's propose workflow for the change at {spec_path}. "
+            f"Name the change exactly {spec_id!r} (`openspec new change {spec_id}`) -- "
+            f"do not pick a different name, even a shorter or more natural-looking one. "
             f"Follow this repository's operating policy for how to invoke OpenSpec."
         )
         return self._invoke(task_id=task_id, prompt=prompt, on_activity=on_activity)

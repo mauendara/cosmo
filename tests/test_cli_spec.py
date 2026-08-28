@@ -93,7 +93,7 @@ def test_spec_add_and_queue_default_repo_to_the_current_directory(
     result = runner.invoke(app, ["spec", "queue", "demo"])
 
     assert result.exit_code == 0, result.stdout
-    assert {t.task_id for t in list_tasks(_db_path())} == {"demo-backend"}
+    assert {t.task_id for t in list_tasks(_db_path())} == {"demo-demo-backend"}
 
 
 def test_spec_add_without_a_raw_spec_file_or_from_fails_loudly(tmp_path: Path) -> None:
@@ -240,13 +240,13 @@ def test_spec_queue_inserts_one_task_per_file_with_the_right_batch_id(tmp_path: 
         repo,
         "demo",
         "backend-task.md",
-        "---\ntask_id: demo-backend\ndepends_on: []\npriority: 1\ntitle: Backend\n---\n\nbody\n",
+        "---\ntask_id: backend\ndepends_on: []\npriority: 1\ntitle: Backend\n---\n\nbody\n",
     )
     _write_task_file(
         repo,
         "demo",
         "frontend-task.md",
-        "---\ntask_id: demo-frontend\ndepends_on: [demo-backend]\ntitle: Frontend\n---\n\nbody\n",
+        "---\ntask_id: frontend\ndepends_on: [backend]\ntitle: Frontend\n---\n\nbody\n",
     )
 
     result = runner.invoke(app, ["spec", "queue", "demo", "--repo", str(repo)])
@@ -280,7 +280,7 @@ def test_spec_queue_threads_allow_test_edits_through_from_frontmatter(tmp_path: 
         repo,
         "demo",
         "e2e-task.md",
-        "---\ntask_id: demo-e2e\nallow_test_edits: true\ntitle: E2E\n---\n\nbody\n",
+        "---\ntask_id: e2e\nallow_test_edits: true\ntitle: E2E\n---\n\nbody\n",
     )
 
     result = runner.invoke(app, ["spec", "queue", "demo", "--repo", str(repo)])
@@ -330,6 +330,10 @@ def test_spec_queue_rejects_a_malformed_task_file(tmp_path: Path) -> None:
 
 
 def test_spec_queue_on_a_duplicate_task_id_fails_loudly(tmp_path: Path) -> None:
+    """A collision against a task queued under a *different* spec_batch_id
+    (not a prior run of this same batch -- see the rerun test below) is a
+    real conflict and still fails loud, even after namespacing collapses the
+    common case of two unrelated batches picking the same bare id."""
     repo = tmp_path / "target"
     repo.mkdir()
     _register(repo)
@@ -337,10 +341,98 @@ def test_spec_queue_on_a_duplicate_task_id_fails_loudly(tmp_path: Path) -> None:
         app, ["queue", "add", "openspec/changes/demo-backend", "--task-id", "demo-backend"]
     )
     _write_task_file(
-        repo, "demo", "backend-task.md", "---\ntask_id: demo-backend\ndepends_on: []\n---\n\nbody\n"
+        repo, "demo", "backend-task.md", "---\ntask_id: backend\ndepends_on: []\n---\n\nbody\n"
     )
 
     result = runner.invoke(app, ["spec", "queue", "demo", "--repo", str(repo)])
 
     assert result.exit_code == 1
     assert "already queued" in result.stderr
+
+
+def test_spec_queue_namespaces_ids_so_two_projects_can_reuse_the_same_bare_id(
+    tmp_path: Path,
+) -> None:
+    """Regression test: `SKILL.md` only promises a task_id is unique *within
+    its own spec*, so two unrelated repos independently enriched with the
+    same generic task name (e.g. `scaffold-app`) must not collide in the
+    shared `task_queue`, and one project's `depends_on: [scaffold-app]` must
+    never resolve against the *other* project's same-named task."""
+    repo_a = tmp_path / "project-a"
+    repo_a.mkdir()
+    _register(repo_a)
+    _write_task_file(
+        repo_a,
+        "alpha",
+        "scaffold-task.md",
+        "---\ntask_id: scaffold-app\ndepends_on: []\n---\n\na\n",
+    )
+    repo_b = tmp_path / "project-b"
+    repo_b.mkdir()
+    _register(repo_b)
+    _write_task_file(
+        repo_b, "beta", "scaffold-task.md", "---\ntask_id: scaffold-app\ndepends_on: []\n---\n\nb\n"
+    )
+
+    result_a = runner.invoke(app, ["spec", "queue", "alpha", "--repo", str(repo_a)])
+    result_b = runner.invoke(app, ["spec", "queue", "beta", "--repo", str(repo_b)])
+
+    assert result_a.exit_code == 0, result_a.stdout
+    assert result_b.exit_code == 0, result_b.stdout
+    tasks = {t.task_id: t for t in list_tasks(_db_path())}
+    assert set(tasks) == {"alpha-scaffold-app", "beta-scaffold-app"}
+    assert tasks["alpha-scaffold-app"].spec_batch_id == "alpha-spec"
+    assert tasks["beta-scaffold-app"].spec_batch_id == "beta-spec"
+
+
+def test_spec_queue_depends_on_an_external_id_is_left_bare(tmp_path: Path) -> None:
+    """`SKILL.md` documents `depends_on` may name "an existing queued
+    task_id" outside this batch -- such an entry must not be namespaced
+    (there's nothing in this batch to namespace it against)."""
+    repo = tmp_path / "target"
+    repo.mkdir()
+    _register(repo)
+    runner.invoke(app, ["queue", "add", "openspec/changes/infra-base", "--task-id", "infra-base"])
+    _write_task_file(
+        repo,
+        "demo",
+        "backend-task.md",
+        "---\ntask_id: backend\ndepends_on: [infra-base]\n---\n\nbody\n",
+    )
+
+    result = runner.invoke(app, ["spec", "queue", "demo", "--repo", str(repo)])
+
+    assert result.exit_code == 0, result.stdout
+    tasks = {t.task_id: t for t in list_tasks(_db_path())}
+    assert tasks["demo-backend"].depends_on == ["infra-base"]
+
+
+def test_spec_queue_rerun_skips_tasks_already_queued_by_this_same_batch(tmp_path: Path) -> None:
+    """Found live: a batch that partially landed (e.g. truncated by a
+    cross-project id collision before the namespacing fix) had no way to
+    resume via `cosmo spec queue` itself -- rerunning it just hit the first
+    already-queued id and exited 1 again. Rerunning on a batch that's already
+    fully queued must be a clean no-op instead."""
+    repo = tmp_path / "target"
+    repo.mkdir()
+    _register(repo)
+    _write_task_file(
+        repo, "demo", "backend-task.md", "---\ntask_id: backend\ndepends_on: []\n---\n\nbody\n"
+    )
+    _write_task_file(
+        repo,
+        "demo",
+        "frontend-task.md",
+        "---\ntask_id: frontend\ndepends_on: [backend]\n---\n\nbody\n",
+    )
+    first = runner.invoke(app, ["spec", "queue", "demo", "--repo", str(repo)])
+    assert first.exit_code == 0, first.stdout
+
+    second = runner.invoke(app, ["spec", "queue", "demo", "--repo", str(repo)])
+
+    assert second.exit_code == 0, second.stdout
+    assert "demo-backend already queued, skipping" in second.stdout
+    assert "demo-frontend already queued, skipping" in second.stdout
+    assert "queued 0 task(s) from demo-spec (2 already queued, skipped)" in second.stdout
+    tasks = {t.task_id: t for t in list_tasks(_db_path())}
+    assert set(tasks) == {"demo-backend", "demo-frontend"}
