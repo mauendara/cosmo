@@ -28,6 +28,28 @@
   `frontend/architecture.md`'s DOM-vs-canvas rule -- this is the other half
   of the same guardrail: an e2e suite is only as trustworthy as the surface
   it's actually asserting against.
+- Pin `@playwright/test` to exactly `1.49.0` (`npm install -D
+  @playwright/test@1.49.0`), never `@latest` -- Cosmo's validation gate runs
+  the e2e stage in `mcr.microsoft.com/playwright:v1.49.0-noble`, a container
+  with only that version's browser binaries installed. A newer
+  `@playwright/test` resolves to a newer default browser build that
+  container doesn't have (`browserType.launch: Executable doesn't exist at
+  .../chrome-headless-shell`), failing every e2e run inside the gate even
+  though `npx playwright test` works fine on a developer's machine with
+  browsers installed locally. Confirmed live, twice, in real project
+  scaffolds before this note existed.
+- `playwright.config.ts` must configure the `json` reporter to write to
+  `playwright-report/results.json` -- the exact path and format Cosmo's gate
+  parses for pass/fail counts and failing-test detail:
+
+  ```ts
+  reporter: [["json", { outputFile: "playwright-report/results.json" }]],
+  ```
+
+  A default/HTML-only reporter (or any other output path) leaves that file
+  missing, which the gate reports as "playwright produced no report" --
+  indistinguishable from the suite never having run at all, even when every
+  test actually passed.
 - `playwright.config.ts` must read its base URL from `process.env.BASE_URL`,
   not a hardcoded `localhost` port -- Cosmo's validation gate starts the
   built app as a container on a private Docker network and passes `BASE_URL`
