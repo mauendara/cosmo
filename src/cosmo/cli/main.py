@@ -1264,13 +1264,19 @@ def spec_add(
     resolved_repo, project_harness = _resolve_project_repo(repo, cfg)
     spec_path = resolved_repo / "docs" / "specs" / f"{name}-spec.md"
     if not spec_path.is_file():
+        # `docs/specs/` is deliberately not part of any project template
+        # (spec-batch content, not stack boilerplate -- see `bootstrap.docs.
+        # copy_project_docs`), so it never exists yet on a first spec for a
+        # freshly-`cosmo init`'d repo. Create it either way so the error
+        # message below is actually actionable (write the file, don't also
+        # `mkdir` first) rather than a dead end.
+        spec_path.parent.mkdir(parents=True, exist_ok=True)
         if from_file is None:
             err_console.print(
                 f"[red]{spec_path} does not exist[/red] -- write it there directly, "
                 f"or pass --from <path> to copy one in"
             )
             raise typer.Exit(code=1)
-        spec_path.parent.mkdir(parents=True, exist_ok=True)
         spec_path.write_text(from_file.read_text(encoding="utf-8"), encoding="utf-8")
 
     tasks_dir = _spec_tasks_dir(resolved_repo, name)

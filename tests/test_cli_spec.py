@@ -102,6 +102,19 @@ def test_spec_add_without_a_raw_spec_file_or_from_fails_loudly(tmp_path: Path) -
     assert "does not exist" in result.stderr
 
 
+def test_spec_add_without_a_raw_spec_file_still_creates_docs_specs(tmp_path: Path) -> None:
+    """`docs/specs/` is deliberately not part of any project template (it's
+    spec-batch content, not stack boilerplate), so it never exists yet on a
+    fresh `cosmo init`'d repo -- the error above must still leave the
+    directory created, so "write it there directly" is an actionable next
+    step, not a dead end that also needs a manual `mkdir`."""
+    repo = tmp_path / "target"
+    repo.mkdir()
+    _register(repo)
+    runner.invoke(app, ["spec", "add", "demo", "--repo", str(repo), "--harness", "fake"])
+    assert (repo / "docs" / "specs").is_dir()
+
+
 def test_spec_add_copies_in_a_raw_spec_via_from_and_reports_when_the_harness_writes_nothing(
     tmp_path: Path,
 ) -> None:

@@ -54,6 +54,15 @@ The one real exception (still open, not settled): a circuit-breaker trip
 pauses the *whole* run, independent branches included, by design (spec
 6.5) — see v7's own item 4 note for the full reasoning.
 
+**One more real fix this session (deviation 72), found by the user
+hand-testing a project template for v6 prep**: `cli.main.spec_add`'s
+"no raw spec, no `--from`" error branch now creates `docs/specs/` before
+telling the user to write a file there — it didn't before, so "write it
+there directly" pointed at a directory that didn't exist. True of every
+project template equally (`docs/specs/` is deliberately not part of any
+template's own `docs/` — it's spec-batch content, not stack boilerplate),
+not specific to the template the user happened to be testing.
+
 **v6 ([v6-project-template-aware-stuff-plan.md](v6-project-template-aware-stuff-plan.md))
 was explicitly asked about this session and deliberately not started** —
 its own Status line already says it needs a real second stack (a
@@ -382,7 +391,7 @@ session, more than once.
 ## When you finish (whatever "finish" means for the next session)
 
 1. `./check.sh` green (if any code changed at all).
-2. Record any new deviation in the cumulative table (next number is **72**).
+2. Record any new deviation in the cumulative table (next number is **73**).
 3. If Phase 10's own acceptance run against `todo-frontend-app` is still
    fully `done` and nothing regressed it, there is no more Phase 10
    backlog left to reconcile — a fresh spec batch queued against it is new
