@@ -11,9 +11,12 @@ Path defaults are computed rather than shipped, because they depend on the host.
 from __future__ import annotations
 
 import os
+import stat
 import tomllib
 from pathlib import Path
 from typing import Any
+
+import tomli_w
 
 from cosmo.config.model import CosmoConfig
 
@@ -78,3 +81,24 @@ def load_config(
         raw["paths"].setdefault(key, value)
 
     return CosmoConfig.model_validate(raw)
+
+
+def write_user_config_table(path: Path, table: str, values: dict[str, Any]) -> None:
+    """Merges `values` into `[table]` of the user config file at `path`,
+    creating the file (and its parent directory) if absent, and leaving
+    every other table untouched. Round-trips the whole file through
+    `tomllib`/`tomli_w` -- this file is machine-managed by `cosmo notify
+    config` (and by a human otherwise), not hand-commented, so the one real
+    cost of a full round-trip (comments elsewhere in the file are not
+    preserved) is accepted rather than hand-rolling a comment-preserving
+    TOML editor for one small table.
+
+    Always leaves the file mode at `0o600` afterward -- every table this
+    function is expected to write (today: `[notify]`) can carry a real
+    secret (a Telegram bot token), so the file is treated as sensitive
+    regardless of which table changed."""
+    raw = _read_toml(path) if path.is_file() else {}
+    raw = _deep_merge(raw, {table: values})
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(tomli_w.dumps(raw))
+    path.chmod(stat.S_IRUSR | stat.S_IWUSR)

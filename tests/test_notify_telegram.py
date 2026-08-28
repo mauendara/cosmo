@@ -48,3 +48,34 @@ def test_format_omits_task_line_when_absent() -> None:
 def test_format_includes_the_payload() -> None:
     text = format_event(_event(payload={"resets_at": "2026-01-01T05:00:00Z"}))
     assert "resets_at" in text
+
+
+def test_format_uses_the_shared_human_readable_detail_when_recognized() -> None:
+    """A `task.validation_result` payload gets the same human phrase
+    `cli.main._print_emit` shows in the live terminal, not a raw JSON dump
+    -- both go through `events.format.event_detail`."""
+    text = format_event(
+        _event(
+            event_type="task.validation_result",
+            task_id="t1",
+            payload={
+                "passed": False,
+                "unit": {"passed": True, "passed_count": 1, "failed_count": 0, "skipped_count": 0},
+                "e2e": {
+                    "passed": False,
+                    "passed_count": 0,
+                    "failed_count": 1,
+                    "skipped_count": 0,
+                },
+            },
+        )
+    )
+    assert "passed=False" in text
+    assert "e2e=FAIL (0p/1f/0s)" in text
+    assert "cosmo queue failures t1" in text
+    assert '"passed"' not in text  # no raw JSON when a human phrase exists
+
+
+def test_format_falls_back_to_raw_payload_for_an_unrecognized_event_type() -> None:
+    text = format_event(_event(event_type="some.future.event_type", payload={"weight": 7}))
+    assert '"weight": 7' in text

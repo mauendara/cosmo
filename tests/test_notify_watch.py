@@ -75,6 +75,22 @@ def test_run_summary_is_always_forwarded_despite_info_severity(tmp_path: Path) -
     writer.close()
 
 
+def test_task_completed_is_always_forwarded_despite_info_severity(tmp_path: Path) -> None:
+    db_path = tmp_path / "cosmo.db"
+    writer = StoreWriter(db_path)
+    EventEmitter(writer).emit(
+        event_type=EventType.TASK_COMPLETED, severity=Severity.INFO, task_id="a"
+    )
+    sink = _FakeSink()
+    state = WatchState(since_rowid=0, last_activity_monotonic=0.0)
+
+    watch_once(db_path=db_path, sink=sink, config=_config(), state=state, now_monotonic=0.0)
+
+    assert len(sink.sent) == 1
+    assert sink.sent[0].event_type == EventType.TASK_COMPLETED.value
+    writer.close()
+
+
 def test_state_advances_past_already_seen_rows(tmp_path: Path) -> None:
     db_path = tmp_path / "cosmo.db"
     writer = StoreWriter(db_path)

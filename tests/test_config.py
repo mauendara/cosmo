@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import stat
 from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
 from cosmo.config import load_config
-from cosmo.config.loader import _deep_merge
+from cosmo.config.loader import _deep_merge, write_user_config_table
 
 
 def test_defaults_load_and_validate() -> None:
@@ -102,3 +103,40 @@ def test_quota_bypass_is_accepted_alongside_a_real_cost_ceiling(tmp_path: Path) 
     )
     cfg = load_config(config_path=override)
     assert cfg.quota.bypass_5h_with_credits is True
+
+
+def test_write_user_config_table_creates_a_missing_file(tmp_path: Path) -> None:
+    path = tmp_path / "nested" / "config.toml"
+    write_user_config_table(path, "notify", {"enabled": True, "telegram_chat_id": "1"})
+
+    cfg = load_config(config_path=path)
+    assert cfg.notify.enabled is True
+    assert cfg.notify.telegram_chat_id == "1"
+
+
+def test_write_user_config_table_preserves_other_tables(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text("[retries]\nmax_attempts = 5\n")
+
+    write_user_config_table(path, "notify", {"enabled": True})
+
+    cfg = load_config(config_path=path)
+    assert cfg.retries.max_attempts == 5
+    assert cfg.notify.enabled is True
+
+
+def test_write_user_config_table_overwrites_its_own_prior_values(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    write_user_config_table(path, "notify", {"enabled": True, "telegram_chat_id": "old"})
+    write_user_config_table(path, "notify", {"enabled": True, "telegram_chat_id": "new"})
+
+    cfg = load_config(config_path=path)
+    assert cfg.notify.telegram_chat_id == "new"
+
+
+def test_write_user_config_table_sets_owner_only_permissions(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    write_user_config_table(path, "notify", {"telegram_bot_token": "secret"})
+
+    mode = stat.S_IMODE(path.stat().st_mode)
+    assert mode == stat.S_IRUSR | stat.S_IWUSR

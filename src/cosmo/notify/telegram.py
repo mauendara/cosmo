@@ -13,18 +13,33 @@ import urllib.request
 from dataclasses import dataclass
 
 from cosmo.events.envelope import Event
+from cosmo.events.format import event_detail
 
 _API_BASE = "https://api.telegram.org"
 
+_SEVERITY_EMOJI = {"info": "ℹ️", "warning": "⚠️", "error": "\U0001f534", "critical": "\U0001f6a8"}
+
 
 def format_event(event: Event) -> str:
-    lines = [f"[cosmo] {event.event_type} ({event.severity.value})"]
+    """A short, human-readable message -- no markup, sent as Telegram plain
+    text (no `parse_mode`), so nothing here needs escaping. Type-specific
+    detail comes from `events.format.event_detail`, the same function
+    `cli.main._print_emit` uses for the live terminal; an event type it
+    doesn't recognize (or one missing the fields it looks for) falls back
+    to the raw payload rather than showing nothing, so a genuinely new
+    event type is never silently unreadable."""
+    emoji = _SEVERITY_EMOJI.get(event.severity.value, "")
+    header = f"{emoji} {event.event_type} ({event.severity.value})".strip()
+    lines = [header]
     if event.run_id:
         lines.append(f"run: {event.run_id}")
     if event.task_id:
         lines.append(f"task: {event.task_id}")
-    if event.payload:
-        lines.append(json.dumps(event.payload, default=str))
+    detail = event_detail(event)
+    if detail:
+        lines.append(detail)
+    elif event.payload:
+        lines.append(json.dumps(event.payload, indent=2, default=str))
     return "\n".join(lines)
 
 

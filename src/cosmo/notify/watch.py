@@ -31,14 +31,17 @@ from cosmo.store.enums import Severity
 from cosmo.store.reader import EventRow, latest_event_rowid, list_events_after
 
 _SEVERITY_ORDER = {"info": 0, "warning": 1, "error": 2, "critical": 3}
-_ALWAYS_NOTIFY_TYPES = frozenset({EventType.RUN_SUMMARY.value, EventType.RUN_STOPPED.value})
+_ALWAYS_NOTIFY_TYPES = frozenset(
+    {EventType.RUN_SUMMARY.value, EventType.RUN_STOPPED.value, EventType.TASK_COMPLETED.value}
+)
 
 
 def _should_notify(row: EventRow, min_severity: Severity) -> bool:
-    """`RUN_SUMMARY`/`RUN_STOPPED` are always notification-worthy even
-    though they're emitted at `severity=info` (a run ending matters
-    regardless); everything else is gated on `min_severity` (part 3's
-    `[notify]` config, `WARNING`+ by default)."""
+    """`RUN_SUMMARY`/`RUN_STOPPED`/`TASK_COMPLETED` are always notification-
+    worthy even though they're emitted at `severity=info` (a run ending, or
+    a task finishing, matters regardless of the configured threshold);
+    everything else is gated on `min_severity` (part 3's `[notify]` config,
+    `WARNING`+ by default)."""
     if row.event_type in _ALWAYS_NOTIFY_TYPES:
         return True
     return _SEVERITY_ORDER.get(row.severity, 0) >= _SEVERITY_ORDER[min_severity.value]

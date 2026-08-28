@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from cosmo.events.emitter import EventEmitter
 from cosmo.events.envelope import EVENT_SCHEMA_VERSION, Event, EventType, Severity
+from cosmo.events.format import WATCH_STALE_EVENT_TYPE, event_detail
 from cosmo.events.helpers import emit_state_changed
 
 __all__ = [
@@ -13,4 +14,6 @@ __all__ = [
     "Severity",
     "EVENT_SCHEMA_VERSION",
     "emit_state_changed",
+    "event_detail",
+    "WATCH_STALE_EVENT_TYPE",
 ]

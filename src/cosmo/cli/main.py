@@ -11,7 +11,7 @@ import threading
 import time
 import uuid
 from dataclasses import Field
-from datetime import UTC, datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -35,9 +35,15 @@ from cosmo.bootstrap import (
     sync_harness_assets,
 )
 from cosmo.checks import CheckResult, CheckStatus
-from cosmo.config import DEFAULTS_PATH, CosmoConfig, load_config, user_config_path
+from cosmo.config import (
+    DEFAULTS_PATH,
+    CosmoConfig,
+    load_config,
+    user_config_path,
+    write_user_config_table,
+)
 from cosmo.doctor import core_checks
-from cosmo.events import Event, EventEmitter, EventType, Severity, emit_state_changed
+from cosmo.events import Event, EventEmitter, EventType, Severity, emit_state_changed, event_detail
 from cosmo.gate.runner import run_validation_gate
 from cosmo.gate.types import GateResult
 from cosmo.git.worktree import (
@@ -55,6 +61,7 @@ from cosmo.harness import (
     resolve_harness_name,
 )
 from cosmo.harness.base import HarnessCapabilities, HarnessResult
+from cosmo.notify.setup import TelegramApiError, discover_chat_id, send_test_message
 from cosmo.notify.telegram import TelegramSink
 from cosmo.notify.watch import run_watch_loop
 from cosmo.run.dag import DagCycleError, find_cycle, resolve_execution_order
@@ -139,41 +146,6 @@ _EMIT_LIFECYCLE_INFO_TYPES = frozenset(
 )
 
 
-def _validation_result_detail(event: Event) -> str:
-    """Found live: a passing `task.validation_result` (`severity=info`) was
-    filtered out entirely by `_print_emit`'s severity gate -- the VALIDATING
-    stage printed nothing at all while it ran a real Docker gate for tens of
-    seconds. A failing one (`severity=warning`) did clear the gate, but with
-    no `detail` case of its own it printed as a bare `>> task.validation_result`
-    with no pass/fail breakdown -- indistinguishable from "nothing happened"
-    at a glance. `error_summary`/`error_detail` deliberately live in
-    `task_failures` instead of this event's payload (spec 9.2), so this only
-    summarizes what the payload actually carries and points at `cosmo queue
-    failures` for the rest."""
-    payload = event.payload
-    parts = [f"passed={payload.get('passed')}"]
-    for stage_name in ("unit", "e2e"):
-        stage = payload.get(stage_name)
-        if not isinstance(stage, dict):
-            continue
-        label = "pass" if stage.get("passed") else "FAIL"
-        passed_n, failed_n, skipped_n = (
-            stage.get("passed_count"),
-            stage.get("failed_count"),
-            stage.get("skipped_count"),
-        )
-        counts = (
-            f" ({passed_n}p/{failed_n}f/{skipped_n}s)"
-            if passed_n is not None or failed_n is not None
-            else ""
-        )
-        parts.append(f"{stage_name}={label}{counts}")
-    detail = f" [{event.task_id}] " + ", ".join(parts)
-    if not payload.get("passed"):
-        detail += f" -- see `cosmo queue failures {event.task_id}` for detail"
-    return escape(detail)
-
-
 _EMIT_SEVERITY_STYLE = {"info": "cyan", "warning": "yellow", "error": "red", "critical": "bold red"}
 
 
@@ -186,22 +158,20 @@ def _print_emit(event: Event) -> None:
     human skimming a long scrollback can tell "the state actually changed"
     from "yet another Bash call" at a glance. Filtered to `WARNING`+ plus a
     small set of `INFO`-severity lifecycle events, the same severity-based
-    judgment `[notify].min_severity` already has to make."""
+    judgment `[notify].min_severity` already has to make.
+
+    The detail phrase itself comes from `events.format.event_detail`, shared
+    with the Telegram sink (`notify.telegram.format_event`) -- one place
+    that knows what a `task.validation_result` or `run.paused` payload
+    means, not two slowly-drifting copies."""
     if event.severity is Severity.INFO and event.event_type not in _EMIT_LIFECYCLE_INFO_TYPES:
         return
     style = _EMIT_SEVERITY_STYLE.get(event.severity.value, "white")
+    detail_text = event_detail(event)
     detail = ""
-    if event.event_type == EventType.RUN_PAUSED.value:
-        resume_delay = event.payload.get("resume_delay_seconds")
-        if isinstance(resume_delay, (int, float)):
-            eta = datetime.now(UTC) + timedelta(seconds=resume_delay)
-            detail = f" (resume at {eta.strftime('%Y-%m-%dT%H:%MZ')})"
-    elif event.event_type == EventType.TASK_STATE_CHANGED.value:
-        from_state = event.payload.get("from_state")
-        to_state = event.payload.get("to_state")
-        detail = escape(f" [{event.task_id}] {from_state} -> {to_state}")
-    elif event.event_type == EventType.TASK_VALIDATION_RESULT.value:
-        detail = _validation_result_detail(event)
+    if event.task_id or detail_text:
+        prefix = f"[{event.task_id}] " if event.task_id else ""
+        detail = " " + escape(f"{prefix}{detail_text}".strip())
     try:
         when = datetime.fromisoformat(event.timestamp).strftime("%H:%M:%SZ")
     except ValueError:
@@ -1994,6 +1964,97 @@ def _render_run_report(cfg: CosmoConfig, run_id: str) -> None:
 # ---------------------------------------------------------------------------
 # cosmo notify -- v5 improvements plan part 3.
 # ---------------------------------------------------------------------------
+
+
+@notify_app.command("config")
+def notify_config(config: ConfigOption = None) -> None:
+    """One-shot interactive setup for Telegram notifications: prompts for a
+    bot token, discovers the chat id automatically (Telegram bots can't
+    message first, so this walks you through sending the bot one message
+    if none is found), writes the `[notify]` table of your user config
+    file, and sends one real test message to confirm delivery before
+    declaring success -- the same "verify for real, don't just write a
+    file and hope" posture as `cosmo doctor`/`cosmo harness probe`.
+
+    `--config` doubles here as "where to write" (`path`, below), unlike
+    every other command's read-only use of it -- so a `--config` path that
+    doesn't exist yet is this command's normal first-run case, not the
+    typo `_load` otherwise loudly rejects it as."""
+    path = config if config is not None else user_config_path()
+    cfg = _load(config) if config is None or config.is_file() else load_config(None)
+    console.print(f"[dim]This will update {path}[/dim]\n")
+
+    console.print(
+        "1. In Telegram, message [bold]@BotFather[/bold] and create a bot with "
+        "/newbot if you haven't already.\n"
+        "2. Paste the bot token it gave you below."
+    )
+    bot_token = typer.prompt(
+        "Bot token", default=cfg.notify.telegram_bot_token or None, show_default=False
+    )
+
+    chat_id = cfg.notify.telegram_chat_id
+    if chat_id and not typer.confirm(f"\nReuse existing chat id {chat_id}?", default=True):
+        chat_id = None
+
+    if not chat_id:
+        console.print("\n[dim]looking for a chat id...[/dim]")
+        try:
+            chat_id = discover_chat_id(bot_token)
+            while chat_id is None:
+                typer.prompt(
+                    "No messages found yet -- open a chat with your bot in Telegram, "
+                    "send it any message, then press Enter here",
+                    default="",
+                    show_default=False,
+                )
+                chat_id = discover_chat_id(bot_token)
+        except TelegramApiError as exc:
+            err_console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(code=1) from None
+    console.print(f"[green]chat id: {chat_id}[/green]\n")
+
+    severity_raw = typer.prompt(
+        "Minimum severity to notify on (info/warning/error/critical)",
+        default=cfg.notify.min_severity.value,
+    )
+    try:
+        min_severity = Severity(severity_raw)
+    except ValueError:
+        err_console.print(f"[red]not a valid severity: {severity_raw}[/red]")
+        raise typer.Exit(code=1) from None
+
+    stale_after_seconds = typer.prompt(
+        "Alert if a run goes silent for this many seconds",
+        default=cfg.notify.stale_after_seconds,
+        type=int,
+    )
+
+    write_user_config_table(
+        path,
+        "notify",
+        {
+            "enabled": True,
+            "telegram_bot_token": bot_token,
+            "telegram_chat_id": chat_id,
+            "min_severity": min_severity.value,
+            "stale_after_seconds": stale_after_seconds,
+        },
+    )
+    console.print(f"[dim]wrote {path}[/dim]")
+
+    console.print("[dim]sending a real test message...[/dim]")
+    try:
+        send_test_message(bot_token, chat_id)
+    except TelegramApiError as exc:
+        err_console.print(f"[red]wrote config, but the test message failed:[/red] {exc}")
+        raise typer.Exit(code=1) from None
+
+    console.print("[green]test message sent -- check Telegram.[/green]")
+    console.print(
+        "[dim]Run `cosmo notify watch` (or enable deploy/cosmo-notify.service) to "
+        "actually start receiving alerts.[/dim]"
+    )
 
 
 @notify_app.command("watch")
