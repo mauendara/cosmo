@@ -16,6 +16,8 @@ from cosmo.config import load_config
 from cosmo.events import EventEmitter
 from cosmo.events.envelope import Event, EventType
 from cosmo.git.worktree import create_worktree
+from cosmo.harness.base import HarnessResult
+from cosmo.harness.fake import FakeHarnessAdapter
 from cosmo.store import StoreWriter, find_project_by_path
 from cosmo.store.enums import BlockedReason, FailureStage, FailureType, NextAction, Severity
 from cosmo.store.reader import get_task
@@ -62,6 +64,40 @@ def test_harness_list_shows_registered_adapters() -> None:
     result = runner.invoke(app, ["harness", "list"])
     assert result.exit_code == 0
     assert "claude" in result.stdout
+
+
+def test_harness_probe_wires_live_activity_output_to_the_probe_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression, same gap as `spec add`'s own: `harness probe` used to
+    call `adapter.probe(prompt)` bare, with no visibility into what the
+    harness was doing while it ran."""
+    captured: dict[str, object] = {}
+
+    def _probe(
+        self: FakeHarnessAdapter, prompt: str, *, on_activity: object = None
+    ) -> HarnessResult:
+        captured["on_activity"] = on_activity
+        assert callable(on_activity)
+        on_activity("probing...")
+        return HarnessResult(
+            success=True,
+            output_summary="ok",
+            raw_log_path=None,
+            files_changed=[],
+            duration_seconds=0.1,
+            total_cost_usd=None,
+            exit_code=0,
+            session_id=None,
+        )
+
+    monkeypatch.setattr(FakeHarnessAdapter, "probe", _probe)
+
+    result = runner.invoke(app, ["harness", "probe", "--prompt", "hello", "--harness", "fake"])
+
+    assert result.exit_code == 0, result.stdout
+    assert captured["on_activity"] is cli_main._print_activity
+    assert "probing..." in result.stdout
 
 
 def test_doctor_reports_core_and_harness_sections_separately() -> None:

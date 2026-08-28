@@ -344,7 +344,7 @@ def harness_probe(
 
     def _run() -> None:
         try:
-            result_box.append(adapter.probe(prompt))
+            result_box.append(adapter.probe(prompt, on_activity=_print_activity))
         except BaseException as exc:  # noqa: BLE001 -- surfaced on the main thread below
             error_box.append(exc)
 
@@ -1322,7 +1322,7 @@ def spec_add(
 
     def _run() -> None:
         try:
-            result_box.append(adapter.probe(prompt))
+            result_box.append(adapter.probe(prompt, on_activity=_print_activity))
         except BaseException as exc:  # noqa: BLE001 -- surfaced on the main thread below
             error_box.append(exc)
 

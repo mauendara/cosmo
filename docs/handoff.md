@@ -63,6 +63,15 @@ project template equally (`docs/specs/` is deliberately not part of any
 template's own `docs/` — it's spec-batch content, not stack boilerplate),
 not specific to the template the user happened to be testing.
 
+**A second real fix this session (deviation 73)**: `cosmo spec add`
+printed `harness: ...` then went completely silent until it finished, timed
+out, or failed — no visibility into what the harness was actually doing.
+`HarnessAdapter.probe`'s own `on_activity` hook already exists for exactly
+this (the same mechanism `cosmo run`'s live terminal already uses
+elsewhere), `spec_add` just never passed it. `cosmo harness probe` had the
+identical gap (same copy-pasted probe+timeout pattern) — fixed both, now
+both pass `on_activity=cli.main._print_activity`.
+
 **v6 ([v6-project-template-aware-stuff-plan.md](v6-project-template-aware-stuff-plan.md))
 was explicitly asked about this session and deliberately not started** —
 its own Status line already says it needs a real second stack (a
@@ -391,7 +400,7 @@ session, more than once.
 ## When you finish (whatever "finish" means for the next session)
 
 1. `./check.sh` green (if any code changed at all).
-2. Record any new deviation in the cumulative table (next number is **73**).
+2. Record any new deviation in the cumulative table (next number is **74**).
 3. If Phase 10's own acceptance run against `todo-frontend-app` is still
    fully `done` and nothing regressed it, there is no more Phase 10
    backlog left to reconcile — a fresh spec batch queued against it is new

@@ -12,8 +12,11 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from cosmo.cli import main as cli_main
 from cosmo.cli.main import app
 from cosmo.config import load_config
+from cosmo.harness.base import HarnessResult
+from cosmo.harness.fake import FakeHarnessAdapter
 from cosmo.store import StoreWriter
 from cosmo.store.reader import list_tasks
 
@@ -136,6 +139,50 @@ def test_spec_add_copies_in_a_raw_spec_via_from_and_reports_when_the_harness_wri
     assert result.exit_code == 1
     assert (repo / "docs" / "specs" / "demo-spec.md").is_file()
     assert "no *-task.md files were written" in result.stderr
+
+
+def test_spec_add_wires_live_activity_output_to_the_probe_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: `spec add` used to call `adapter.probe(prompt)` bare --
+    no visibility at all into what the harness was doing while it ran, even
+    though `probe`'s own `on_activity` hook is exactly the mechanism `cosmo
+    run`'s live terminal already uses elsewhere. Confirms both that `cli.
+    main._print_activity` (the same sink, not a stand-in) is actually
+    passed, and that it renders to the terminal when called."""
+    repo = tmp_path / "target"
+    repo.mkdir()
+    _register(repo)
+    raw = tmp_path / "raw.md"
+    raw.write_text("# Demo\nAdd a health check endpoint.\n", encoding="utf-8")
+    captured: dict[str, object] = {}
+
+    def _probe(
+        self: FakeHarnessAdapter, prompt: str, *, on_activity: object = None
+    ) -> HarnessResult:
+        captured["on_activity"] = on_activity
+        assert callable(on_activity)
+        on_activity("enriching...")
+        return HarnessResult(
+            success=True,
+            output_summary="ok",
+            raw_log_path=None,
+            files_changed=[],
+            duration_seconds=0.1,
+            total_cost_usd=None,
+            exit_code=0,
+            session_id=None,
+        )
+
+    monkeypatch.setattr(FakeHarnessAdapter, "probe", _probe)
+
+    result = runner.invoke(
+        app,
+        ["spec", "add", "demo", "--repo", str(repo), "--from", str(raw), "--harness", "fake"],
+    )
+
+    assert captured["on_activity"] is cli_main._print_activity
+    assert "enriching..." in result.stdout
 
 
 def test_spec_add_with_existing_task_files_and_declined_confirmation_skips_the_harness(
