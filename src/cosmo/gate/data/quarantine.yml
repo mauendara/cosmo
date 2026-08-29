@@ -1,0 +1,20 @@
+# Spec 6.4: known-flaky tests, excluded from failing the gate and from the
+# task retry budget. Every entry requires an owner and an expiry -- an
+# unowned, unexpiring quarantine list is how a suite quietly stops testing
+# anything. `cosmo.gate.quarantine.load_quarantine()` fails validation of
+# this file itself if any entry is missing a field or has already expired;
+# an expired entry is not silently ignored, because a stale quarantine
+# silently protecting a test is exactly the failure mode this guards
+# against.
+#
+# expiry is an ISO 8601 date (YYYY-MM-DD). test_id is matched exactly
+# against the test identifier the gate reports (JUnit: ClassName#method;
+# Playwright: the test's full title).
+#
+# entries:
+#   - test_id: "com.example.FooTest#flakyUnderLoad"
+#     owner: "someone@example.com"
+#     expiry: "2026-12-31"
+#     reason: "Times out under CI contention, tracked in JIRA-1234"
+
+entries: []

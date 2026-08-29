@@ -1,0 +1,9 @@
+# Spec 6.4 step 4: a test classified `flaky` three times (configurable via
+# gate.flaky_quarantine_candidate_threshold) across distinct runs is
+# appended here automatically for human review. Cosmo never promotes an
+# entry from here into quarantine.yml itself -- that would be the same
+# self-weakening failure mode spec 6.1 warns about, just performed by Cosmo
+# instead of the agent. A human reviews and, if warranted, moves the entry
+# into quarantine.yml with an owner and expiry, then deletes it from here.
+
+candidates: []

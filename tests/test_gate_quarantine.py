@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import datetime
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -12,6 +14,8 @@ from cosmo.gate.quarantine import (
     append_quarantine_candidate,
     is_quarantined,
     load_quarantine,
+    quarantine_candidates_path,
+    quarantine_file_path,
 )
 
 
@@ -92,3 +96,33 @@ def test_append_quarantine_candidate_creates_and_updates(tmp_path: Path) -> None
     text2 = path.read_text()
     assert text2.count("FooTest#flaky") == 1
     assert "run-3" in text2
+
+
+def test_bundled_quarantine_files_load_from_their_real_path() -> None:
+    """The default (`configured=None`) path points at `gate/data/*.yml`
+    shipped inside the installed package -- not a test fixture. Regression
+    for the case where these loaded fine in every test (which always run
+    against the source tree) while being silently absent from the actual
+    built/installed package."""
+    load_quarantine(quarantine_file_path(None))
+    assert quarantine_candidates_path(None).read_text() is not None
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git not available")
+def test_bundled_quarantine_files_are_not_gitignored() -> None:
+    """`gate/data/*.yml` must ship in the built wheel, which means it must be
+    git-tracked -- hatchling's default wheel build excludes gitignored files.
+    A blanket `data/` rule in `.gitignore` (meant for the repo-root runtime
+    state dir) once matched this directory too, silently dropping both files
+    from every installed `cosmo` and crashing the e2e gate's quarantine load
+    at run time despite a fully green test suite."""
+    repo_root = Path(__file__).resolve().parents[1]
+    for bundled in (quarantine_file_path(None), quarantine_candidates_path(None)):
+        result = subprocess.run(
+            ["git", "check-ignore", "-q", str(bundled)],
+            cwd=repo_root,
+            check=False,
+        )
+        assert result.returncode == 1, (
+            f"{bundled} is git-ignored and would be dropped from the wheel"
+        )
