@@ -1,4 +1,4 @@
-# Handoff — AI co-author trailers stripped from the entire commit history (all 3 branches); no source code changed this session
+# Handoff — Open-source release prep: Apache-2.0 license added, AGENTS.md written, gitignore hardened; no source code changed this session
 
 You are picking up Cosmo mid-build. **Phases 0-9, the v4 workflow-changes
 feature, the v5 improvements plan, Phase 10's own acceptance-run, v7 items
@@ -6,7 +6,108 @@ feature, the v5 improvements plan, Phase 10's own acceptance-run, v7 items
 repos are fully `done`** — see the prior-session sections below for that
 detail, unchanged.
 
-**This session's own work was a one-off repo-hygiene task, not a build
+**This session's own work was a one-off open-source-release-readiness
+task, not a build session**, driven start-to-finish by a user-authored
+prompt at `docs/ignored/prompts/prepare-repo-for-os.md` (not by any of the
+`vN` plans). Same two-phase shape as the prior AI-attribution cleanup
+session (see below): a read-only Phase 1 audit producing a report with
+explicit decision points, then Phase 2 remediation only after the user
+answered each one.
+
+**Phase 1 (read-only audit)**, covering secrets, personal data, AI
+attribution, licensing, governance docs, and repo hygiene:
+
+- **Secrets**: `gitleaks detect --source . --log-opts="--all"` (v8.30.1)
+  scanned all 57 commits across every ref. **2 hits, both confirmed false
+  positives** — the fake AWS-key-shaped literal `AKIAABCDEFGHIJKLMNOP` in
+  `tests/test_git_secrets.py:89` and `tests/test_gate_fixture_e2e.py:185`,
+  deliberately planted there to test the gitleaks pre-commit hook and the
+  Docker gate's own secrets backstop, not real credentials. A manual
+  fallback grep across full history for
+  `api[_-]?key|secret|password\s*=|BEGIN PRIVATE KEY` found only the
+  **`ANTHROPIC_API_KEY` environment variable name**, referenced throughout
+  the billing-safety logic — never a real value. No `.env*`/`*.pem`/
+  `id_rsa*` in the tree or ever added to history.
+- **AI attribution**: re-ran the same trailer/footer scan from the prior
+  session (see below) — **zero remaining matches**, confirming that
+  cleanup held.
+- **Personal data**: git commit authorship (all 57 commits, every branch)
+  is the real name/email (`Mauricio Endara <mauendara@gmail.com>`) — **the
+  user explicitly confirmed this is fine to publish as-is**, including
+  `SECURITY.md`'s disclosure section pointing a reporter at "the address
+  in the git history." Seven lines across three internal-only docs
+  (`docs/handoff.md`, `docs/v3-implementation-state.md`,
+  `docs/v10-user-docs-discrepancies.md`) contain real `/home/dev/...`
+  paths from this host — flagged to the user with every line shown, and
+  **left as-is on their explicit call**, since the username itself
+  (`dev`) is generic, not personally identifying. No real IPs, hostnames,
+  or droplet identifiers found anywhere (every "droplet" reference is
+  generic deployment-target language, not a real address). No leaked
+  target-repo content in `templates/projects/*`.
+- **Licensing**: no `LICENSE` file existed. Dependencies (`pyproject.toml`
+  runtime + dev groups, plus the `webapp` branch's own
+  `src/webapp/frontend/package.json`) are all permissive-licensed by
+  direct inspection (MIT/Apache-2.0/BSD family, no GPL/AGPL) — **not**
+  verified with an automated license-audit tool, flagged as such to the
+  user.
+- **Governance docs**: `README.md`/`CONTRIBUTING.md`/`SECURITY.md` already
+  existed and were adequate (written two sessions ago). `LICENSE`,
+  `AGENTS.md`, and `AI_DISCLOSURE.md` were all missing.
+- **Repo hygiene**: no committed large binaries or build artifacts in
+  history. **No symlink is git-tracked anywhere** in this repo (`git
+  ls-files -s | grep 120000` → empty) — the `.agent/<harness>/` symlink
+  design lives in code that creates symlinks in *target* repos at
+  runtime, not in this repo's own tree, so there was nothing to check
+  there. `tests/fixtures/gate_repo/frontend/node_modules/` exists on disk
+  but was never git-tracked. `.gitignore` had no explicit entry for
+  `node_modules/`, `.env`/`.env.*`, `.vscode/`/`.idea/`, or `.DS_Store` —
+  a forward-hygiene gap, not an active leak (nothing of these was
+  actually tracked).
+
+**User decisions, gathered before Phase 2 started**: license = **Apache
+License 2.0**; SPDX per-file headers = **skip, `LICENSE` file only**;
+`AGENTS.md` = **pointer pattern to `CONTRIBUTING.md`'s existing "Commits
+and AI attribution" section** (mirrors the repo's own root `CLAUDE.md`,
+not a standalone restatement); `AI_DISCLOSURE.md` = **skip** (a pointer to
+the same section would just be a third copy); the seven `/home/dev` paths
+= **leave as-is**; git commit authorship = **leave as-is**.
+
+**Phase 2 (remediation), done, exactly matching the decisions above**:
+
+- `LICENSE` added — the full, unmodified Apache License 2.0 text, with the
+  standard appendix boilerplate filled in (`Copyright 2026 Mauricio
+  Endara`).
+- The three existing "license to be added"/"no license file yet"
+  placeholders — `README.md`'s License section, `CONTRIBUTING.md`'s
+  License section, `SECURITY.md`'s disclosure-section closing paragraph —
+  now all reference the real `LICENSE` file.
+- `pyproject.toml`'s `[project]` table gained `license = "Apache-2.0"`
+  (PEP 639 SPDX-expression string); no explicit `license-files` needed,
+  since hatchling's default include glob already picks up `LICENSE`.
+- `AGENTS.md` added (new) — the same pointer pattern as root `CLAUDE.md`,
+  naming `CONTRIBUTING.md`'s "Commits and AI attribution" section as the
+  one canonical copy of the policy.
+- `.gitignore` gained `node_modules/`, `.env`/`.env.*`, `.vscode/`,
+  `.idea/`, `.DS_Store`.
+- **No history rewrite** — Phase 1 found nothing that needed one (no
+  secrets, no attribution trailers, and the one personal-data class found
+  was explicitly waved through by the user).
+- **Publishing (push, or making the repo visible) was explicitly out of
+  scope this session too** — no remote is configured, none was added, and
+  nothing was attempted toward it. Same posture as the prior session: a
+  separate, explicit confirmation of its own, whenever that's wanted.
+
+This session's changes land in one commit on top of the AI-attribution
+rewrite: `.gitignore`, `AGENTS.md` (new), `LICENSE` (new), `README.md`,
+`CONTRIBUTING.md`, `SECURITY.md`, `pyproject.toml`, and this file.
+
+## What happened in the prior session (AI co-author trailers stripped from the entire commit history, all 3 branches)
+
+Kept as-is below for its own detail — the summary above already covers
+*this* session's own work (the open-source release-readiness audit and
+remediation).
+
+**That session's own work was a one-off repo-hygiene task, not a build
 session**, driven start-to-finish by a user-authored prompt at
 `docs/ignored/prompts/remove-ai-attribution.md` (not by any of the `vN`
 plans). Two-phase task, executed exactly as scoped, with an explicit
@@ -58,17 +159,17 @@ expire`+`gc --prune=now`) then pruned the original objects entirely
 nothing). No actual content was lost — the callback only ever touched
 commit messages, trees/blobs are identical, and `.git/filter-repo/
 commit-map` still records every old-hash→new-hash pairing — but the
-`backup-*` branches themselves are **not real backups**: they currently
-point at the exact same commits as `develop`/`master`/`webapp`, so don't
-mistake their existence for a rollback path. **The user has their own
-directory-level copy of the whole project from before this session**,
-which is the actual backup of record; the mis-executed branches were left
-in place (not deleted) rather than have this session take another
-destructive action without being asked — worth deleting them (`git branch
--D backup-before-ai-attribution-cleanup backup-master-before-ai-
-attribution-cleanup backup-webapp-before-ai-attribution-cleanup`) once
-confirmed no longer needed, since as they stand they're just confusing
-aliases.
+`backup-*` branches themselves were never real backups: they pointed at
+the exact same commits as `develop`/`master`/`webapp`. **Resolved later the
+same session**: a fresh directory-level copy of the whole project was made
+at `/home/dev/delta/cosmo-backup-2026-08-28_2319` (`cp -a`, same convention
+as the pre-session backup at `/home/dev/delta/cosmo-backup-2026-08-28_2223`
+— a full copy including `.git`, verified with a clean `git status` and a
+`diff -rq` against the source showing zero differences) *before* the three
+misleading `backup-*` branches were deleted from this repo — so a real
+backup now exists, at the directory level, not as branches inside the same
+repo that a future `git filter-repo` (or similar) run could just as easily
+rewrite again.
 
 **Phase 2C (push) was explicitly declined by the user this session — not
 done, not attempted.** No remote is configured. If a remote gets added and

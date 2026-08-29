@@ -243,6 +243,6 @@ program.
 Please give a reasonable window before public disclosure, and let us know if
 you intend to disclose so a fix can land first.
 
-No specific disclosure terms are stated here because this repository has no
-license file yet; one will be added, and this section will be updated
-alongside it.
+This project is licensed under the Apache License 2.0 — see
+[LICENSE](LICENSE). No additional disclosure terms beyond what's stated
+above apply.

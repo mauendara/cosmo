@@ -121,7 +121,7 @@ starting point, not the ceiling. Writing another one is a single class:
 
 ## License
 
-To be added.
+Apache License 2.0 — see [LICENSE](LICENSE).
 
 ## The name
 

@@ -2,6 +2,7 @@
 name = "cosmo"
 version = "0.1.0"
 description = "Autonomous spec-driven software development agent"
+license = "Apache-2.0"
 requires-python = ">=3.12"
 dependencies = [
     "typer>=0.15",

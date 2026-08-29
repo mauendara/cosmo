@@ -191,6 +191,5 @@ For a security issue, do **not** open a public issue — see
 
 ## License
 
-No license file exists in this repository yet; one will be added. Until then,
-be aware that the terms under which contributions are accepted aren't yet
-stated.
+Apache License 2.0 — see [LICENSE](LICENSE). By contributing, you agree that
+your contributions are licensed under the same terms.
