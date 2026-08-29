@@ -48,6 +48,8 @@ stopped (queue_empty)
 completed=3 blocked=0 requeued=0 retried=1
 ```
 
+![Cosmo running a task queue overnight](assets/cosmo-demo.gif)
+
 ## Why this exists
 
 Four things break in a naive "leave the agent running overnight" setup, and

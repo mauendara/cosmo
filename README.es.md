@@ -51,6 +51,8 @@ stopped (queue_empty)
 completed=3 blocked=0 requeued=0 retried=1
 ```
 
+![Cosmo ejecutando una cola de tareas durante la noche](assets/cosmo-demo.gif)
+
 ## Por qué existe esto
 
 Cuatro cosas fallan en una configuración ingenua de "dejar el agente trabajando toda
