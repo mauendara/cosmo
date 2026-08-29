@@ -3,9 +3,7 @@ data/
 work/
 logs/
 
-docs/test-specs/
-docs/prompts/
-docs/old-agents-skills/
+docs/ignored/
 
 # Python
 .venv/
