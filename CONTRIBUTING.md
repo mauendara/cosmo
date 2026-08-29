@@ -127,10 +127,42 @@ The distinction is simple: attribution is about accountability, disclosure is
 about transparency. Substantial parts of this project were AI-assisted and
 say so; none of it is signed by a model.
 
+## Branching model
+
+- **`develop`** — the integration branch. Every PR targets it, including the
+  maintainer's own changes: there is no direct-push path onto `develop`,
+  maintainer or not.
+- **`master`** — reflects the latest release. Updated only by the maintainer,
+  via a curated merge from `develop`, at release time — never a direct push.
+- **`private`** — the maintainer's own day-to-day work. It is not pushed to
+  this public repository and is never used directly as a PR source branch.
+  `.githooks/pre-push` (active via `core.hooksPath`) refuses any push of a
+  branch named `private` to the public origin, as a backstop against an
+  accidental push — not a substitute for the workflow below.
+
+### Moving work from `private` into a PR
+
+`private` never becomes a PR source branch directly — GitHub can't open a PR
+from a branch it can't see, and pushing it wholesale would expose unrelated
+in-progress work. Instead:
+
+1. Branch off updated `develop`, not off `private`:
+   `git checkout develop && git pull origin develop && git checkout -b feature/<name>`.
+2. Bring over only the relevant commits via `git cherry-pick <hashes>` (or a
+   scoped rebase if the sequence is clean) — never the whole branch.
+3. Clean up history on the new branch if needed (squash, clear messages) —
+   this is the curation window before anything becomes public.
+4. Push the new branch (never named `private`) to `origin` and open the PR
+   against `develop`.
+5. After merge, delete the temporary branch from the public origin. `private`
+   keeps living only on its own private remote, optionally rebased onto the
+   updated `develop`.
+
 ## Pull requests
 
-- **Branch from `develop`.** That's the integration branch. `main`/`master`
-  is promoted by hand.
+- **Branch from `develop`.** That's the integration branch every PR targets,
+  including the maintainer's own — see "Branching model" above. `master` is
+  promoted by hand, at release time only.
 - **One concern per PR.** A boundary change and a feature in the same diff is
   two reviews wearing one hat.
 - **`./check.sh` passes.** All of it.

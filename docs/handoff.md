@@ -1,4 +1,4 @@
-# Handoff — Open-source release prep: Apache-2.0 license added, AGENTS.md written, gitignore hardened; no source code changed this session
+# Handoff — Branch topology, release workflow, and a push-safety hook added; no source code changed this session
 
 You are picking up Cosmo mid-build. **Phases 0-9, the v4 workflow-changes
 feature, the v5 improvements plan, Phase 10's own acceptance-run, v7 items
@@ -6,7 +6,74 @@ feature, the v5 improvements plan, Phase 10's own acceptance-run, v7 items
 repos are fully `done`** — see the prior-session sections below for that
 detail, unchanged.
 
-**This session's own work was a one-off open-source-release-readiness
+**This session's own work was another one-off repo-hygiene task, not a
+build session**, driven start-to-finish by a user-authored prompt at
+`docs/ignored/prompts/public-branches-and-licensing-fixes.md` (not by any
+of the `vN` plans). Same two-phase shape as the two prior one-off sessions
+below (open-source-release-readiness, AI-attribution cleanup): a read-only
+Phase 1 verification producing a report, then Phase 2 execution only after
+the user explicitly confirmed the plan — including the maintainer-PR
+branching policy described in the prompt itself.
+
+**Phase 1 (read-only verification)**:
+
+- **Remotes/branches**: `git remote -v` was completely empty — no remote
+  configured at all, public or private. Local branches: `develop` (current,
+  HEAD), `master`, `webapp`, none with a remote-tracking counterpart. No
+  `private` branch existed yet (expected — the maintainer creates it
+  themselves later, per the prompt's own scope).
+- **Licensing**: `LICENSE` already existed in full from the prior session
+  (unmodified Apache License 2.0 text, `Copyright 2026 Mauricio Endara` in
+  the appendix), and `README.md`/`CONTRIBUTING.md` already pointed at it —
+  so this task's own license-related scope item was already fully
+  satisfied before Phase 2 started; nothing new to add there.
+- **Hooks**: no `core.hooksPath` set, no `.githooks/` directory, and
+  `.git/hooks/` held only the stock `.sample` files — a clean slate, no
+  existing push guard to account for or conflict with.
+
+**Phase 2 (execution), done exactly per the confirmed plan**:
+
+- `.githooks/pre-push` added (new, executable) — refuses a push of a branch
+  literally named `private` whenever the push target's git-*resolved* URL
+  (the `$2` argument git's pre-push hook protocol already supplies, not a
+  remote name) matches whatever `origin` currently resolves to. Written
+  defensively since none of `origin`/`private-origin`/`private` exist on
+  this host yet: if `origin` isn't configured, or the branch being pushed
+  isn't `private`, it's a silent no-op rather than an error. Verified by
+  hand (not just read) against 6 scenarios run directly against a scratch
+  repo: blocks when the push target matches `origin`'s URL, still blocks
+  when pushed through a *renamed* remote that happens to resolve to the
+  same URL, allows every other branch, allows `private` pushed to a
+  differently-named/resolved remote, allows everything when `origin` isn't
+  configured at all, and normalizes trailing `/`/`.git` differences before
+  comparing.
+- `core.hooksPath` set to `.githooks` — **local to this repo's own git
+  config only** (`git config --get core.hooksPath` → `.githooks`); this is
+  an inherent property of `core.hooksPath` (it never propagates to other
+  clones automatically), not something this session attempted to solve.
+- `CONTRIBUTING.md` gained a new "Branching model" section (the
+  `develop`/`master`/`private` roles, in plain terms) and a "Moving work
+  from `private` into a PR" subsection documenting the 5-step
+  branch-off-`develop`-then-cherry-pick workflow from the prompt's own §F.
+  The pre-existing "Branch from `develop`" bullet under "Pull requests" now
+  points at the new section instead of duplicating it.
+- **Explicitly deferred to the maintainer, per the prompt's own scope**: no
+  `git remote add` for either `origin` or `private-origin`, no `private`
+  branch created, and GitHub/`gh` settings (default branch, branch
+  protection, required status checks — there's no CI workflow in this repo
+  yet either) were not touched, checked, or turned into a checklist.
+
+This session's changes land in one commit: `.githooks/pre-push` (new),
+`CONTRIBUTING.md`, and this file. No `LICENSE`/`README` change (already
+done in the prior session), no source code touched.
+
+## What happened in the prior session (Open-source release prep: Apache-2.0 license, AGENTS.md, gitignore hardening)
+
+Kept as-is below for its own detail — the summary above already covers
+*this* session's own work (the branch-topology, release-workflow, and
+push-safety-hook setup).
+
+**That session's own work was a one-off open-source-release-readiness
 task, not a build session**, driven start-to-finish by a user-authored
 prompt at `docs/ignored/prompts/prepare-repo-for-os.md` (not by any of the
 `vN` plans). Same two-phase shape as the prior AI-attribution cleanup
@@ -643,38 +710,32 @@ fully consumed.
 
 ```
 /home/dev/delta/cosmo/          # working branch: develop
-├── README.md                   # REWRITTEN in place -- problem-first opening (what breaks in a
-│                                  naive overnight-agent setup), a real terminal transcript,
-│                                  4 differentiator bullets, doc index, naming note last
-├── FAQ.md                      # new -- real questions, including the ones the code answers
-│                                  differently from what a reader would assume
-├── TROUBLESHOOTING.md          # new -- organized by symptom, from the failure classification
-│                                  and quota logic, translated out of the internal enum names
-├── CONTRIBUTING.md             # new -- setup, ./check.sh, the four test-enforced boundaries,
-│                                  and the AI-attribution rule (disclose in prose, never as a
-│                                  Co-Authored-By/Assisted-by trailer naming a model)
-├── SECURITY.md                 # new -- a real threat model, including an explicit
-│                                  "what Cosmo does NOT defend against" section
-├── user-docs/                  # new tree, 12 files, plain markdown (no MkDocs/Docusaurus
-│   ├── tutorial.md                 until there's real adoption to justify it)
-│   ├── how-to/                 # setup-vps, setup-wsl2, configure-quotas,
-│   │                               add-project-template, write-a-new-adapter
-│   ├── reference/              # cli, config-schema, event-schema -- exhaustive and dry,
-│   │                               every command/flag/key/event payload
-│   └── concepts/               # architecture-overview, validation-gate-and-guardrails
-│                                   (the differentiator doc), quota-and-safety-model
+├── .githooks/
+│   └── pre-push                 # NEW this session -- refuses to push `private` to the
+│                                   resolved public-origin URL; active via core.hooksPath
+├── LICENSE                      # Apache-2.0, added two sessions ago -- untouched this session
+├── AGENTS.md                    # pointer to CONTRIBUTING.md's AI-attribution section, added
+│                                   two sessions ago -- untouched this session
+├── README.md                    # untouched this session (license line added two sessions ago)
+├── FAQ.md, TROUBLESHOOTING.md, SECURITY.md   # untouched this session
+├── CONTRIBUTING.md              # gained "Branching model" + "Moving work from `private`
+│                                   into a PR" sections this session
+├── user-docs/                   # 12 files, plain markdown -- untouched this session
 ├── docs/
-│   ├── handoff.md                  # this file, rewritten for this session
-│   └── v10-user-docs-discrepancies.md   # NEW -- the six brief-vs-code mismatches
-├── deploy/, templates/         # unchanged this session
-├── src/cosmo/                  # ENTIRELY unchanged this session -- read for ground truth,
-│                                  never edited
-├── tests/                      # unchanged, 555 passing / 9 skipped as of the prior session
-└── check.sh                    # NOT re-run -- no code was touched
+│   ├── handoff.md                   # this file, rewritten for this session
+│   └── ignored/prompts/public-branches-and-licensing-fixes.md   # the prompt driving
+│                                       this session, kept for the record like its predecessors
+├── deploy/, templates/          # unchanged this session
+├── src/cosmo/                   # ENTIRELY unchanged this session -- read for ground truth,
+│                                   never edited
+├── tests/                       # unchanged this session
+└── check.sh                     # NOT re-run -- no code was touched
 ```
 
 **No dependency, config, or schema change this session.** `pyproject.toml`
-and `uv.lock` are untouched.
+and `uv.lock` are untouched. No git remote configured (`git remote -v` is
+still empty) — adding `origin`/`private-origin` and creating `private` are
+explicitly the maintainer's own next steps, not done this session.
 
 ## Get oriented (2 minutes)
 
