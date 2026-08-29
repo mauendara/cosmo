@@ -1,11 +1,11 @@
-# Handoff — v0.1.0, repo audited and ready for its first public push
+# Handoff — v0.1.1, three real bugs from v0.1.0's first real usage
 
 This document was compressed for v0.1.0 forward: ~10 sessions' worth of
 session-by-session narrative (what changed, what was found, how it was
 fixed) has been cut. That history isn't lost — it's in `git log` (every
 commit message explains its own *why*) and in
 [v3-implementation-state.md](v3-implementation-state.md)'s cumulative
-deviations table (the complete bug/fix log, entries 1-79). This file now
+deviations table (the complete bug/fix log, entries 1-82). This file now
 only carries what a session needs to *orient itself* before doing new work,
 not a record of how we got here.
 
@@ -18,8 +18,20 @@ not a record of how we got here.
   — see its own plan doc; it needs a second real stack to prove the
   abstraction, and the user is doing that testing separately before it gets
   picked up again.
-- **506 tests passing, `./check.sh` green** as of the last code change.
-  Every fix in the deviations table has a regression test.
+- **562 tests passing, 9 skipped, `./check.sh` green** as of the last code
+  change. Every fix in the deviations table has a regression test.
+- **v0.1.1 is a patch release**: v0.1.0 got its first real usage (a real
+  `cosmo run` against a real target repo, not this repo's own test suite)
+  and surfaced three real bugs, all fixed and covered by a regression test
+  — deviations 80-82 in `v3-implementation-state.md`: `.gitignore`'s
+  blanket `data/` rule silently dropping `gate/data/*.yml` from every built
+  wheel, `notify.watch` forwarding `task.heartbeat` spam to Telegram at
+  `min_severity="info"`, and `docs/specs/` content that `spec add`/`spec
+  queue` write into `repo_path` never getting committed, which blocked
+  every later merge. A real installed-tool bug (a non-editable `uv tool
+  install` breaking `templates_root()`) was also root-caused and fixed —
+  see the environment-gotchas section below, not a numbered deviation since
+  no code changed. `assets/cosmo-demo.gif` was also added to both READMEs.
 - **Public docs shipped**: `README.md`, `user-docs/` (EN+ES, Diátaxis
   layout), `FAQ.md`, `TROUBLESHOOTING.md`, `CONTRIBUTING.md`, `SECURITY.md`.
   Everything in them is grounded in the code (real CLI `--help` output,
@@ -36,17 +48,26 @@ not a record of how we got here.
 - **AI-attribution trailers were stripped from the entire git history** via
   `git filter-repo` — every commit hash from before 2026-08-28 changed as a
   result. Don't expect old hashes quoted anywhere to `git show`.
-- **Branch topology**: `develop` (this branch) is the working/release
-  branch. `master` is a stale 1-commit skeleton, far behind — not part of
-  any push. `webapp` (a separate in-progress monitoring-UI feature) is
+- **Branch topology**: `private` (this branch, as of this session) is the
+  maintainer's day-to-day branch — CONTRIBUTING.md's branching model routes
+  `private` → `develop` → the public remote, never `private` straight to
+  public. `develop` is the PR-integration/release branch; `private` is
+  currently 6 commits ahead of it (this session's v0.1.1 patch work, not
+  yet merged). `master` is a stale 1-commit skeleton, far behind — not part
+  of any push. `webapp` (a separate in-progress monitoring-UI feature) is
   missing `LICENSE` and not release-ready — don't push it without doing
   that work first. `.githooks/pre-push` (active via `core.hooksPath`)
   refuses to push a branch literally named `private` to whatever `origin`
   resolves to; it does **not** guard against pushing `master`/`webapp` by
   habit, so name the branch explicitly when pushing.
-- **v0.1.0 is about to become the first public push**, `develop` only. No
-  remote is configured yet; no `gh` CLI on this host. The maintainer is
-  doing the actual push themselves.
+- **Remotes**: `private-origin` (`git@github.com:deltam-dev/private-cosmo.git`)
+  is configured and is where `private` gets pushed for backup — it's also 6
+  commits behind local `private` right now (this session's work hasn't been
+  pushed there yet). No public `origin` remote is configured yet; no `gh`
+  CLI on this host. **v0.1.0 was never actually pushed publicly** — v0.1.1
+  (this patch) is what will actually make the first public push once
+  `private` merges into `develop` and the maintainer sets up the public
+  remote themselves.
 
 ## Read these first, in this order
 
@@ -54,7 +75,7 @@ not a record of how we got here.
 |---|---|---|
 | [v3-cosmo-autonomous-agent-spec.md](v3-cosmo-autonomous-agent-spec.md) | The authoritative specification | **Source of truth** for the original 0-10 plan. v1/v2 are superseded — read only for history |
 | [v3-implementation-plan.md](v3-implementation-plan.md) | 11-phase build plan | The map for what's built. **Do not edit** — record decisions in `v3-implementation-state.md` instead |
-| [v3-implementation-state.md](v3-implementation-state.md) | What actually exists, plus the cumulative deviations table (1-79) and implementation-time decisions | Read the most recent deviation entries before doing anything non-trivial |
+| [v3-implementation-state.md](v3-implementation-state.md) | What actually exists, plus the cumulative deviations table (1-82) and implementation-time decisions | Read the most recent deviation entries before doing anything non-trivial |
 | [v4-changes-to-workflow-plan.md](v4-changes-to-workflow-plan.md) | The raw-spec-workflow feature design | Implemented — see its own Status line |
 | [v5-improvements-plan.md](v5-improvements-plan.md) | Crash/pause resume, Telegram notifications, `--follow`, live-terminal observability, quota-bypass, harness failure-pattern research | Implemented — see its own Status line |
 | [v6-project-template-aware-stuff-plan.md](v6-project-template-aware-stuff-plan.md) | Making the gate/failure-classifier project-template-aware, for stacks beyond Java+Spring/Vite+React | **Not started — design record only.** Needs a real second stack before it's buildable; don't start opportunistically |
@@ -149,9 +170,10 @@ superseded/consumed.
 
 1. `./check.sh` green (if any code changed at all).
 2. Record any new deviation in `v3-implementation-state.md`'s cumulative
-   table (next number is **80**).
-3. Commit to `develop` with a message explaining *why*, in the style of the
-   existing commit history.
+   table (next number is **83**).
+3. Commit to the current branch (`private`, per CONTRIBUTING.md's branching
+   model — day-to-day work never targets `develop` directly) with a message
+   explaining *why*, in the style of the existing commit history.
 4. Keep [v8-validations-for-later.md](v8-validations-for-later.md),
    [v9-out-of-scope-desirables.md](v9-out-of-scope-desirables.md), and
    [v10-user-docs-discrepancies.md](v10-user-docs-discrepancies.md) current
@@ -170,7 +192,8 @@ superseded/consumed.
 ## Where things are
 
 ```
-/home/dev/delta/cosmo/          # working branch: develop
+/home/dev/delta/cosmo/          # working branch: private (day-to-day; see
+                                 # "Branch topology" above for private -> develop)
 ├── .githooks/pre-push          # refuses to push `private` to the resolved
 │                                  origin URL; active via core.hooksPath
 ├── LICENSE                     # Apache-2.0
@@ -196,7 +219,7 @@ superseded/consumed.
 cd /home/dev/delta/cosmo
 git log --oneline           # note: git filter-repo rewrote every commit hash
                              # pre-2026-08-28 -- older references won't `git show`
-git branch --show-current   # should say develop
+git branch --show-current   # should say private (day-to-day work branch)
 ./check.sh                  # must be green before you change anything
 cosmo doctor                # core checks + harness checks in two tables
 ```
