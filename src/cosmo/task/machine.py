@@ -935,6 +935,7 @@ def _do_merging(
         else (config.git.commit_author_name, config.git.commit_author_email)
     )
     try:
+        _git_commit_uncommitted_specs(repo_path, config)
         merge_result = merge_task(
             repo_path=repo_path,
             worktree_path=ctx.worktree_path,
@@ -947,7 +948,7 @@ def _do_merging(
             gate_rerun=gate_rerun,
             author=author,
         )
-    except MergeCommandError as exc:
+    except (MergeCommandError, GitCommandError) as exc:
         writer.record_task_failure(
             task_id=ctx.task_id,
             run_id=run_id,
@@ -970,6 +971,64 @@ def _do_merging(
         )
 
     return TaskStatus.DONE if merge_result.outcome.merged else TaskStatus.BLOCKED
+
+
+def _git_commit_uncommitted_specs(repo_path: Path, config: CosmoConfig) -> None:
+    """`cosmo spec add`/`spec queue` write directly into `repo_path`'s
+    `docs/specs/` (the same physical checkout `git.merge._assert_ready`
+    checks) and never commit the result -- the same "mutates repo_path,
+    never commits it" gap `_git_commit_archive` already closes for
+    `openspec archive`'s own output, this time for the spec content that
+    drove the task now merging. Left uncommitted, it fails `_assert_ready`'s
+    clean-worktree check and blocks the merge with "has uncommitted changes
+    -- refusing to merge" -- confirmed live. Scoped to `docs/specs` only,
+    deliberately: this is not a general "commit whatever is sitting dirty in
+    repo_path" fixup, just the one directory Cosmo's own spec workflow is
+    responsible for populating. A no-op, not an error, when `docs/specs`
+    doesn't exist yet or has nothing uncommitted in it."""
+    if not (repo_path / "docs" / "specs").exists():
+        return
+    identity_flags: list[str] = []
+    if not config.git.unified_identity:
+        identity_flags = [
+            "-c",
+            f"user.name={config.git.commit_author_name}",
+            "-c",
+            f"user.email={config.git.commit_author_email}",
+        ]
+    try:
+        subprocess.run(
+            ["git", "-C", str(repo_path), "add", "-A", "--", "docs/specs"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=60.0,
+        )
+        staged = subprocess.run(
+            ["git", "-C", str(repo_path), "diff", "--cached", "--quiet"],
+            capture_output=True,
+            text=True,
+            timeout=60.0,
+        )
+        if staged.returncode == 0:
+            return
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repo_path),
+                *identity_flags,
+                "commit",
+                "-m",
+                "cosmo: commit docs/specs",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=60.0,
+        )
+    except (OSError, subprocess.TimeoutExpired, subprocess.CalledProcessError) as exc:
+        raise GitCommandError(f"could not commit uncommitted docs/specs content: {exc}") from exc
 
 
 # -- FINISHING (v4 workflow changes) -----------------------------------------
