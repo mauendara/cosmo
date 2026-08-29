@@ -490,6 +490,11 @@ Copying is currently literal — no variable substitution. A natural extension (
 ---
  
 ## 12. Non-Goals (v1)
+
+**Current status of every item below, including the one that's since
+shipped anyway (Telegram), lives in
+[v9-out-of-scope-desirables.md](v9-out-of-scope-desirables.md) — read that
+first if you're checking whether something here is still actually true.**
  
 - Telegram or any real-time notification channel
 - Web dashboard

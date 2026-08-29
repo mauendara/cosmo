@@ -1,17 +1,33 @@
-# Handoff — Telegram notify overhaul (human-readable format + setup wizard, deviation 79), two template gaps closed (77-78); all three real projects fully done
+# Handoff — validation gaps and out-of-scope items extracted into their own tracking docs (v8, v9); no code changed this session
 
 You are picking up Cosmo mid-build. **Phases 0-9, the v4 workflow-changes
 feature, the v5 improvements plan, Phase 10's own acceptance-run, v7 items
-1-3, and deviations 74-76 (the prior handoff) are all implemented.** **This
-session's own work: three real deviations (77-79)** — read
-[v3-implementation-state.md](v3-implementation-state.md)'s cumulative
-deviations table, entries **77-79**, before doing anything else; this
-document summarizes them, the table has the precise file:line-grounded
-detail. This session also watched a real `cosmo run` through to completion
-against the third real target repo (`pomodoro-frontend-app`) and confirmed
-`habits-frontend-app`'s previously in-flight batch finished cleanly too —
-**all three real target repos in this store are now fully `done`**, no
-backlog against any of them.
+1-3, and deviations 74-79 (the prior handoff) are all implemented, and all
+three real target repos are fully `done`** — see "What happened in the
+prior session" below for that session's own detail, unchanged.
+
+**This session's own work was documentation-only, not code**: the
+handoff's own "What still needs validating" section and the various
+out-of-scope/deferred/open-decision notes scattered across the spec,
+`v3-implementation-state.md`, and the later `vN`-plan docs were pulled into
+two new standalone tracking documents —
+[v8-validations-for-later.md](v8-validations-for-later.md) (real-invocation
+gaps still owed) and
+[v9-out-of-scope-desirables.md](v9-out-of-scope-desirables.md) (everything
+declared out of scope, deferred, or still an open design decision). Nothing
+about the system itself changed; `./check.sh` was not re-run because no
+code was touched. **The next step from here is not yet decided** — this
+session didn't pick one, and neither doc above should be read as a task
+list to start working through opportunistically.
+
+## What happened in the prior session (deviations 77-79: Telegram notify overhaul, two template gaps closed)
+
+Kept as-is below for its own detail — the summary above already covers
+*this* session's own work (the v8/v9 doc extraction). This session also
+watched a real `cosmo run` through to completion against the third real
+target repo (`pomodoro-frontend-app`) and confirmed `habits-frontend-app`'s
+previously in-flight batch finished cleanly too — **all three real target
+repos in this store are fully `done`**, no backlog against any of them.
 
 **Deviation 77 — `docs/specs/` stayed absent until the first `spec add`.**
 Deviation 72 (prior handoff) only fixed the *lazy* creation path inside
@@ -328,45 +344,27 @@ across all three projects `done`, zero `blocked`. Same caveat as above: any
 
 ## What still needs validating
 
-Real, honest gaps — not fixed this session, and not fixable casually:
+Moved out to its own tracking document this session:
+[v8-validations-for-later.md](v8-validations-for-later.md). Same content
+that used to live in this section (system-wide systemd install,
+`REVIEWING`/`VALIDATING` timeout retuning, the notify wizard's own
+interactive flow, `cosmo run resume` against a real circuit-breaker trip,
+a real `bypass_5h_with_credits` run) — extracted so it survives this
+document's own session-to-session rewrites and can be updated in place as
+each item actually gets a real run. Update v8 directly when one of these
+gets validated; don't re-accumulate the list here.
 
-- **A real system-wide (`sudo cp .../etc/systemd/system/`) install** of
-  both services, as `deploy/README.md` actually documents for production.
-  This session's install was `systemctl --user` only, for lack of `sudo`
-  access in this environment — a future session (or the user, by hand)
-  should confirm the real production path still works, though nothing
-  found this session suggests it wouldn't (the unit files themselves are
-  now fixed).
-- **`REVIEWING`/`VALIDATING` timeout retuning (Open Item 2, §3.3) has real
-  data now but hasn't been formally decided.** 8 real `REVIEWING` passes
-  this session: 33s-161s, comfortable under the 900s wall. `todo-e2e`'s
-  two failing real `VALIDATING` attempts: ~24-25 real minutes each, over
-  half the 2700s wall — the first real signal this value might deserve a
-  closer look, not proof it's wrong. Retuning is a decision for a human,
-  not something to change opportunistically.
-- **`cosmo notify config`'s own interactive flow has never been run for
-  real** — only tested against a mocked `discover_chat_id`/
-  `send_test_message` (`test_cli_notify.py`). The underlying Telegram API
-  calls it wraps (`notify.setup`) are real and unit-tested against a faked
-  `urlopen`, and end-to-end delivery is confirmed working (the real
-  `cosmo-notify.service`, restarted this session onto the new build, has
-  been sending real messages since deviation 79 landed) — just not through
-  the wizard's own prompts yet, since this session's real config already
-  existed from before.
-- **A real `cosmo run resume` against a real circuit-breaker-tripped run**
-  was never exercised. The *quota*-paused case is now partially covered,
-  though by a different mechanism than `cosmo run resume`: a real
-  `quota_exhausted_5h` pause against `pomodoro-frontend-app` this session
-  auto-resumed **in-process** (`run.loop._handle_quota_pause_or_stop`
-  sleeps and resumes within the same still-running `cosmo run`, never
-  exiting) — confirmed for real, including the exact resume ETA computed
-  from the pause event's own `resume_delay_seconds` payload. `cosmo run
-  resume`, the separate CLI command that re-attaches to an already-`PAUSED`
-  run from a *fresh* process, is a distinct code path and remains
-  unexercised for both trigger conditions.
-- **A real `bypass_5h_with_credits=true` run** needs a real, deliberate
-  5-hour quota exhaustion window to test against — real spend, real
-  waiting, not something to force casually.
+## Out of scope, deferred, and open design decisions
+
+Also moved out this session, to
+[v9-out-of-scope-desirables.md](v9-out-of-scope-desirables.md): the spec's
+own §12 non-goals (with the one exception — Telegram — that's since shipped
+anyway), its "recorded for later" and "open items for follow-up specs"
+lists, v6's and v7-item-4's own still-open status, and the real
+implementation-time decisions (`HeartbeatSource.STREAM`, container cache
+mounts, one-project-per-run) that were previously scattered across
+`v3-implementation-state.md`. Read it before assuming something is
+missing by oversight rather than by design.
 
 ## Read these first, in this order
 
@@ -379,6 +377,8 @@ Real, honest gaps — not fixed this session, and not fixable casually:
 | [v5-improvements-plan.md](v5-improvements-plan.md) | Crash/pause resume, Telegram notifications, `--follow`, live-terminal observability, the quota-bypass flag, harness failure-pattern research (§5) | Implemented, parts 1-4/6-7 plus part 5's Class 1 — see its own Status line |
 | [v6-project-template-aware-stuff-plan.md](v6-project-template-aware-stuff-plan.md) | Making the gate/failure-classifier project-template-aware, for stacks beyond Java+Spring/Vite+React | **Not started — design record only.** Needs a real second stack before it's buildable; the user is doing that testing themselves before this gets picked up again — don't start it opportunistically |
 | [v7-complete-queue-done-fixes-plan.md](v7-complete-queue-done-fixes-plan.md) | Closing the "queue_empty looks like done" gap found auditing the Phase 10 acceptance run's own timing data | **Items 1, 2, and 3 done this session** (deviation 71 + a same-session Telegram follow-up) — see its own Status line. Only item 4 (a spec-authoring question, not code) remains open |
+| [v8-validations-for-later.md](v8-validations-for-later.md) | Real-invocation validations still owed (system-wide systemd install, timeout retuning, notify wizard, `run resume` vs. a circuit-breaker trip, a real `bypass_5h_with_credits` run) | **Tracking document, not a plan.** Update an entry in place when it gets a real run; this is where "what still needs validating" lives now, not in this handoff |
+| [v9-out-of-scope-desirables.md](v9-out-of-scope-desirables.md) | Everything declared out of scope, deferred, or still an open design decision — spec §12's non-goals, later plans' own open items, real implementation-time decisions | **Tracking document, not a plan.** Read before assuming a gap is an oversight rather than a deliberate non-goal |
 
 `v1-*` and `v2-*` in this folder are earlier spec drafts, fully superseded.
 `simple-template-handoff.md`/`old-agents-skills/` are historical, already
@@ -583,3 +583,9 @@ to any other `uv tool` invocation against the real installed tool, not just
    state this specific can drift the moment anyone queues something new.
 4. Commit to `develop` with a message explaining *why*, in the style of the
    existing commit history.
+5. Keep [v8-validations-for-later.md](v8-validations-for-later.md) and
+   [v9-out-of-scope-desirables.md](v9-out-of-scope-desirables.md) current
+   going forward instead of letting this "What still needs validating" /
+   "Out of scope" material re-accumulate directly in this handoff — update
+   an entry in place when it's validated or shipped, add new entries to the
+   right doc as they're found.

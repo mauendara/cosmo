@@ -14,6 +14,8 @@ rediscover.
 | Working branch | `develop` |
 | Head commit | `f721e7b` plus this session's v5 improvements plan work (see "v5 improvements plan — Implemented" below), uncommitted as of this entry |
 | Spec | [v3-cosmo-autonomous-agent-spec.md](v3-cosmo-autonomous-agent-spec.md) |
+| Still needs a real invocation to validate | [v8-validations-for-later.md](v8-validations-for-later.md) |
+| Out of scope / deferred / open decisions | [v9-out-of-scope-desirables.md](v9-out-of-scope-desirables.md) |
 
 **Everything in the plan except Phase 10 is implemented.** Phases 0-9 are
 complete, and the two real, already-diagnosed bugs plus the one
