@@ -1,24 +1,85 @@
-# Handoff — validation gaps and out-of-scope items extracted into their own tracking docs (v8, v9); no code changed this session
+# Handoff — the public user documentation set written (README + `user-docs/` + four root docs); no code changed this session
 
 You are picking up Cosmo mid-build. **Phases 0-9, the v4 workflow-changes
 feature, the v5 improvements plan, Phase 10's own acceptance-run, v7 items
-1-3, and deviations 74-79 (the prior handoff) are all implemented, and all
-three real target repos are fully `done`** — see "What happened in the
-prior session" below for that session's own detail, unchanged.
+1-3, and deviations 74-79 are all implemented, and all three real target
+repos are fully `done`** — see the prior-session sections below for that
+detail, unchanged.
 
-**This session's own work was documentation-only, not code**: the
-handoff's own "What still needs validating" section and the various
-out-of-scope/deferred/open-decision notes scattered across the spec,
-`v3-implementation-state.md`, and the later `vN`-plan docs were pulled into
-two new standalone tracking documents —
+**This session's own work was documentation-only, not code**, and it was
+*outward*-facing documentation for the first time: everything in `docs/`
+until now has been internal (specs, plans, state, handoffs). This session
+produced the **public, open-source user documentation** the repo would ship
+with, per the brief in
+`docs/ignored/prompts/user-doc-completion.md` — sixteen files in a Diátaxis
+layout:
+
+```
+README.md          rewritten in place (not discarded -- kept what was accurate)
+user-docs/
+  tutorial.md
+  how-to/          setup-vps, setup-wsl2, configure-quotas,
+                   add-project-template, write-a-new-adapter
+  reference/       cli, config-schema, event-schema
+  concepts/        architecture-overview, validation-gate-and-guardrails,
+                   quota-and-safety-model
+FAQ.md  TROUBLESHOOTING.md  CONTRIBUTING.md  SECURITY.md
+```
+
+**Everything in them is grounded against the code, not the specs.** The
+brief was explicit that the internal `vN` specs are background research only
+— a source of facts to translate, never text to copy — and that no command,
+flag, config key or metric may be invented. So: every command and flag came
+from real `cosmo <cmd> --help` output; every config key from
+`config/model.py` plus `defaults.toml`; every event payload from its actual
+emit site; and the terminal transcripts in the README and tutorial from real
+`cosmo init`/`doctor`/`queue`/`run --dry-run`/`events tail` invocations
+against a throwaway repo. Internal spec language (`must-fix`, `decided`,
+phase numbers, deviation numbers, changelog tables) does not appear in any
+user-facing file.
+
+**Six discrepancies between the brief and the code are recorded in
+[v10-user-docs-discrepancies.md](v10-user-docs-discrepancies.md)** — the
+brief required flagging a mismatch rather than silently reconciling it.
+Read that document before touching any of the six. Two of them are genuine
+loose ends worth a decision (`task.guardrail_tripped` is declared in
+`events/envelope.py` but emitted by nothing; gate stage *commands* are
+hardcoded even though images and directories are configurable — which is
+v6's own territory); the other four are simply reality being narrower than
+the brief and need no code change.
+
+The one most likely to bite a *user*: **the diff gate rejects any
+modification to an existing test file**, not merely a weakening one (a newly
+*added* test file is exempt). That is deliberate — see `diffgate.py`'s own
+comment — but it is much blunter than "blocks weakened tests," so it is
+stated in three separate user-facing places on purpose.
+
+Nothing about the system itself changed. `./check.sh` was **not** re-run
+because no code was touched. **The next step from here is not yet decided** —
+this session didn't pick one.
+
+Two small notes for whoever picks this up:
+
+- **No `LICENSE` file exists yet.** The brief put it out of scope, so no
+  license is named or implied anywhere; three places say "to be added"
+  (`README.md`, `CONTRIBUTING.md`, `SECURITY.md`'s disclosure section). Fix
+  all three in the same commit as the license file.
+- **Capturing real output inserted two throwaway tasks** (`add-login`,
+  `login-tests`) into the scratch store this box's `XDG_DATA_HOME` points at
+  (`/tmp/cosmo-test/data/cosmo`). Harmless and ephemeral, but they will show
+  in a `cosmo queue ls` run against that store. There is no `queue rm`.
+
+## What happened in the prior session (v8/v9: validation gaps and out-of-scope items extracted into their own tracking docs)
+
+Also documentation-only. The handoff's own "What still needs validating"
+section and the various out-of-scope/deferred/open-decision notes scattered
+across the spec, `v3-implementation-state.md`, and the later `vN`-plan docs
+were pulled into two standalone tracking documents —
 [v8-validations-for-later.md](v8-validations-for-later.md) (real-invocation
 gaps still owed) and
 [v9-out-of-scope-desirables.md](v9-out-of-scope-desirables.md) (everything
-declared out of scope, deferred, or still an open design decision). Nothing
-about the system itself changed; `./check.sh` was not re-run because no
-code was touched. **The next step from here is not yet decided** — this
-session didn't pick one, and neither doc above should be read as a task
-list to start working through opportunistically.
+declared out of scope, deferred, or still an open design decision). Neither
+should be read as a task list to start working through opportunistically.
 
 ## What happened in the prior session (deviations 77-79: Telegram notify overhaul, two template gaps closed)
 
@@ -372,13 +433,23 @@ missing by oversight rather than by design.
 |---|---|---|
 | [v3-cosmo-autonomous-agent-spec.md](v3-cosmo-autonomous-agent-spec.md) | The authoritative specification | **Source of truth** for the original 0-10 plan. v1 and v2 are superseded — read them only for history |
 | [v3-implementation-plan.md](v3-implementation-plan.md) | 11-phase build plan | The map for Phase 10 (its own section, near the end). **Do not edit** — it's the agreed scope; record decisions in `v3-implementation-state.md` instead |
-| [v3-implementation-state.md](v3-implementation-state.md) | What actually exists, plus decisions and gotchas | Read the cumulative deviations table's entries **77-79** in full before doing anything — this session's own real findings |
+| [v3-implementation-state.md](v3-implementation-state.md) | What actually exists, plus decisions and gotchas | Read the cumulative deviations table's entries **77-79** in full before doing anything — the most recent real findings (from the last session that changed code) |
 | [v4-changes-to-workflow-plan.md](v4-changes-to-workflow-plan.md) | The raw-spec-workflow feature design | Implemented — see its own Status line |
 | [v5-improvements-plan.md](v5-improvements-plan.md) | Crash/pause resume, Telegram notifications, `--follow`, live-terminal observability, the quota-bypass flag, harness failure-pattern research (§5) | Implemented, parts 1-4/6-7 plus part 5's Class 1 — see its own Status line |
 | [v6-project-template-aware-stuff-plan.md](v6-project-template-aware-stuff-plan.md) | Making the gate/failure-classifier project-template-aware, for stacks beyond Java+Spring/Vite+React | **Not started — design record only.** Needs a real second stack before it's buildable; the user is doing that testing themselves before this gets picked up again — don't start it opportunistically |
 | [v7-complete-queue-done-fixes-plan.md](v7-complete-queue-done-fixes-plan.md) | Closing the "queue_empty looks like done" gap found auditing the Phase 10 acceptance run's own timing data | **Items 1, 2, and 3 done this session** (deviation 71 + a same-session Telegram follow-up) — see its own Status line. Only item 4 (a spec-authoring question, not code) remains open |
 | [v8-validations-for-later.md](v8-validations-for-later.md) | Real-invocation validations still owed (system-wide systemd install, timeout retuning, notify wizard, `run resume` vs. a circuit-breaker trip, a real `bypass_5h_with_credits` run) | **Tracking document, not a plan.** Update an entry in place when it gets a real run; this is where "what still needs validating" lives now, not in this handoff |
 | [v9-out-of-scope-desirables.md](v9-out-of-scope-desirables.md) | Everything declared out of scope, deferred, or still an open design decision — spec §12's non-goals, later plans' own open items, real implementation-time decisions | **Tracking document, not a plan.** Read before assuming a gap is an oversight rather than a deliberate non-goal |
+| [v10-user-docs-discrepancies.md](v10-user-docs-discrepancies.md) | The six places the user-doc brief (or the specs behind it) described Cosmo differently from what the code does, and where each is now flagged in the public docs | **Tracking document, not a plan.** Read before touching `task.guardrail_tripped`, the diff gate's `test_path_modified` rule, or anything that assumes gate stage commands are configurable |
+
+The internal `vN` documents above are **not** the user-facing ones. Public
+documentation lives in `README.md`, `user-docs/`, and the four root docs
+(`FAQ`, `TROUBLESHOOTING`, `CONTRIBUTING`, `SECURITY`) — written for a
+developer who has never seen the project, grounded in the code rather than
+these specs. Keep the two sets separate: internal design deliberation
+(alternatives considered, rejected options, version-to-version changelogs)
+must not leak into the user docs, and a user-doc change that contradicts the
+code is a bug in the same way a wrong docstring is.
 
 `v1-*` and `v2-*` in this folder are earlier spec drafts, fully superseded.
 `simple-template-handoff.md`/`old-agents-skills/` are historical, already
@@ -388,51 +459,38 @@ fully consumed.
 
 ```
 /home/dev/delta/cosmo/          # working branch: develop
-├── docs/                       # handoff.md + v3-implementation-state.md updated this session
-├── deploy/                     # unchanged this session -- the *installed* cosmo-run.service
-│                                  unit was re-synced from deploy/cosmo-run.service by hand
-│                                  (StartLimitIntervalSec/Burst into [Unit]), no repo file changed
-├── templates/
-│   └── projects/vite-react-local/docs/testing.md   # E2E section gains the @playwright/test
-│                                                       1.49.0 pin + json reporter path rules (78)
-├── src/cosmo/
-│   ├── checks.py, doctor.py, bootstrap/, watchdog.py, retention.py, git/, gate/, spec/,
-│   │   run/, store/, task/, harness/                 # all unchanged this session
-│   ├── config/loader.py             # new `write_user_config_table` -- round-trips the user
-│   │                                    config file through tomllib/tomli_w, chmod 600 (79)
-│   ├── config/__init__.py           # exports write_user_config_table (79)
-│   ├── events/format.py             # new -- `event_detail(event)`, one human-readable-phrase
-│   │                                    builder per event type, shared by the terminal and
-│   │                                    Telegram (79)
-│   ├── events/__init__.py           # exports event_detail, WATCH_STALE_EVENT_TYPE (79)
-│   ├── notify/telegram.py           # `format_event` now uses `event_detail`, raw-payload
-│   │                                    fallback for unrecognized types, severity emoji (79)
-│   ├── notify/watch.py              # `_ALWAYS_NOTIFY_TYPES` gains `TASK_COMPLETED` (79)
-│   ├── notify/setup.py              # new -- `discover_chat_id`/`send_test_message`, real
-│   │                                    Telegram API calls that raise on failure (unlike
-│   │                                    `TelegramSink.send`'s best-effort posture) (79)
-│   ├── bootstrap/docs.py            # `copy_project_docs` mkdir's `docs/specs/`
-│   │                                    unconditionally (77)
-│   └── cli/main.py                  # `_print_emit` refactored onto `event_detail` (79); new
-│                                        `notify_config` command, the interactive wizard (79)
-├── tests/                       # 555 passing (up from 524), 9 skipped
-│   ├── test_bootstrap_docs.py       # 1 new test for deviation 77
-│   ├── test_events_format.py        # new, 12 tests -- `event_detail` directly, one per
-│   │                                   event type it recognizes plus the unrecognized-type
-│   │                                   fallback (79)
-│   ├── test_notify_telegram.py      # +2 tests -- the human-readable path, the raw-payload
-│   │                                   fallback (79)
-│   ├── test_notify_watch.py         # +1 test -- `TASK_COMPLETED` always-notify (79)
-│   ├── test_notify_setup.py         # new, 6 tests -- against a faked `urlopen` (79)
-│   ├── test_config.py               # +4 tests -- `write_user_config_table` (79)
-│   └── test_cli_notify.py           # +5 tests -- the wizard's full interactive flow (79)
-└── check.sh                     # ruff + format + mypy --strict + pytest -- all green
+├── README.md                   # REWRITTEN in place -- problem-first opening (what breaks in a
+│                                  naive overnight-agent setup), a real terminal transcript,
+│                                  4 differentiator bullets, doc index, naming note last
+├── FAQ.md                      # new -- real questions, including the ones the code answers
+│                                  differently from what a reader would assume
+├── TROUBLESHOOTING.md          # new -- organized by symptom, from the failure classification
+│                                  and quota logic, translated out of the internal enum names
+├── CONTRIBUTING.md             # new -- setup, ./check.sh, the four test-enforced boundaries,
+│                                  and the AI-attribution rule (disclose in prose, never as a
+│                                  Co-Authored-By/Assisted-by trailer naming a model)
+├── SECURITY.md                 # new -- a real threat model, including an explicit
+│                                  "what Cosmo does NOT defend against" section
+├── user-docs/                  # new tree, 12 files, plain markdown (no MkDocs/Docusaurus
+│   ├── tutorial.md                 until there's real adoption to justify it)
+│   ├── how-to/                 # setup-vps, setup-wsl2, configure-quotas,
+│   │                               add-project-template, write-a-new-adapter
+│   ├── reference/              # cli, config-schema, event-schema -- exhaustive and dry,
+│   │                               every command/flag/key/event payload
+│   └── concepts/               # architecture-overview, validation-gate-and-guardrails
+│                                   (the differentiator doc), quota-and-safety-model
+├── docs/
+│   ├── handoff.md                  # this file, rewritten for this session
+│   └── v10-user-docs-discrepancies.md   # NEW -- the six brief-vs-code mismatches
+├── deploy/, templates/         # unchanged this session
+├── src/cosmo/                  # ENTIRELY unchanged this session -- read for ground truth,
+│                                  never edited
+├── tests/                      # unchanged, 555 passing / 9 skipped as of the prior session
+└── check.sh                    # NOT re-run -- no code was touched
 ```
 
-**`pyproject.toml`/`uv.lock` also changed**: added `tomli-w` (deviation 79's
-config-file writer -- `tomllib` is read-only stdlib, this is its write-side
-complement, same convention as adding any other real dependency with `uv
-add` rather than hand-rolling a TOML serializer).
+**No dependency, config, or schema change this session.** `pyproject.toml`
+and `uv.lock` are untouched.
 
 ## Get oriented (2 minutes)
 
@@ -583,9 +641,22 @@ to any other `uv tool` invocation against the real installed tool, not just
    state this specific can drift the moment anyone queues something new.
 4. Commit to `develop` with a message explaining *why*, in the style of the
    existing commit history.
-5. Keep [v8-validations-for-later.md](v8-validations-for-later.md) and
-   [v9-out-of-scope-desirables.md](v9-out-of-scope-desirables.md) current
+5. Keep [v8-validations-for-later.md](v8-validations-for-later.md),
+   [v9-out-of-scope-desirables.md](v9-out-of-scope-desirables.md), and
+   [v10-user-docs-discrepancies.md](v10-user-docs-discrepancies.md) current
    going forward instead of letting this "What still needs validating" /
    "Out of scope" material re-accumulate directly in this handoff — update
    an entry in place when it's validated or shipped, add new entries to the
    right doc as they're found.
+6. **If you changed behavior, check whether the public docs still describe
+   it correctly.** `README.md`, `user-docs/`, `FAQ.md`, `TROUBLESHOOTING.md`,
+   `CONTRIBUTING.md` and `SECURITY.md` are now part of the repo's contract
+   with a reader, and every command, flag, config key and event payload in
+   them was verified against the code at the time of writing. A new CLI flag
+   needs a row in `user-docs/reference/cli.md`; a new config key needs one in
+   `config-schema.md` (and a default, and a validator if a bad value is
+   dangerous); a new event needs a payload table in `event-schema.md`. That
+   list is also written into `CONTRIBUTING.md` for outside contributors.
+7. If one of v10's six discrepancies gets resolved, update its entry there
+   *and* the user-facing pages it names — the whole point of that document
+   is that the flag and the fix stay connected.
