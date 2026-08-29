@@ -1,5 +1,7 @@
 # Troubleshooting
 
+🇬🇧 English | [🇪🇸 Español](TROUBLESHOOTING.es.md)
+
 Start here for any failure. Then work down to the specific symptom.
 
 ## The first four commands
@@ -349,7 +351,7 @@ systemd unit's own `Environment=` lines.
 Your `work_dir` is on `/mnt/...` — a Windows drive mount under WSL2. Builds
 there go through the 9p bridge and are slow enough to distort every timeout
 in your configuration. Move it inside the WSL2 filesystem. See
-[setup-wsl2](user-docs/how-to/setup-wsl2.md).
+[setup-wsl2](user-docs/en/how-to/setup-wsl2.md).
 
 ### `cosmo doctor` reports leaked gate containers
 

@@ -4,9 +4,9 @@ Thanks for looking. Two contributions are especially wanted:
 
 - **A harness adapter** for another coding agent — Codex CLI, OpenCode,
   anything with a CLI. The interface is stable, documented, and
-  test-enforced: [write-a-new-adapter](user-docs/how-to/write-a-new-adapter.md).
+  test-enforced: [write-a-new-adapter](user-docs/en/how-to/write-a-new-adapter.md).
 - **A project template** for a stack the shipped ones don't cover:
-  [add-project-template](user-docs/how-to/add-project-template.md).
+  [add-project-template](user-docs/en/how-to/add-project-template.md).
 
 ## Setup
 
@@ -173,14 +173,14 @@ in-progress work. Instead:
   confession.
 - **New config keys need a default, a validator if a bad value is
   dangerous, and a row in
-  [config-schema](user-docs/reference/config-schema.md).**
+  [config-schema](user-docs/en/reference/config-schema.md).**
 - **New events need a payload table in
-  [event-schema](user-docs/reference/event-schema.md).**
-- **New commands or flags need a row in [cli](user-docs/reference/cli.md).**
+  [event-schema](user-docs/en/reference/event-schema.md).**
+- **New commands or flags need a row in [cli](user-docs/en/reference/cli.md).**
 
 ## Adding an adapter
 
-Follow [write-a-new-adapter](user-docs/how-to/write-a-new-adapter.md) — it
+Follow [write-a-new-adapter](user-docs/en/how-to/write-a-new-adapter.md) — it
 carries the full contract and a checklist. Beyond it, for the PR:
 
 - Declare capabilities **honestly**. `supports_gating=True` for a harness
@@ -193,7 +193,7 @@ carries the full contract and a checklist. Beyond it, for the PR:
 
 ## Adding a project template
 
-Follow [add-project-template](user-docs/how-to/add-project-template.md). In
+Follow [add-project-template](user-docs/en/how-to/add-project-template.md). In
 the PR, say what stack it targets and what `[gate]` configuration it needs.
 
 The templates worth having are the ones written from real failures — the

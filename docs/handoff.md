@@ -1,4 +1,149 @@
-# Handoff — Branch topology, release workflow, and a push-safety hook added; no source code changed this session
+# Handoff — README/FAQ additions, a full Spanish-translation anglicism and drift audit, and a reusable translation-check prompt; no source code changed this session
+
+You are picking up Cosmo mid-build. **Phases 0-9, the v4 workflow-changes
+feature, the v5 improvements plan, Phase 10's own acceptance-run, v7 items
+1-3, and deviations 74-79 are all implemented, and all three real target
+repos are fully `done`** — see the prior-session sections below for that
+detail, unchanged.
+
+**This session's own work was documentation-only again, conversational
+rather than prompt-driven** (no file under `docs/ignored/prompts/` framed
+the whole session up front, unlike the three one-off sessions below it) —
+except for its last step, which *did* produce a new reusable prompt.
+
+**Part 1 — README and FAQ content additions**, requested piecemeal:
+
+- `README.md`/`README.es.md` gained: a **"not production ready" status
+  blockquote** right after the title (v0.1.0, first release; real-world
+  testing limited to the Claude Code harness on a $20/month Pro
+  subscription, against small greenfield projects on the
+  `vite-react-local` — frontend-only — template); a **"Custom skills and
+  agents get overwritten" section** warning that `.agent/<harness>/` (what
+  `.claude/agents`/`.claude/skills` symlink into) is deleted and rebuilt
+  wholesale from Cosmo's own `templates/harness/<name>/` on *every*
+  `cosmo init` **and every per-task worktree creation** — verified by
+  reading `src/cosmo/bootstrap/assets.py`'s `rmtree`+`copytree` and its own
+  test (`test_resync_removes_a_stale_file_no_longer_in_the_template`), not
+  assumed — with the corollary recommendation to keep `git.base_branch` off
+  whatever branch carries personal harness customizations; a **Roadmap**
+  section (MCP wrapper, Cursor adapter + harness template, a monitoring
+  webapp — explicitly marked as not built); and a one-line pointer under
+  **License** to Apache-2.0 §7/§8's existing warranty/liability disclaimer
+  (no new disclaimer text invented — the license already covers it) and an
+  **Author** section (Mauricio Endara, with links).
+- `user-docs/{en,es}/how-to/write-a-new-adapter.md` gained a new **"The
+  harness template" / "La plantilla del harness"** section (plus a
+  checklist line) documenting `templates/harness/<name>/` as the other,
+  previously-undocumented half of adding an adapter — separate from the
+  Python code in `src/cosmo/harness/<name>/` — and stating the same
+  wholesale-overwrite behavior above applies to it.
+- `FAQ.md`/`FAQ.es.md`'s "What license is it under?" answer still said "to
+  be added" — a leftover the license-remediation session below (see its
+  own entry, deviation-adjacent note) fixed everywhere *except* here. Now
+  points at `LICENSE` like everywhere else does.
+
+**Part 2 — Spanish translation audit**, both requested and (for the second
+half) self-initiated after a prompt was written for it:
+
+- **Anglicism sweep, user-flagged**: `fusión`/`fusionar`/`fusiona`/`fusionó`
+  — a literal, not-actually-said-by-Spanish-speaking-developers translation
+  of "merge" — appeared 21 times across 11 files (including the
+  `## La escalera de fusión` section heading in
+  `architecture-overview.md`), inconsistently alongside places that
+  correctly kept `merge` in English. All 21 fixed to `merge`/`hacer
+  merge`/`escalera de merge`; grepped to confirm zero remain. Checked
+  several other candidate anglicisms (`bifurcación` for branch, `gancho`
+  for hook, literal pull-request translations, `pagar` for checkout) and
+  found none — `commit`, `push`, `pull request`, `checkout`, and `rama` for
+  branch were already correct and idiomatic throughout.
+- **Code-comment translation, user-flagged**: roughly 50 inline `#`/`//`
+  comments inside fenced code examples across 12 Spanish files were still
+  in English (pedagogical comments in Python/TOML/bash snippets, not
+  literal tool output). Translated all of them; left literal CLI/tool
+  output untouched on purpose (e.g. the quarantine-file error message in
+  `TROUBLESHOOTING.md`'s "The quarantine file breaks the gate" section is
+  real program output and stays in English in both language versions).
+- **Bug found, not asked for**: `README.es.md`, `FAQ.es.md`, and
+  `TROUBLESHOOTING.es.md` each had a stray literal `</content>` (one also
+  had `</invoke>`) at the very end of the file — tool-call XML leaked into
+  the actual document by whatever prior session authored them. Removed
+  from all three.
+- **New reusable prompt**: `docs/ignored/prompts/check-update-translated-
+  userdocs.md`, modeled on `translate-user-docs.md`'s two-phase shape but
+  scoped to audit-and-repair an *existing* translation rather than create
+  one — it never restructures or creates a new file pair, only flags a
+  missing one. Bakes in the `fusión` regression grep and the leaked-
+  artifact grep above as standing checks for next time.
+- **That prompt was then run**, per the user's request, immediately after
+  being written. Phase 1 (structural diff on headings/code-fences/tables
+  plus a code-block byte-diff outside comments, across all 15 EN/ES pairs
+  including the three root files) found 14 of 15 pairs in sync and one
+  behind: `README.es.md` was missing the status blockquote and Author
+  section just added to `README.md` in Part 1 above — drift introduced
+  *within this same session*, between adding the English content and
+  mirroring it. Phase 2 translated both into `README.es.md`, then
+  re-verified (heading counts now match 13/13, no `fusión` regression, no
+  leaked artifacts).
+
+Nothing about the system itself changed; `./check.sh` was not re-run
+because no code was touched.
+
+**Phase 1 (read-only verification)**:
+
+- **Remotes/branches**: `git remote -v` was completely empty — no remote
+  configured at all, public or private. Local branches: `develop` (current,
+  HEAD), `master`, `webapp`, none with a remote-tracking counterpart. No
+  `private` branch existed yet (expected — the maintainer creates it
+  themselves later, per the prompt's own scope).
+- **Licensing**: `LICENSE` already existed in full from the prior session
+  (unmodified Apache License 2.0 text, `Copyright 2026 Mauricio Endara` in
+  the appendix), and `README.md`/`CONTRIBUTING.md` already pointed at it —
+  so this task's own license-related scope item was already fully
+  satisfied before Phase 2 started; nothing new to add there.
+- **Hooks**: no `core.hooksPath` set, no `.githooks/` directory, and
+  `.git/hooks/` held only the stock `.sample` files — a clean slate, no
+  existing push guard to account for or conflict with.
+
+**Phase 2 (execution), done exactly per the confirmed plan**:
+
+- `.githooks/pre-push` added (new, executable) — refuses a push of a branch
+  literally named `private` whenever the push target's git-*resolved* URL
+  (the `$2` argument git's pre-push hook protocol already supplies, not a
+  remote name) matches whatever `origin` currently resolves to. Written
+  defensively since none of `origin`/`private-origin`/`private` exist on
+  this host yet: if `origin` isn't configured, or the branch being pushed
+  isn't `private`, it's a silent no-op rather than an error. Verified by
+  hand (not just read) against 6 scenarios run directly against a scratch
+  repo: blocks when the push target matches `origin`'s URL, still blocks
+  when pushed through a *renamed* remote that happens to resolve to the
+  same URL, allows every other branch, allows `private` pushed to a
+  differently-named/resolved remote, allows everything when `origin` isn't
+  configured at all, and normalizes trailing `/`/`.git` differences before
+  comparing.
+- `core.hooksPath` set to `.githooks` — **local to this repo's own git
+  config only** (`git config --get core.hooksPath` → `.githooks`); this is
+  an inherent property of `core.hooksPath` (it never propagates to other
+  clones automatically), not something this session attempted to solve.
+- `CONTRIBUTING.md` gained a new "Branching model" section (the
+  `develop`/`master`/`private` roles, in plain terms) and a "Moving work
+  from `private` into a PR" subsection documenting the 5-step
+  branch-off-`develop`-then-cherry-pick workflow from the prompt's own §F.
+  The pre-existing "Branch from `develop`" bullet under "Pull requests" now
+  points at the new section instead of duplicating it.
+- **Explicitly deferred to the maintainer, per the prompt's own scope**: no
+  `git remote add` for either `origin` or `private-origin`, no `private`
+  branch created, and GitHub/`gh` settings (default branch, branch
+  protection, required status checks — there's no CI workflow in this repo
+  yet either) were not touched, checked, or turned into a checklist.
+
+This session's changes land in one commit: `README.md`, `README.es.md`,
+`FAQ.md`, `FAQ.es.md`, `TROUBLESHOOTING.es.md`,
+`user-docs/{en,es}/how-to/write-a-new-adapter.md`, the ten other
+`user-docs/es/**` files touched by the anglicism/comment sweep, the new
+`docs/ignored/prompts/check-update-translated-userdocs.md`, and this file.
+No source code touched.
+
+## What happened in the prior session (Branch topology, release workflow, and a push-safety hook added; no source code changed that session)
 
 You are picking up Cosmo mid-build. **Phases 0-9, the v4 workflow-changes
 feature, the v5 improvements plan, Phase 10's own acceptance-run, v7 items

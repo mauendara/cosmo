@@ -210,7 +210,7 @@ isn't writing where the parser looks.
 ## 6. Contribute it back
 
 If the stack is one other people use, open a PR. See
-[CONTRIBUTING.md](../../CONTRIBUTING.md). Include:
+[CONTRIBUTING.md](../../../CONTRIBUTING.md). Include:
 
 - The template directory.
 - A note in the PR describing the stack it targets and any `[gate]` config it

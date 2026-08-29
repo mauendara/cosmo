@@ -7,7 +7,7 @@ another (Codex CLI, OpenCode, an in-house agent) without asking anyone a
 question.
 
 Contributions of new adapters are explicitly welcome. See
-[CONTRIBUTING.md](../../CONTRIBUTING.md) for the PR conventions.
+[CONTRIBUTING.md](../../../CONTRIBUTING.md) for the PR conventions.
 
 ## What Cosmo guarantees you
 
@@ -46,6 +46,41 @@ _REGISTRY: dict[str, type[HarnessAdapter]] = {
 
 Users then select it with `harness.name = "mytool"` in config, `--harness
 mytool` on a command, or per-project via `cosmo init --harness mytool`.
+
+## The harness template
+
+The Python adapter is only half the job. The other half lives outside
+`src/`, in a directory Cosmo treats as data, not code:
+
+```
+templates/harness/mytool/
+  CLAUDE.md          # or your tool's equivalent operating policy
+  settings.json       # permission mode, allow-listed tools, etc.
+  agents/              # the implementer/reviewer agent definitions
+  skills/              # OpenSpec workflow and spec-enrichment skills
+  hooks/               # PreToolUse/PostToolUse guardrail scripts
+```
+
+Model it on `templates/harness/claude/` — that's the reference layout, not a
+Claude-specific one. Whatever your tool's mechanism is for operating policy,
+sub-agents, skills, and tool-call hooks goes here.
+
+This directory is what `cosmo init` and every per-task worktree creation
+sync into the target repo's `.agent/mytool/` (which `.claude`-equivalent
+symlinks like `.claude/agents` and `.claude/skills` point into). The sync is
+**wholesale, not a merge**: the destination is deleted and recreated from
+this template on every sync, for every harness adapter alike. Nothing a user
+hand-edits or hand-installs into that tree in their target repo survives the
+next task. If your template is meant to package a capability (an OpenSpec
+skill, a custom agent) for users, ship it here — don't tell users to add it
+to the target repo themselves, because Cosmo will remove it.
+
+Keep the operating policy and guardrails here strictly separate from the
+adapter code in `src/cosmo/harness/mytool/`: the template is what the agent
+reads and is told to follow; the adapter is what invokes the agent and
+parses its output. Conflating them — for example, hardcoding a policy string
+into `adapter.py` instead of `CLAUDE.md` — makes the policy invisible to
+`cosmo doctor` and impossible for a user to audit without reading Python.
 
 ## The data types
 
@@ -414,6 +449,7 @@ cosmo run --repo /tmp/test-project --harness mytool --task some-task
 
 ## Checklist
 
+- [ ] `templates/harness/mytool/` written, modeled on `templates/harness/claude/`
 - [ ] `name` and `capabilities` declared at class level, honestly
 - [ ] `preflight()` is cheap, side-effect free, and fails on
       billing-switching env vars

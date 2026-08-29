@@ -229,7 +229,7 @@ Specific to the Claude Code adapter, though the posture generalizes.
   and file contents in a telemetry backend are a data-exfiltration path for a
   private codebase.
 
-Full threat model: [SECURITY.md](../../SECURITY.md).
+Full threat model: [SECURITY.md](../../../SECURITY.md).
 
 ## Notifications
 

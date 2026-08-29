@@ -1,5 +1,7 @@
 # FAQ
 
+🇬🇧 English | [🇪🇸 Español](FAQ.es.md)
+
 ## What is Cosmo, in one sentence?
 
 An orchestrator that runs a dependency-ordered queue of spec-driven
@@ -20,7 +22,7 @@ down, flaky-test confirm-by-rerun, and correct process-group kills.
 Claude Code today. The adapter interface is real and test-enforced — no
 orchestration code branches on which harness is configured — but Claude Code
 is the only implementation. Writing another is one class:
-[write-a-new-adapter](user-docs/how-to/write-a-new-adapter.md).
+[write-a-new-adapter](user-docs/en/how-to/write-a-new-adapter.md).
 
 ## Does it work with my stack?
 
@@ -33,7 +35,7 @@ is just directories of markdown — neither is hard-coded to that stack.
 The honest limit: the build *commands* per stage aren't configurable yet. A
 Go or Rails backend can use the template system for documentation today, but
 its build stages need gate work. See
-[add-project-template](user-docs/how-to/add-project-template.md).
+[add-project-template](user-docs/en/how-to/add-project-template.md).
 
 ## Can an agent drive Cosmo through MCP?
 
@@ -55,7 +57,7 @@ Cosmo doesn't set the price; your harness does. The cost ceilings default to
 `0.0`, meaning no hard stop — correct for subscription billing, where the
 binding constraint is rate-limit windows, not dollars. On metered billing,
 set `cost.max_cost_per_run_usd` and `cost.max_cost_per_task_usd`. See
-[configure-quotas](user-docs/how-to/configure-quotas.md).
+[configure-quotas](user-docs/en/how-to/configure-quotas.md).
 
 ## What happens when I hit a rate limit mid-run?
 
@@ -94,7 +96,7 @@ That's the specific failure this is built around. Three layers:
 added versus removed lines and fails the task if they dropped; and for a
 harness that can't gate a tool call pre-execution, the same diff gate stands
 alone as post-hoc detection. Full detail:
-[validation-gate-and-guardrails](user-docs/concepts/validation-gate-and-guardrails.md).
+[validation-gate-and-guardrails](user-docs/en/concepts/validation-gate-and-guardrails.md).
 
 ## What about a legitimate task whose whole job is writing or changing tests?
 
@@ -214,7 +216,9 @@ description or commit body instead. See
 
 ## What license is it under?
 
-To be added — no license file exists in this repository yet.
+Apache License 2.0 — see [LICENSE](LICENSE). That license's Sections 7 and 8
+disclaim warranty and limit liability: the software is provided "AS IS," and
+you assume the risk of using it.
 
 ## Where does the name come from?
 

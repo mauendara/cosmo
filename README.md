@@ -1,5 +1,14 @@
 # Cosmo
 
+🇬🇧 English | [🇪🇸 Español](README.es.md)
+
+> **v0.1.0, first release — not production ready.** Real-world testing so
+> far has been limited to the Claude Code harness on a $20/month Pro
+> subscription, against small greenfield projects built on the
+> `vite-react-local` template (frontend-only stack). Other harnesses,
+> larger or brownfield repos, and the backend-inclusive templates are
+> implemented but not battle-tested. Expect rough edges outside that path.
+
 **An overnight coding agent will tell you it finished. Cosmo doesn't take its
 word for it.**
 
@@ -48,7 +57,7 @@ Cosmo is built around all four:
   it, `@Disabled` it, or `.skip(` it. Cosmo blocks those edits *before they
   happen* with `PreToolUse` hooks, then counts assertions in the diff and
   fails the task if they went down. See
-  [validation-gate-and-guardrails](user-docs/concepts/validation-gate-and-guardrails.md).
+  [validation-gate-and-guardrails](user-docs/en/concepts/validation-gate-and-guardrails.md).
 - **Processes leak.** A killed Maven, Node, Chromium or Docker process that
   keeps its children alive eats the host's memory until every later task
   fails for unrelated reasons. Cosmo kills the whole process group, then
@@ -72,7 +81,7 @@ uv tool install --editable .    # optional: puts `cosmo` on your PATH
 
 Then `cosmo doctor` to check the host has git, Docker, `openspec`, `gitleaks`
 and a working harness. Full prerequisites and first run:
-[the tutorial](user-docs/tutorial.md).
+[the tutorial](user-docs/en/tutorial.md).
 
 ## How it works, in one pass
 
@@ -96,18 +105,18 @@ and a working harness. Full prerequisites and first run:
 
 ## Documentation
 
-- **[Tutorial](user-docs/tutorial.md)** — first project, first task, start to finish.
-- **How-to** — [VPS setup](user-docs/how-to/setup-vps.md) ·
-  [WSL2 setup](user-docs/how-to/setup-wsl2.md) ·
-  [quotas and spend](user-docs/how-to/configure-quotas.md) ·
-  [add a project template](user-docs/how-to/add-project-template.md) ·
-  [write a harness adapter](user-docs/how-to/write-a-new-adapter.md)
-- **Reference** — [CLI](user-docs/reference/cli.md) ·
-  [config schema](user-docs/reference/config-schema.md) ·
-  [event schema](user-docs/reference/event-schema.md)
-- **Concepts** — [architecture](user-docs/concepts/architecture-overview.md) ·
-  [validation gate and guardrails](user-docs/concepts/validation-gate-and-guardrails.md) ·
-  [quota and safety model](user-docs/concepts/quota-and-safety-model.md)
+- **[Tutorial](user-docs/en/tutorial.md)** — first project, first task, start to finish.
+- **How-to** — [VPS setup](user-docs/en/how-to/setup-vps.md) ·
+  [WSL2 setup](user-docs/en/how-to/setup-wsl2.md) ·
+  [quotas and spend](user-docs/en/how-to/configure-quotas.md) ·
+  [add a project template](user-docs/en/how-to/add-project-template.md) ·
+  [write a harness adapter](user-docs/en/how-to/write-a-new-adapter.md)
+- **Reference** — [CLI](user-docs/en/reference/cli.md) ·
+  [config schema](user-docs/en/reference/config-schema.md) ·
+  [event schema](user-docs/en/reference/event-schema.md)
+- **Concepts** — [architecture](user-docs/en/concepts/architecture-overview.md) ·
+  [validation gate and guardrails](user-docs/en/concepts/validation-gate-and-guardrails.md) ·
+  [quota and safety model](user-docs/en/concepts/quota-and-safety-model.md)
 - [FAQ](FAQ.md) · [Troubleshooting](TROUBLESHOOTING.md) ·
   [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md)
 
@@ -117,13 +126,66 @@ Cosmo never invokes a coding-agent CLI directly. Every call goes through one
 adapter interface, and no orchestration code branches on which harness is
 configured. **Claude Code is the only adapter implemented today** — that's a
 starting point, not the ceiling. Writing another one is a single class:
-[write-a-new-adapter](user-docs/how-to/write-a-new-adapter.md).
+[write-a-new-adapter](user-docs/en/how-to/write-a-new-adapter.md).
+
+## Custom skills and agents get overwritten — read this before you rely on any
+
+Cosmo drives [OpenSpec](https://github.com/Fission-AI/OpenSpec) internally
+for every propose/apply/archive step. It's a dependency `cosmo doctor`
+checks for, not something you configure around.
+
+Cosmo also owns `.agent/<harness>/` in the target repo — the directory
+`.claude/agents` and `.claude/skills` symlink into. On every `cosmo init`
+**and every per-task worktree creation**, that whole directory is deleted
+and recreated wholesale from Cosmo's own `templates/harness/<harness>/`. Any
+OpenSpec skill, custom agent, or third-party Claude Code skill you installed
+by hand into `.claude/agents/` or `.claude/skills/` on that repo does not
+survive the next sync — there is no merge, and this applies to every harness
+adapter, not just Claude Code.
+
+If you want a capability to stick, add it into Cosmo's own
+`templates/harness/<name>/` so it becomes part of what gets synced — see
+[write-a-new-adapter](user-docs/en/how-to/write-a-new-adapter.md#the-harness-template).
+
+The corollary: don't point `git.base_branch` at the branch where you do your
+own interactive coding-agent work with personal skills, agents, or hooks
+committed to `.claude/`. Give Cosmo a dedicated integration branch that never
+carries your personal harness configuration, so an unattended sync — and the
+merge back into that branch — can't quietly wipe it.
+
+## Roadmap
+
+Nothing below exists yet. Filed here so intent is visible, not as a
+commitment:
+
+- **An MCP wrapper** around the queue and run control, so an editor or
+  another agent can drive Cosmo without shelling out to the CLI.
+- **A Cursor adapter and harness template** — a second `HarnessAdapter`
+  implementation, to prove the harness-agnostic design against a second real
+  tool.
+- **A small webapp for monitoring runs** — a read-only view over the event
+  log and queue state, for watching an overnight run without `cosmo events
+  tail` in a terminal.
+
+Want to build one? [write-a-new-adapter](user-docs/en/how-to/write-a-new-adapter.md)
+is the starting point for the Cursor adapter; open an issue to discuss the
+other two.
 
 ## License
 
-Apache License 2.0 — see [LICENSE](LICENSE).
+Apache License 2.0 — see [LICENSE](LICENSE). That license's Sections 7 and 8
+already disclaim warranty and limit liability — the software is provided
+"AS IS", and you assume the risk of using it.
 
 ## The name
 
 Cosmo, from *kosmos* — order out of chaos. It's what an unattended queue of
 agent work needs most, and what the validation gate is there to impose.
+
+## Author
+
+Mauricio Endara —
+[mauricioendara.com](https://mauricioendara.com) ·
+[entropiainversa.com](https://entropiainversa.com) ·
+[LinkedIn](https://www.linkedin.com/in/mauricio-endara-leon/) ·
+[mauendara@gmail.com](mailto:mauendara@gmail.com)

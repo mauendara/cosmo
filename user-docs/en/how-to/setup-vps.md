@@ -265,4 +265,4 @@ recomputes the eligible set on every pass.
   stays a human step, and nothing in an unattended run should have push
   access to it.
 - Keep `/etc/cosmo/config.toml` at mode `600`. It holds your bot token.
-- See [SECURITY.md](../../SECURITY.md) for the full threat model.
+- See [SECURITY.md](../../../SECURITY.md) for the full threat model.

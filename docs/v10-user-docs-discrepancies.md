@@ -29,7 +29,7 @@ own raw log (the hook's deny message reaches the agent, not Cosmo), and
 indirectly in whatever failure the denial ultimately causes. There is no
 queryable "a hook fired" signal.
 
-**Documented in.** `user-docs/reference/event-schema.md` gives it its own
+**Documented in.** `user-docs/en/reference/event-schema.md` gives it its own
 entry under the task-level events, marked **"Declared but not emitted"**,
 explaining that guardrail denials surface in the session log and the
 resulting failure instead, and telling the reader not to build alerting on
@@ -61,11 +61,11 @@ This is not a defect so much as an unstated redundancy: the table is the
 real per-attempt record, and it carries `error_detail` (assertion text, stack
 excerpts) that the event payloads deliberately never do.
 
-**Documented in.** `user-docs/reference/event-schema.md` — the `task.failed`
+**Documented in.** `user-docs/en/reference/event-schema.md` — the `task.failed`
 entry opens with "**Emitted only by the process-reap path**" and points at
 `cosmo queue failures`. The same reference's closing "Related tables" section
 makes the table-versus-event split explicit, and
-`user-docs/concepts/validation-gate-and-guardrails.md` repeats it where it
+`user-docs/en/concepts/validation-gate-and-guardrails.md` repeats it where it
 explains the failure record.
 
 **Owed.** Nothing. Documented as-is. Worth knowing only if someone later
@@ -98,7 +98,7 @@ Also worth stating precisely: `assertion_count_decreased` is computed
 
 **Documented in.**
 
-- `user-docs/concepts/validation-gate-and-guardrails.md` — a table of all
+- `user-docs/en/concepts/validation-gate-and-guardrails.md` — a table of all
   five violation kinds, plus two paragraphs on the added-versus-modified
   asymmetry and why the rule is blunt on purpose.
 - `TROUBLESHOOTING.md` — under the `test_integrity` symptom, called out as
@@ -115,7 +115,7 @@ in three places on purpose rather than once.
 note) as a capability distinct from Cosmo *using* an agent as a harness, and
 asked that the two be documented separately and not conflated.
 
-**Documented in.** `user-docs/concepts/architecture-overview.md`, under an
+**Documented in.** `user-docs/en/concepts/architecture-overview.md`, under an
 explicit **"Not implemented yet"** heading at the end, alongside the
 missing second adapter and parallel execution. `FAQ.md` answers "Can an agent
 drive Cosmo through MCP?" with "Not yet … **No such server exists today.**
@@ -149,12 +149,12 @@ script, or the build stage fails on `npm ci`.
 
 **Documented in.**
 
-- `user-docs/how-to/add-project-template.md` — a "Match the gate to the
+- `user-docs/en/how-to/add-project-template.md` — a "Match the gate to the
   stack" section stating the limit outright and naming the lockfile/`build`
   script requirement.
 - `FAQ.md` — "Does it work with my stack?" gives the honest answer rather
   than the brief's.
-- `user-docs/reference/config-schema.md` — the `[gate]` table documents
+- `user-docs/en/reference/config-schema.md` — the `[gate]` table documents
   what *is* configurable, which by omission shows what isn't.
 
 **Owed.** This is precisely what
@@ -188,11 +188,11 @@ convenience in an install section unless the reason is stated.
 
 **Documented in.**
 
-- `user-docs/tutorial.md` — the install step shows the exact error and says
+- `user-docs/en/tutorial.md` — the install step shows the exact error and says
   to use `--editable` from a full checkout.
 - `TROUBLESHOOTING.md` — "Templates not found" reproduces the message.
 - `CONTRIBUTING.md` — the setup block carries the reason inline.
-- `user-docs/how-to/setup-vps.md` — "Keep the checkout" is called out where
+- `user-docs/en/how-to/setup-vps.md` — "Keep the checkout" is called out where
   someone would otherwise be tempted to install and delete.
 
 **Owed.** Nothing, while the documented install method is the editable one.
