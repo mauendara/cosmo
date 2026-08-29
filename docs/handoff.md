@@ -1,16 +1,65 @@
-# Handoff — three real cross-project/observability bugs fixed against a second real target repo (deviations 74-76); v6 still deferred
+# Handoff — Telegram notify overhaul (human-readable format + setup wizard, deviation 79), two template gaps closed (77-78); all three real projects fully done
 
 You are picking up Cosmo mid-build. **Phases 0-9, the v4 workflow-changes
-feature, the v5 improvements plan, Phase 10's own acceptance-run, and v7
-items 1+3 (the prior handoff) are all implemented.** **This session's own
-work: three real bugs (deviations 74-76), all found and fixed live driving
-a real `cosmo run` against `habits-frontend-app`** — the first time this
-store has ever had *two* real target repos in it at once (the existing
-`todo-frontend-app` acceptance-run repo, plus this new one) — read
+feature, the v5 improvements plan, Phase 10's own acceptance-run, v7 items
+1-3, and deviations 74-76 (the prior handoff) are all implemented.** **This
+session's own work: three real deviations (77-79)** — read
 [v3-implementation-state.md](v3-implementation-state.md)'s cumulative
-deviations table, entries **74-76**, before doing anything else; this
+deviations table, entries **77-79**, before doing anything else; this
 document summarizes them, the table has the precise file:line-grounded
-detail.
+detail. This session also watched a real `cosmo run` through to completion
+against the third real target repo (`pomodoro-frontend-app`) and confirmed
+`habits-frontend-app`'s previously in-flight batch finished cleanly too —
+**all three real target repos in this store are now fully `done`**, no
+backlog against any of them.
+
+**Deviation 77 — `docs/specs/` stayed absent until the first `spec add`.**
+Deviation 72 (prior handoff) only fixed the *lazy* creation path inside
+`spec_add`'s own error branch; `cosmo init` itself still never created the
+directory. The user re-hit the same empty-directory symptom against a fresh
+`vite-react-local` init and confirmed the actual want was proactive creation
+at init time. Fixed: `bootstrap.docs.copy_project_docs` now `mkdir`s
+`docs/specs/` unconditionally at the end of its own copy loop, for every
+project template.
+
+**Deviation 78 — the e2e gate silently wasted a full attempt on two of
+`pomodoro-frontend-app`'s five real tasks.** Watching that real `cosmo run`
+live: `scaffold-app` and `timer-ui` each burned one full failed attempt on
+the *same* class of e2e-stage gate failure before the agent self-corrected
+on retry — an unpinned `@playwright/test` resolving newer than the gate's
+pinned `v1.49.0-noble` Docker image has browsers for, and a Playwright
+reporter that never wrote `playwright-report/results.json` in the first
+place (gate: `"playwright produced no report"`, indistinguishable from the
+suite never running). Both are template-level gaps, not task-level bugs —
+every future `vite-react-local` project would rediscover both by trial and
+error on its own first e2e task, the same way `todo-frontend-app`'s Phase 10
+`crypto.randomUUID()` workaround worked around a gap nobody had documented
+yet. Fixed in `templates/projects/vite-react-local/docs/testing.md`'s E2E
+section, alongside the existing `BASE_URL` rule.
+
+**Deviation 79 — Telegram notifications were a bare `json.dumps(payload)`
+dump, and setup was entirely manual.** Requested directly by the user after
+walking through when notifications actually fire (a genuinely useful
+exercise: `task.completed` turned out to be silent at the default
+`warning` threshold — only the final `run.summary` ever pinged). New
+`events.format.event_detail` is one human-readable-phrase builder per event
+type, shared by `cli.main._print_emit` (the live terminal) and
+`notify.telegram.format_event` (Telegram) instead of two slowly-drifting
+copies; `task.completed` is now promoted to always-notify; new `cosmo
+notify config` is a one-shot interactive wizard (prompts for a bot token,
+discovers the chat id via `getUpdates`, writes `[notify]` via new
+`config.loader.write_user_config_table`, sends one real test message before
+declaring success). Rolled out live, not just committed: the real
+`~/.config/cosmo/config.toml` now has `min_severity = "info"` per the
+user's explicit choice, the `cosmo` uv tool was reinstalled from this
+checkout, and `cosmo-notify.service` was restarted onto the new build —
+see the environment-gotchas section below for a real snag hit doing that
+(`uv tool install` also honors `XDG_DATA_HOME`).
+
+## What happened in the prior session (deviations 74-76: cross-project bugs against a second real target repo)
+
+Kept as-is below for its own detail — the summary above already covers
+*this* session's own work (deviations 77-79).
 
 **Deviation 74 — cross-project `task_id` collision.** `task_queue.task_id`
 is a single global primary key shared by *every* project's `cosmo.db`, but
@@ -265,6 +314,18 @@ confirmed by hand, not assumed.
 it, they're new work, not a continuation of this phase's own exit
 criterion.
 
+**The other two real projects are also fully `done` now**, confirmed against
+the real store this session: `habits-frontend-app`'s `habit-tracker` batch
+(all 9 tasks, including the 5 that were still pending as of the prior
+handoff — deviations 75-76 held up cleanly for all of them) and
+`pomodoro-frontend-app`'s `pomodoro-timer` batch (5/5 tasks, watched
+through a real `cosmo run` end to end this session, including a real
+`quota_exhausted_5h` pause that auto-resumed in-process on schedule with no
+manual intervention — see `run.loop._handle_quota_pause_or_stop`'s own
+docstring). `cosmo queue ls` against the real store shows all 20 tasks
+across all three projects `done`, zero `blocked`. Same caveat as above: any
+*new* spec batch queued against either is new work, not a continuation.
+
 ## What still needs validating
 
 Real, honest gaps — not fixed this session, and not fixable casually:
@@ -283,13 +344,26 @@ Real, honest gaps — not fixed this session, and not fixable casually:
   half the 2700s wall — the first real signal this value might deserve a
   closer look, not proof it's wrong. Retuning is a decision for a human,
   not something to change opportunistically.
-- **Telegram delivery is still completely unverified end to end** — no
-  bot token/chat id available this session. `cosmo-notify.service`'s
-  *refusal* to start without one was confirmed for real instead.
-- **A real `cosmo run resume` against a real circuit-breaker-tripped or
-  quota-paused run** was never exercised — nothing in this session's real
-  queue tripped either condition (contrast with `reconcile_interrupted_
-  tasks`, which a real `kill -9` did exercise, twice).
+- **`cosmo notify config`'s own interactive flow has never been run for
+  real** — only tested against a mocked `discover_chat_id`/
+  `send_test_message` (`test_cli_notify.py`). The underlying Telegram API
+  calls it wraps (`notify.setup`) are real and unit-tested against a faked
+  `urlopen`, and end-to-end delivery is confirmed working (the real
+  `cosmo-notify.service`, restarted this session onto the new build, has
+  been sending real messages since deviation 79 landed) — just not through
+  the wizard's own prompts yet, since this session's real config already
+  existed from before.
+- **A real `cosmo run resume` against a real circuit-breaker-tripped run**
+  was never exercised. The *quota*-paused case is now partially covered,
+  though by a different mechanism than `cosmo run resume`: a real
+  `quota_exhausted_5h` pause against `pomodoro-frontend-app` this session
+  auto-resumed **in-process** (`run.loop._handle_quota_pause_or_stop`
+  sleeps and resumes within the same still-running `cosmo run`, never
+  exiting) — confirmed for real, including the exact resume ETA computed
+  from the pause event's own `resume_delay_seconds` payload. `cosmo run
+  resume`, the separate CLI command that re-attaches to an already-`PAUSED`
+  run from a *fresh* process, is a distinct code path and remains
+  unexercised for both trigger conditions.
 - **A real `bypass_5h_with_credits=true` run** needs a real, deliberate
   5-hour quota exhaustion window to test against — real spend, real
   waiting, not something to force casually.
@@ -300,7 +374,7 @@ Real, honest gaps — not fixed this session, and not fixable casually:
 |---|---|---|
 | [v3-cosmo-autonomous-agent-spec.md](v3-cosmo-autonomous-agent-spec.md) | The authoritative specification | **Source of truth** for the original 0-10 plan. v1 and v2 are superseded — read them only for history |
 | [v3-implementation-plan.md](v3-implementation-plan.md) | 11-phase build plan | The map for Phase 10 (its own section, near the end). **Do not edit** — it's the agreed scope; record decisions in `v3-implementation-state.md` instead |
-| [v3-implementation-state.md](v3-implementation-state.md) | What actually exists, plus decisions and gotchas | Read the cumulative deviations table's entries **74-76** in full before doing anything — this session's own real findings, driving a real `cosmo run` against a second real target repo (`habits-frontend-app`) |
+| [v3-implementation-state.md](v3-implementation-state.md) | What actually exists, plus decisions and gotchas | Read the cumulative deviations table's entries **77-79** in full before doing anything — this session's own real findings |
 | [v4-changes-to-workflow-plan.md](v4-changes-to-workflow-plan.md) | The raw-spec-workflow feature design | Implemented — see its own Status line |
 | [v5-improvements-plan.md](v5-improvements-plan.md) | Crash/pause resume, Telegram notifications, `--follow`, live-terminal observability, the quota-bypass flag, harness failure-pattern research (§5) | Implemented, parts 1-4/6-7 plus part 5's Class 1 — see its own Status line |
 | [v6-project-template-aware-stuff-plan.md](v6-project-template-aware-stuff-plan.md) | Making the gate/failure-classifier project-template-aware, for stacks beyond Java+Spring/Vite+React | **Not started — design record only.** Needs a real second stack before it's buildable; the user is doing that testing themselves before this gets picked up again — don't start it opportunistically |
@@ -314,51 +388,57 @@ fully consumed.
 
 ```
 /home/dev/delta/cosmo/          # working branch: develop
-├── docs/                       # handoff.md + v3-implementation-state.md updated this session;
-│                                  no new plan doc added
-├── deploy/                     # unchanged this session
+├── docs/                       # handoff.md + v3-implementation-state.md updated this session
+├── deploy/                     # unchanged this session -- the *installed* cosmo-run.service
+│                                  unit was re-synced from deploy/cosmo-run.service by hand
+│                                  (StartLimitIntervalSec/Burst into [Unit]), no repo file changed
 ├── templates/
-│   └── harness/claude/skills/
-│       ├── spec-enrichment/SKILL.md       # unchanged -- still only promises task_id unique
-│       │                                     *within* a spec; deviation 74 fixes this at the
-│       │                                     insertion layer instead, deliberately (an
-│       │                                     enrichment-prompt convention isn't enforceable)
-│       └── openspec-workflow/SKILL.md     # unchanged -- still just says "short kebab-case
-│                                             name"; deviation 76 fixes the mismatch at the
-│                                             propose-prompt layer instead, same reasoning
+│   └── projects/vite-react-local/docs/testing.md   # E2E section gains the @playwright/test
+│                                                       1.49.0 pin + json reporter path rules (78)
 ├── src/cosmo/
-│   ├── checks.py, doctor.py, config/, bootstrap/, watchdog.py, retention.py, git/, gate/,
-│   │   spec/, run/, store/, events/                    # all unchanged this session
-│   ├── task/machine.py              # `_do_proposing` now threads `spec_id` into
-│   │                                    `adapter.propose(...)`'s context dict (76)
-│   ├── harness/claude/adapter.py     # `propose()` reads `context["spec_id"]` and pins the
-│   │                                    exact required `openspec new change` name into the
-│   │                                    prompt, falling back to `spec_path.stem` (76)
-│   └── cli/main.py                  # new `_namespace_batch` (74); `spec_queue` namespaces
-│                                        every id/`depends_on` edge before the cycle check and
-│                                        insert, and is now idempotent against its own prior
-│                                        partial runs (74); `_render_spec_preview` shows
-│                                        namespaced ids (74); `_print_emit` gains
-│                                        `TASK_VALIDATION_RESULT` in its allowlist plus a new
-│                                        `_validation_result_detail` (75)
-├── tests/                       # 524 passing (up from 514), 9 skipped
-│   ├── test_cli_spec.py             # 4 existing tests' assertions updated (they'd coincided
-│   │                                   with already-namespaced-looking ids by chance, not by
-│   │                                   any real rule); 3 new tests for deviation 74
-│   │                                   (cross-project reuse, external depends_on left bare,
-│   │                                   rerun-is-a-no-op)
-│   ├── test_cli.py                  # 2 new `_print_emit` tests for deviation 75 (passing
-│   │                                   and failing validation results)
-│   └── test_harness_claude_adapter.py  # 2 new `propose()` prompt tests for deviation 76
-│                                          (pinned name, and the fallback with no `spec_id`)
+│   ├── checks.py, doctor.py, bootstrap/, watchdog.py, retention.py, git/, gate/, spec/,
+│   │   run/, store/, task/, harness/                 # all unchanged this session
+│   ├── config/loader.py             # new `write_user_config_table` -- round-trips the user
+│   │                                    config file through tomllib/tomli_w, chmod 600 (79)
+│   ├── config/__init__.py           # exports write_user_config_table (79)
+│   ├── events/format.py             # new -- `event_detail(event)`, one human-readable-phrase
+│   │                                    builder per event type, shared by the terminal and
+│   │                                    Telegram (79)
+│   ├── events/__init__.py           # exports event_detail, WATCH_STALE_EVENT_TYPE (79)
+│   ├── notify/telegram.py           # `format_event` now uses `event_detail`, raw-payload
+│   │                                    fallback for unrecognized types, severity emoji (79)
+│   ├── notify/watch.py              # `_ALWAYS_NOTIFY_TYPES` gains `TASK_COMPLETED` (79)
+│   ├── notify/setup.py              # new -- `discover_chat_id`/`send_test_message`, real
+│   │                                    Telegram API calls that raise on failure (unlike
+│   │                                    `TelegramSink.send`'s best-effort posture) (79)
+│   ├── bootstrap/docs.py            # `copy_project_docs` mkdir's `docs/specs/`
+│   │                                    unconditionally (77)
+│   └── cli/main.py                  # `_print_emit` refactored onto `event_detail` (79); new
+│                                        `notify_config` command, the interactive wizard (79)
+├── tests/                       # 555 passing (up from 524), 9 skipped
+│   ├── test_bootstrap_docs.py       # 1 new test for deviation 77
+│   ├── test_events_format.py        # new, 12 tests -- `event_detail` directly, one per
+│   │                                   event type it recognizes plus the unrecognized-type
+│   │                                   fallback (79)
+│   ├── test_notify_telegram.py      # +2 tests -- the human-readable path, the raw-payload
+│   │                                   fallback (79)
+│   ├── test_notify_watch.py         # +1 test -- `TASK_COMPLETED` always-notify (79)
+│   ├── test_notify_setup.py         # new, 6 tests -- against a faked `urlopen` (79)
+│   ├── test_config.py               # +4 tests -- `write_user_config_table` (79)
+│   └── test_cli_notify.py           # +5 tests -- the wizard's full interactive flow (79)
 └── check.sh                     # ruff + format + mypy --strict + pytest -- all green
 ```
+
+**`pyproject.toml`/`uv.lock` also changed**: added `tomli-w` (deviation 79's
+config-file writer -- `tomllib` is read-only stdlib, this is its write-side
+complement, same convention as adding any other real dependency with `uv
+add` rather than hand-rolling a TOML serializer).
 
 ## Get oriented (2 minutes)
 
 ```bash
 cd /home/dev/delta/cosmo
-git log --oneline           # this session's deviations 74-76 commit should be at HEAD
+git log --oneline           # this session's deviation 79 commit should be at HEAD
 git branch --show-current   # should say develop
 ./check.sh                  # must be green before you change anything
 cosmo doctor                # core checks + harness checks in two tables
@@ -374,21 +454,21 @@ seeds one automatically. `gitleaks` is on PATH, `docker` works, and so is
 the real `openspec` CLI (`1.6.0` this session).
 
 **This host's WSL2 genuinely has systemd enabled** (real `systemctl --user`
-units, `systemd 259`). A `cosmo-run.service` user unit is still `enabled`
-(last real run: exited cleanly, `queue_empty`, against `todo-frontend-app`,
-4.5h before this session started — no active timer re-triggering it found
-this session, but it will start again on the next login/boot). Re-verified
-this session: `acquire_run_lock` is **one `cosmo run` at a time per
-`data_dir`, not per project** — a single lock file
-(`~/.local/share/cosmo/cosmo-run.lock`) shared by *every* target repo. Now
-that a second real project (`habits-frontend-app`) exists in this store,
-that service starting against `todo-frontend-app` at the wrong moment would
-refuse (or be refused by) a manual `cosmo run` against `habits-frontend-app`
-with `RunLockHeldError` — not a bug, just something to actually check
-(`systemctl --user status cosmo-run.service`) before assuming a lock
-conflict is anything else. `cosmo-notify.service` remains deliberately
-stopped and disabled (restart-loops forever without Telegram config, which
-this host doesn't have) — leave it disabled until real credentials exist.
+units, `systemd 259`). Both `cosmo-run.service` and `cosmo-notify.service`
+are `enabled`. As of this session's end: `cosmo-run.service` is `inactive`
+(its last real run finished `queue_empty` against `pomodoro-frontend-app`
+this session — nothing re-triggers it until the next login/boot or a manual
+`systemctl --user start`, there is no timer). `cosmo-notify.service` is
+`active (running)`, real Telegram credentials configured, restarted this
+session onto the deviation-79 build (new PID, confirmed clean in the
+journal). `acquire_run_lock` is **one `cosmo run` at a time per `data_dir`,
+not per project** — a single lock file
+(`~/.local/share/cosmo/cosmo-run.lock`) shared by *every* target repo; with
+three real projects now in this store, a `cosmo-run.service` auto-start
+against one at the wrong moment would refuse (or be refused by) a manual
+`cosmo run` against another with `RunLockHeldError` — check `systemctl
+--user status cosmo-run.service` before assuming a lock conflict is
+anything else.
 
 **One real environment gotcha remains from early phases**: **`npm install`
 can hang indefinitely on this host if a previous run was killed
@@ -404,6 +484,18 @@ explicitly (`env -u XDG_DATA_HOME -u COSMO_CONFIG cosmo ...`) rather than
 assuming the default env is already clean — verify which data path you're
 actually hitting before trusting what you see. Confirmed again this
 session, more than once.
+
+**New this session: `uv tool install` respects `XDG_DATA_HOME` too, not
+just `cosmo` itself.** Reinstalling the `cosmo` uv tool from this checkout
+with the sandboxed env still set silently installed it to
+`/tmp/cosmo-test/data/uv/tools/cosmo` instead of the real
+`~/.local/share/uv/tools/cosmo` the installed `cosmo-run.service`/
+`cosmo-notify.service` units actually invoke — no error, just the wrong
+target, caught by checking the installed binary's mtime before trusting the
+install had done anything real. `env -u XDG_DATA_HOME -u COSMO_CONFIG uv
+tool install --force <path>` is the reliable form; the same caution applies
+to any other `uv tool` invocation against the real installed tool, not just
+`cosmo` commands themselves.
 
 **Worth knowing before touching the real store or queueing new work:**
 
@@ -482,14 +574,12 @@ session, more than once.
 
 1. `./check.sh` green (if any code changed at all).
 2. Record any new deviation in the cumulative table (next number is **80**).
-3. If Phase 10's own acceptance run against `todo-frontend-app` is still
-   fully `done` and nothing regressed it, there is no more Phase 10
-   backlog left to reconcile — a fresh spec batch queued against it is new
-   work, not a continuation. `habits-frontend-app`'s `habit-tracker` batch
-   is a separate, real, still-in-flight run (4/9 tasks done, `use-habits-
-   hook` deliberately `blocked` pending a fresh `cosmo run`) — not this
-   repo's own backlog, but worth checking `cosmo queue ls`/`cosmo report`
-   against the real store if you want to know whether deviations 75-76
-   actually held up cleanly for its remaining 5 tasks.
+3. All three real target repos (`todo-frontend-app`, `habits-frontend-app`,
+   `pomodoro-frontend-app`) are fully `done` as of this session's end — 20
+   tasks total, zero `blocked`, confirmed against the real store. None of
+   that is this repo's own backlog; a fresh spec batch queued against any
+   of them is new work, not a continuation. Worth a quick `cosmo queue ls`
+   against the real store before trusting this if much time has passed —
+   state this specific can drift the moment anyone queues something new.
 4. Commit to `develop` with a message explaining *why*, in the style of the
    existing commit history.
