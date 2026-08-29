@@ -1,10 +1,93 @@
-# Handoff — the public user documentation set written (README + `user-docs/` + four root docs); no code changed this session
+# Handoff — AI co-author trailers stripped from the entire commit history (all 3 branches); no source code changed this session
 
 You are picking up Cosmo mid-build. **Phases 0-9, the v4 workflow-changes
 feature, the v5 improvements plan, Phase 10's own acceptance-run, v7 items
 1-3, and deviations 74-79 are all implemented, and all three real target
 repos are fully `done`** — see the prior-session sections below for that
 detail, unchanged.
+
+**This session's own work was a one-off repo-hygiene task, not a build
+session**, driven start-to-finish by a user-authored prompt at
+`docs/ignored/prompts/remove-ai-attribution.md` (not by any of the `vN`
+plans). Two-phase task, executed exactly as scoped, with an explicit
+verify-then-confirm gate between phases:
+
+**Phase 1 (read-only audit)**: scanned `git log --all` across every branch
+for real `Co-Authored-By:`/`Co-authored-by:` trailer lines — anchored at
+column 0, standard trailer syntax, not a substring grep (the repo has one
+commit, `00dce1ceba`, that *discusses* the trailer in a prose sentence
+without being one; the scan correctly didn't flag it, and correctly still
+flagged that same commit for the real trailer elsewhere in its body).
+Found **43 trailers total — 39 Claude (`noreply@anthropic.com`), 4 Cursor
+(`cursoragent@cursor.com`)** — spread across all three branches
+(`develop`: 39 reachable, `webapp`: 33 reachable including 4 Cursor-only
+ones from its own independent commits, `master`: 1, its root commit). No
+remote configured, no reflog/tracking-branch evidence of any prior push —
+user confirmed this repo has never been pushed. `git-filter-repo` was not
+yet installed.
+
+**Phase 2A (forward-looking fix), done**: added `~/.claude/CLAUDE.md`
+(user-level, global — didn't exist before) with the literal no-AI-trailer
+rule from the prompt, and this repo's own root `CLAUDE.md` (also new)
+pointing at `CONTRIBUTING.md`'s existing "Commits and AI attribution"
+section rather than duplicating its text — that section already documented
+the same policy in prose before this session.
+
+**Phase 2B (history rewrite), done**: `git-filter-repo` installed via `uv
+tool install git-filter-repo` (unset `XDG_DATA_HOME`/`COSMO_CONFIG` first —
+same gotcha as the `cosmo` tool itself, see the environment-gotchas section
+below). Before rewriting: found `webapp` was checked out in a **separate
+worktree** (`/home/dev/delta/cosmo-webapp`) — `git filter-repo` refuses to
+run with another worktree checked out, so it was removed (`git worktree
+remove`, worktree was clean; some gitignored `.venv`/`.mypy_cache`/
+`.ruff_cache` leftovers stayed on disk at the old path, harmless, not
+git-tracked). A message-callback (anchored-trailer removal, same regex as
+the Phase 1 scan, plus a `Generated with Claude Code`-style footer pattern
+per the prompt even though none were found) rewrote every commit's message
+across `develop`/`master`/`webapp` — **no tags exist, no file content
+touched, verified by re-running the Phase 1 scan against the new history:
+zero remaining matches**, plus a clean `git fsck --full`. Commit counts are
+unchanged per branch (44/1/40) — only hashes and messages changed.
+
+**One real mistake this session, disclosed to the user rather than glossed
+over**: three `backup-*` branches were created before the rewrite as a
+safety net, but `git filter-repo` processes *all* refs by default — the
+backups got rewritten too, and filter-repo's own cleanup (`reflog
+expire`+`gc --prune=now`) then pruned the original objects entirely
+(`git cat-file` on the old hashes now fails, `git fsck --unreachable` finds
+nothing). No actual content was lost — the callback only ever touched
+commit messages, trees/blobs are identical, and `.git/filter-repo/
+commit-map` still records every old-hash→new-hash pairing — but the
+`backup-*` branches themselves are **not real backups**: they currently
+point at the exact same commits as `develop`/`master`/`webapp`, so don't
+mistake their existence for a rollback path. **The user has their own
+directory-level copy of the whole project from before this session**,
+which is the actual backup of record; the mis-executed branches were left
+in place (not deleted) rather than have this session take another
+destructive action without being asked — worth deleting them (`git branch
+-D backup-before-ai-attribution-cleanup backup-master-before-ai-
+attribution-cleanup backup-webapp-before-ai-attribution-cleanup`) once
+confirmed no longer needed, since as they stand they're just confusing
+aliases.
+
+**Phase 2C (push) was explicitly declined by the user this session — not
+done, not attempted.** No remote is configured. If a remote gets added and
+a push is ever wanted, it needs `--force-with-lease` (not plain `--force`)
+and its own separate explicit confirmation, per the original prompt's own
+ground rules — that hasn't changed.
+
+One commit landed this session (root `CLAUDE.md`, on top of the rewritten
+history) — see `git log -1`.
+
+## What happened in the prior session (the public user documentation set: README + `user-docs/` + four root docs; no code changed)
+
+Kept as-is below for its own detail — the summary above already covers
+*this* session's own work (the AI-attribution audit and history rewrite).
+Note that **every commit hash referenced by name below has changed** as a
+result of this session's `git filter-repo` rewrite; treat hashes in the
+sections below as historical pointers to *what was true when written*, not
+as `git show`-able references any more — the subjects/content are
+unaffected and still accurate.
 
 **This session's own work was documentation-only, not code**, and it was
 *outward*-facing documentation for the first time: everything in `docs/`
@@ -496,7 +579,10 @@ and `uv.lock` are untouched.
 
 ```bash
 cd /home/dev/delta/cosmo
-git log --oneline           # this session's deviation 79 commit should be at HEAD
+git log --oneline           # this session's "Add root CLAUDE.md..." commit should be at HEAD --
+                             # note the AI-attribution-removal session rewrote every commit hash
+                             # via git filter-repo, so don't expect hashes quoted in older parts
+                             # of this document to `git show` any more
 git branch --show-current   # should say develop
 ./check.sh                  # must be green before you change anything
 cosmo doctor                # core checks + harness checks in two tables
