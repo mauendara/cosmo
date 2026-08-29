@@ -82,6 +82,22 @@ superseded/consumed.
   than assuming the ambient env is clean. `uv tool install` respects
   `XDG_DATA_HOME` too — a sandboxed env silently installs the `cosmo` tool
   to the wrong prefix with no error; check the installed binary's mtime.
+- **The installed `cosmo` tool must be an editable install** (`uv tool
+  install --editable .`, per `README.md`/`CONTRIBUTING.md`) — `templates/`
+  lives at the repo root, not inside the package, and `bootstrap.discover.
+  templates_root()` finds it by walking up from `cosmo.__file__`, which only
+  lands back in the real checkout when the install is editable. Found for
+  real 2026-08-29: at some point (likely release-prep packaging/testing on
+  2026-08-28) the real installed tool had silently become a plain, non-
+  editable `uv tool install .` copy into `site-packages` — invisible for a
+  while because every task in flight was reusing an already-created
+  worktree (`create_worktree`/`sync_harness_assets` only runs for a *new*
+  worktree), until a crash-recovery requeue cleared a task's
+  `worktree_path` and the next `cosmo run` needed a fresh one, hitting
+  `TemplatesRootNotFoundError` immediately. Fix is `uv tool install
+  --editable --force --reinstall .`; verify with `cosmo templates list`
+  (should list real harnesses/project templates, not error) rather than
+  trusting `cosmo doctor` alone (it doesn't check this).
 - **`npm install` can hang indefinitely** if a previous run was killed
   mid-install — fix is a verified-clean `rm -rf node_modules
   package-lock.json` first, not waiting longer.
