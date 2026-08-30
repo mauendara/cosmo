@@ -1,0 +1,168 @@
+# Cosmo shipped defaults.
+#
+# Every value here is a spec default from docs/v3-cosmo-autonomous-agent-spec.md.
+# Override per host with a user config file (see `cosmo config show --paths`).
+#
+# The section marked (harness) is the ONLY place in Cosmo's core that names a
+# specific harness. Core code must never hardcode one; see spec section 2.
+
+[harness]
+# (harness) Resolution order: --harness flag > project registration > this default.
+name = "claude"
+# Spec 2.3: dontAsk fails closed and fails loud. Never bypassPermissions.
+permission_mode = "dontAsk"
+max_turns = 80
+# Not a spec value -- pinned so a run's model doesn't silently drift with
+# whatever the host's `claude` CLI happens to default to.
+model = "claude-sonnet-5"
+
+[timeouts]
+# Spec 3.3. All seconds. Anchored to an observed 5-15 min validation gate;
+# retune empirically once p95 gate data exists (Open Item 2).
+proposing_wall = 900
+implementing_wall = 5400
+implementing_stall = 1200
+validating_wall = 2700
+validating_stall = 600
+# v4 workflow changes: REVIEWING's own wall clock -- one bounded fresh-session
+# harness call, anchored to the same rough order of magnitude as proposing_wall.
+reviewing_wall = 900
+committing_wall = 300
+merging_wall = 300
+run_wall = 36000
+# Spec 2.4 step 3: SIGTERM -> grace -> SIGKILL on the process group.
+kill_grace = 20
+
+[retries]
+# Spec 6.3.
+max_attempts = 2
+delay_min = 30
+delay_max = 60
+# `queue retry` refuses (reports instead) once the task's most recent
+# terminal block matches this many *prior* terminal blocks for the same
+# reason -- see RetryConfig.repeat_block_threshold's own comment.
+repeat_block_threshold = 2
+
+[circuit_breaker]
+# Spec 6.5. merge_conflict and flaky are excluded from the tally.
+consecutive_blocked_threshold = 3
+environment_error_threshold = 3
+# A leaked process pool poisons every later task, so it trips the breaker fast.
+reap_failure_weight = 2
+
+[cost]
+# Spec 7.3. Inert for a subscription-billed harness; null disables the hard stop.
+max_cost_per_run_usd = 0.0
+max_cost_per_task_usd = 0.0
+warn_at_fraction = 0.8
+
+[gate]
+# Spec 1.1. Version pinning is atomic: these bump together, never "latest".
+playwright_image = "mcr.microsoft.com/playwright:v1.49.0-noble"
+playwright_npm_version = "1.49.0"
+shm_size = "2gb"
+ipc_host = true
+
+# Spec 1: the fixed target stack. backend_dir/frontend_dir are relative to
+# the task worktree root.
+backend_image = "maven:3.9.9-eclipse-temurin-21"
+backend_dir = "backend"
+frontend_image = "node:24.19-bookworm"
+frontend_dir = "frontend"
+
+stage_timeout_seconds = 1800
+
+# Spec 6.1 layer 2. Patterns are matched with Path.match against the diff's
+# changed paths; annotations are matched as a plain substring per changed line.
+diff_gate_test_path_patterns = [
+    "**/src/test/**",
+    "**/*.test.*",
+    "**/*.spec.*",
+    "**/e2e/**",
+]
+diff_gate_skip_annotations = [
+    "@Disabled",
+    "@Ignore",
+    ".skip(",
+    ".only(",
+    "xit(",
+    "xdescribe(",
+    "test.skip(",
+    "describe.skip(",
+]
+diff_gate_loc_drop_threshold = 20
+
+# Spec 6.4.
+flaky_rerun_limit = 3
+flaky_quarantine_candidate_threshold = 3
+
+error_detail_max_chars = 4000
+
+[knowledge]
+# Spec 11: exceeding the cap fails COMMITTING. Compaction is never automated.
+max_file_lines = 400
+
+[review]
+# v4 workflow changes: a fresh-session adversarial review between VALIDATING
+# and COMMITTING. A project can turn this off; the retry budget it uses is
+# retries.max_attempts, not a separate ceiling.
+enabled = true
+
+[progress]
+# Spec 4: "polling fallback at 5-10s". Also used as the native-progress poll
+# interval (see ProgressConfig docstring) -- there is no separate "primary"
+# interval since Phase 7 has no live stream-event callback to poll instead
+# (docs/v3-implementation-state.md's Phase 7 section explains why).
+poll_interval_seconds = 7
+
+[quota]
+# Spec 7.1/7.2. Primary detection is the stream-json rate-limit signal
+# (harness.claude.stream.extract_quota_signal); this section only configures
+# the secondary and tertiary fallbacks.
+# Secondary: terminal `result` error subtypes that mean "quota exhausted".
+# Unverified against a real capture -- see QuotaConfig's docstring.
+result_error_subtypes = ["error_rate_limit"]
+# Tertiary (wall-clock heuristic, severity=warning, never confirmed):
+# this many consecutive distinct tasks failing near-instantly with zero
+# tool calls is treated as a probable (not confirmed) quota exhaustion.
+heuristic_consecutive_threshold = 3
+heuristic_max_duration_seconds = 5.0
+# Fallback resume delay when a confirmed 5-hour-window signal carries no
+# resets_at ETA (the system/api_retry shape never does -- see stream.py).
+default_5h_resume_delay_seconds = 18000
+
+# v5 improvements plan part 7. Off by default; requires cost.
+# max_cost_per_run_usd > 0 (validated at config-load time) when enabled.
+bypass_5h_with_credits = false
+
+[notify]
+# v5 improvements plan part 3. Off by default; set telegram_bot_token/
+# telegram_chat_id in a user config file to actually enable delivery.
+enabled = false
+min_severity = "warning"
+stale_after_seconds = 1800
+
+[disk]
+# Spec 9.5: a full disk fails every later task in a way that reads as a code error.
+min_free_gb = 10.0
+
+[log_retention]
+# Spec 9.5: raw_log_path rotation, keyed off a task's terminal status.
+done_days = 7
+blocked_days = 30
+
+[git]
+# The TARGET repo's integration branch (spec 3.2). Merging to master is manual
+# and out of scope. Unrelated to Cosmo's own repo branch.
+base_branch = "develop"
+# Spec 3.4: identity for merge/rebase commits Cosmo creates itself. Not a
+# real person -- these commits are machine-authored integration steps. Also
+# `cosmo init`'s default local git identity for a target repo that has none
+# configured at all yet (see bootstrap.git_identity).
+commit_author_name = "Cosmo"
+commit_author_email = "cosmo@entropiainversa.com"
+# False: Cosmo's own commits use commit_author_name/email above, distinct
+# from the target repo's own git identity. True: Cosmo's own commits use no
+# explicit identity override at all and inherit the repo's local git config
+# instead -- one identity for every commit, not two.
+unified_identity = false

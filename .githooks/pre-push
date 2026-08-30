@@ -1,0 +1,40 @@
+#!/bin/sh
+# Refuses to push the `private` branch to the public origin.
+#
+# Matches on the resolved push URL ($2, which git itself has already
+# resolved for this push — not the remote's configured name), compared
+# against whatever `origin` currently resolves to. That means this can't be
+# bypassed by renaming a remote, or by pushing straight to origin's URL
+# without going through a remote named "origin" at all.
+#
+# If `origin` isn't configured yet, or the branch being pushed isn't
+# `private`, there's nothing to check and the push proceeds.
+
+remote_url="$2"
+
+normalize() {
+    printf '%s' "$1" | sed -e 's#/*$##' -e 's#\.git$##'
+}
+
+pushing_private=0
+while read -r local_ref _local_sha _remote_ref _remote_sha; do
+    if [ "$local_ref" = "refs/heads/private" ]; then
+        pushing_private=1
+    fi
+done
+
+if [ "$pushing_private" -ne 1 ]; then
+    exit 0
+fi
+
+origin_url=$(git remote get-url origin 2>/dev/null) || exit 0
+
+if [ "$(normalize "$remote_url")" = "$(normalize "$origin_url")" ]; then
+    echo "error: refusing to push 'private' to the public origin ($remote_url)" >&2
+    echo "       'private' must never reach the public remote directly." >&2
+    echo "       See CONTRIBUTING.md's branching-model section for the" >&2
+    echo "       private -> develop workflow." >&2
+    exit 1
+fi
+
+exit 0

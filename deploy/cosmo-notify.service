@@ -1,0 +1,33 @@
+[Unit]
+Description=Cosmo notification watcher (v5 improvements plan part 3)
+# Deliberately no ordering dependency on cosmo-run.service: this unit's own
+# value is watching for the *absence* of activity, including the case
+# where cosmo-run.service itself never started or died before writing
+# anything -- it must be able to run (and alert) independently.
+After=network-online.target
+Wants=network-online.target
+# Found live (real `systemctl --user` install, this session): systemd 259
+# rejects these two under `[Service]` outright ("Unknown key ... ignoring"
+# in the journal) -- they belong here, in `[Unit]`.
+StartLimitIntervalSec=3600
+StartLimitBurst=20
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/cosmo
+Environment=COSMO_CONFIG=/etc/cosmo/config.toml
+ExecStart=/opt/cosmo/.venv/bin/cosmo notify watch
+
+# Unlike cosmo-run.service, there is no PAUSED/STOPPED state here worth
+# distinguishing -- this loop has nothing to preserve across a restart
+# (`notify.watch.run_watch_loop`'s own `WatchState` starts fresh from
+# `latest_event_rowid`, so a restart at worst re-establishes its own
+# staleness baseline, never double-sends a past notification). Restart
+# unconditionally.
+Restart=always
+RestartSec=15
+# The actual rate-limit directives now live in `[Unit]` above (see that
+# comment) -- systemd rejects them here.
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,26 @@
+# OpenAPI 3.x. This is the source of truth for the API surface -- a change
+# to a request/response shape belongs here in the same commit as the code
+# change, not as a follow-up. Frontend and backend both read this file
+# rather than each other's source when they disagree about a contract.
+openapi: 3.0.3
+info:
+  title: "TODO: project name"
+  version: "0.0.1"
+servers:
+  - url: /api
+paths: {}
+components:
+  schemas:
+    Error:
+      type: object
+      required: [status, error, message, path]
+      properties:
+        status:
+          type: integer
+        error:
+          type: string
+          description: Stable machine-readable error code (snake_case).
+        message:
+          type: string
+        path:
+          type: string

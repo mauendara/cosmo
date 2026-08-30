@@ -1,0 +1,323 @@
+"""Typed configuration model.
+
+Every tunable the spec argues about lives here, in one validated place. The spec
+states outright that several values are estimates to be retuned against real data
+(section 3.3, Open Item 2); scattered constants make that a hunt, one model makes
+it an edit. Invalid values fail at startup rather than at 3am mid-run.
+
+This module is harness-agnostic. `HarnessConfig.name` is a plain string resolved
+from configuration -- core code must never branch on its value.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from cosmo.store.enums import Severity
+
+
+class _Strict(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+
+class HarnessConfig(_Strict):
+    name: str = Field(min_length=1)
+    permission_mode: str = Field(min_length=1)
+    max_turns: int = Field(gt=0)
+    model: str = Field(min_length=1)
+
+
+class TimeoutConfig(_Strict):
+    proposing_wall: int = Field(gt=0)
+    implementing_wall: int = Field(gt=0)
+    implementing_stall: int = Field(gt=0)
+    validating_wall: int = Field(gt=0)
+    validating_stall: int = Field(gt=0)
+    reviewing_wall: int = Field(gt=0)
+    """v4 workflow changes: `REVIEWING`'s own wall clock. No stall variant
+    -- like `proposing_wall`, this is one bounded harness call, not a
+    multi-turn session with a liveness watcher to stall-check."""
+    committing_wall: int = Field(gt=0)
+    merging_wall: int = Field(gt=0)
+    run_wall: int = Field(gt=0)
+    kill_grace: int = Field(gt=0)
+
+    @model_validator(mode="after")
+    def _stall_below_wall(self) -> TimeoutConfig:
+        # A stall timer that outlives its wall clock can never fire, silently
+        # disabling the only protection against a hung harness (spec 3.3).
+        for stall, wall, state in (
+            (self.implementing_stall, self.implementing_wall, "implementing"),
+            (self.validating_stall, self.validating_wall, "validating"),
+        ):
+            if stall >= wall:
+                raise ValueError(
+                    f"timeouts.{state}_stall ({stall}s) must be less than "
+                    f"timeouts.{state}_wall ({wall}s), or it can never fire"
+                )
+        return self
+
+
+class RetryConfig(_Strict):
+    max_attempts: int = Field(gt=0)
+    delay_min: int = Field(ge=0)
+    delay_max: int = Field(ge=0)
+    # A task's own `max_attempts` budget resets to 0 on every `queue retry`
+    # regardless of *why* it blocked -- nothing otherwise remembers that the
+    # same task has already blocked for the identical reason across earlier
+    # runs. `store.failure_signature.detect_repeat_block` compares the most
+    # recent terminal block's class key against this many prior ones; a
+    # `queue retry` refuses (report, not another silent 2-attempt budget)
+    # once it's exceeded, requiring `--force` to proceed anyway. Real
+    # evidence for the default: a real acceptance-run task blocked on the
+    # identical `error_max_turns` reason 3 separate times before this
+    # existed, each time silently handed 2 more attempts.
+    repeat_block_threshold: int = Field(gt=0)
+
+    @model_validator(mode="after")
+    def _delay_ordered(self) -> RetryConfig:
+        if self.delay_min > self.delay_max:
+            raise ValueError(
+                f"retries.delay_min ({self.delay_min}s) exceeds "
+                f"retries.delay_max ({self.delay_max}s)"
+            )
+        return self
+
+
+class CircuitBreakerConfig(_Strict):
+    consecutive_blocked_threshold: int = Field(gt=0)
+    environment_error_threshold: int = Field(gt=0)
+    reap_failure_weight: int = Field(gt=0)
+
+
+class CostConfig(_Strict):
+    """Spec 7.3. A ceiling of 0.0 means "no hard stop" -- the posture for a
+    subscription-billed harness, where section 7.1 usage windows govern instead."""
+
+    max_cost_per_run_usd: float = Field(ge=0.0)
+    max_cost_per_task_usd: float = Field(ge=0.0)
+    warn_at_fraction: float = Field(gt=0.0, le=1.0)
+
+    @property
+    def run_limit_enabled(self) -> bool:
+        return self.max_cost_per_run_usd > 0.0
+
+    @property
+    def task_limit_enabled(self) -> bool:
+        return self.max_cost_per_task_usd > 0.0
+
+
+class GateConfig(_Strict):
+    playwright_image: str = Field(min_length=1)
+    playwright_npm_version: str = Field(min_length=1)
+    shm_size: str = Field(min_length=1)
+    ipc_host: bool
+
+    # Spec 1's fixed target stack (Java+Spring backend, Vite+React frontend,
+    # monorepo) -- build/unit-test images for the two sides of every repo
+    # Cosmo operates on. Only the playwright image gets spec 1.1's explicit
+    # "never latest" validator below; these two are pinned in defaults.toml
+    # by the same discipline but the spec doesn't name them, so a bad
+    # override here is a config mistake, not a guardrail violation.
+    backend_image: str = Field(min_length=1)
+    backend_dir: str = Field(min_length=1)
+    frontend_image: str = Field(min_length=1)
+    frontend_dir: str = Field(min_length=1)
+
+    # Spec 1.2: one docker-run budget per serial stage (build, unit, e2e).
+    # Not the same as timeouts.validating_wall (that's the whole-task clock
+    # Phase 7 owns) -- this is what keeps a single hung container from
+    # blocking `cosmo validate` forever when nothing else is watching it.
+    stage_timeout_seconds: int = Field(gt=0)
+
+    # Spec 6.1 layer 2 (diff gate / test-integrity detection).
+    diff_gate_test_path_patterns: list[str] = Field(min_length=1)
+    diff_gate_skip_annotations: list[str] = Field(min_length=1)
+    diff_gate_loc_drop_threshold: int = Field(gt=0)
+
+    # Spec 6.4 (flaky handling).
+    flaky_rerun_limit: int = Field(gt=0)
+    flaky_quarantine_candidate_threshold: int = Field(gt=0)
+    # None means "use the file shipped in Cosmo's own package" (gate/data/),
+    # the same "computed unless overridden" posture PathsConfig takes with
+    # XDG paths -- tests point these at a tmp_path copy instead.
+    quarantine_file: Path | None = None
+    quarantine_candidates_file: Path | None = None
+
+    # Spec 9.3: error_detail must be model-consumable, not archival.
+    error_detail_max_chars: int = Field(gt=0)
+
+    @model_validator(mode="after")
+    def _no_floating_tags(self) -> GateConfig:
+        # Spec 1.1: a silent upstream update turns a green suite red overnight,
+        # surfacing as a phantom regression the agent will try to "fix".
+        if self.playwright_image.endswith(":latest") or ":" not in self.playwright_image:
+            raise ValueError(
+                f"gate.playwright_image must be pinned to an explicit tag, "
+                f"got {self.playwright_image!r}"
+            )
+        return self
+
+
+class KnowledgeConfig(_Strict):
+    max_file_lines: int = Field(gt=0)
+
+
+class ProgressConfig(_Strict):
+    """Spec 4: `watchdog`/inotify on the change's `tasks.md`, polling
+    fallback at 5-10s. `poll_interval_seconds` is that fallback interval --
+    also the only interval used at all when the harness adapter reports
+    native progress instead of a file to watch (`HarnessCapabilities.
+    reports_native_progress`), since there is nothing to inotify-watch in
+    that case."""
+
+    poll_interval_seconds: int = Field(gt=0)
+
+
+class QuotaConfig(_Strict):
+    """Spec 7.1/7.2. Detection order: a harness's primary structured
+    rate-limit signal (`HarnessResult.quota_window`, e.g. the Claude
+    adapter's `harness.claude.stream.extract_quota_signal`), the terminal
+    result's error subtype (secondary), then a wall-clock heuristic (last
+    resort, must never be reported as confirmed).
+
+    `result_error_subtypes` has no real captured value behind it yet -- no
+    real `claude -p` run in this project has ever actually exhausted a quota
+    window (see `docs/v3-implementation-state.md`'s Phase 8 section). It is
+    configurable specifically so it can be corrected the day a real one is
+    captured, the same posture the spec's own timeout defaults take pending
+    real p95 data (Open Item 2)."""
+
+    result_error_subtypes: list[str] = Field(min_length=1)
+    heuristic_consecutive_threshold: int = Field(gt=0)
+    heuristic_max_duration_seconds: float = Field(gt=0.0)
+    default_5h_resume_delay_seconds: int = Field(gt=0)
+
+    bypass_5h_with_credits: bool = False
+    """v5 improvements plan part 7. Off by default -- an explicit opt-in for
+    an account whose usage credits keep calls succeeding past the 5-hour
+    subscription window. `CosmoConfig`'s own validator refuses to load when
+    this is `True` but `cost.max_cost_per_run_usd` is left at its
+    no-hard-stop default of `0.0` -- the bypass must not exist without the
+    spend ceiling it recreates the need for."""
+
+
+class ReviewConfig(_Strict):
+    """v4 workflow changes (`docs/v4-changes-to-workflow-plan.md`): the
+    `REVIEWING` state's own config. `enabled=False` skips `REVIEWING`
+    entirely -- a project can opt out. The retry budget is deliberately
+    `retries.max_attempts` itself, not a separate ceiling (the plan's own
+    decision: "a failed adversarial review retries like a gate failure")."""
+
+    enabled: bool
+
+
+class DiskConfig(_Strict):
+    min_free_gb: float = Field(gt=0.0)
+
+
+class LogRetentionConfig(_Strict):
+    """Spec 9.5: per-task `raw_log_path` rotation, keyed off the task's
+    terminal status -- a `DONE` task's harness logs are worth less, for
+    less time, than a `BLOCKED` one's (still under investigation)."""
+
+    done_days: int = Field(gt=0)
+    blocked_days: int = Field(gt=0)
+
+
+class GitConfig(_Strict):
+    base_branch: str = Field(min_length=1)
+    # Identity for commits Cosmo creates itself (merge commits, rebase
+    # replays, the COMMITTING step's decisions-log entry) -- spec 3.4's merge
+    # ladder needs one regardless of whether this host has a global git
+    # identity configured (it may not; Phase 5 found this by hand). Passed as
+    # `-c user.name=...`/`-c user.email=...` per invocation, never written to
+    # global git config. Also `cosmo init`'s default for the target repo's
+    # own *local* git config when no identity (local or global) already
+    # exists there -- see `bootstrap.git_identity` -- so the implementer's
+    # own ad hoc commits during IMPLEMENTING never fail for lack of one
+    # either.
+    commit_author_name: str = Field(min_length=1)
+    commit_author_email: str = Field(min_length=1)
+    # When True, Cosmo's own bookkeeping commits (merge ladder, decisions-log)
+    # are made with no `-c user.name=...`/`-c user.email=...` override at
+    # all, so they inherit whatever git identity is configured locally in the
+    # target repo -- the same one the implementer's own commits already use.
+    # One identity for every commit in the repo, not two. When False
+    # (default), Cosmo's own commits keep using commit_author_name/
+    # commit_author_email as a distinct, visibly synthetic identity, separate
+    # from whoever/whatever authors the actual application-code commits.
+    unified_identity: bool
+
+
+class NotifyConfig(_Strict):
+    """v5 improvements plan part 3. `enabled=False` is a silent no-op --
+    `cosmo notify watch` refuses to start with a clear error instead of
+    running uselessly (see `cli.main.notify_watch`). Delivery lives in its
+    own always-on process (`cosmo notify watch`, `deploy/cosmo-notify.
+    service`), never inline in the run-loop process -- see the plan's own
+    "delivery must not live inside the run-loop process" note: a crash of
+    the run loop itself must still be reported, which is impossible if
+    whatever would report it dies with it."""
+
+    enabled: bool = False
+    telegram_bot_token: str | None = None
+    telegram_chat_id: str | None = None
+    min_severity: Severity = Severity.WARNING
+    stale_after_seconds: int = Field(gt=0, default=1800)
+    """No new run-level activity in this long, with the run not yet in a
+    terminal `run_state` status, is itself treated as a crash signal --
+    chosen against the real cadence of `task.heartbeat` rows (tied to
+    `progress.poll_interval_seconds`), which land far more often than this
+    whenever a task is genuinely active."""
+
+
+class PathsConfig(_Strict):
+    """Where Cosmo keeps its own state.
+
+    Defaults follow the XDG layout so a developer box needs no root. A droplet
+    overrides these to /var/cosmo via its config file (spec 3.2 writes
+    /var/cosmo/work); same code, different config per host.
+    """
+
+    data_dir: Path
+    work_dir: Path
+    log_dir: Path
+
+    @property
+    def db_path(self) -> Path:
+        return self.data_dir / "cosmo.db"
+
+
+class CosmoConfig(_Strict):
+    harness: HarnessConfig
+    timeouts: TimeoutConfig
+    retries: RetryConfig
+    circuit_breaker: CircuitBreakerConfig
+    cost: CostConfig
+    gate: GateConfig
+    knowledge: KnowledgeConfig
+    review: ReviewConfig
+    progress: ProgressConfig
+    quota: QuotaConfig
+    disk: DiskConfig
+    log_retention: LogRetentionConfig
+    git: GitConfig
+    notify: NotifyConfig
+    paths: PathsConfig
+
+    @model_validator(mode="after")
+    def _bypass_requires_a_spend_ceiling(self) -> CosmoConfig:
+        # v5 improvements plan part 7 (decision 7): don't ship the risky
+        # half (bypassing a confirmed quota pause) without its own backstop
+        # turned on -- same instinct part 3 already applied to keeping
+        # Telegram delivery out of the crash-prone run process.
+        if self.quota.bypass_5h_with_credits and not self.cost.run_limit_enabled:
+            raise ValueError(
+                "quota.bypass_5h_with_credits requires a non-zero "
+                "cost.max_cost_per_run_usd -- refusing to start without the "
+                "spend ceiling the bypass recreates the need for"
+            )
+        return self

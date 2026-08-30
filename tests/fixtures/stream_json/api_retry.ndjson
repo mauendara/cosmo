@@ -1,0 +1,4 @@
+{"type":"system","subtype":"init","cwd":"/tmp","session_id":"retry-session"}
+{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1787631600,"rateLimitType":"five_hour"},"session_id":"retry-session"}
+{"type":"system","subtype":"api_retry","retry_after_ms":30000,"session_id":"retry-session"}
+{"type":"result","subtype":"success","is_error":false,"duration_ms":2000,"num_turns":1,"result":"ok","session_id":"retry-session","total_cost_usd":0.02}

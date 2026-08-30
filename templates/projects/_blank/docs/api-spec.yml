@@ -1,0 +1,10 @@
+# Schema-only template (Cosmo `_blank`).
+#
+# Populate as a real OpenAPI 3.x document once the API surface exists.
+# Keep this file as the single source of truth for request/response shapes
+# rather than letting it drift from the actual handlers.
+openapi: 3.0.3
+info:
+  title: "TODO: project name"
+  version: "0.0.0"
+paths: {}

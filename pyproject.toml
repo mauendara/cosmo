@@ -1,0 +1,47 @@
+[project]
+name = "cosmo"
+version = "0.1.1"
+description = "Autonomous spec-driven software development agent"
+license = "Apache-2.0"
+requires-python = ">=3.12"
+dependencies = [
+    "typer>=0.15",
+    "pydantic>=2.10",
+    "rich>=13.9",
+    "watchdog>=6.0",
+    "pyyaml>=6.0.3",
+    "tomli-w>=1.2.0",
+]
+
+[project.scripts]
+cosmo = "cosmo.cli.main:app"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "ruff>=0.9",
+    "mypy>=1.14",
+    "types-pyyaml>=6.0.12.20260815",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cosmo"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["src/cosmo", "tests"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
