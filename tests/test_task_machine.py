@@ -23,7 +23,7 @@ from cosmo.harness.fake import FakeHarnessAdapter, FakeOutcome, ScriptedCall
 from cosmo.store import StoreWriter
 from cosmo.store.enums import FailureStage, FailureType, TaskStatus
 from cosmo.store.reader import get_task, list_events
-from cosmo.task.machine import _git_commit_decisions_log, run_task
+from cosmo.task.machine import _git_commit_decisions_log, _git_commit_uncommitted_specs, run_task
 from cosmo.task.types import TaskContext
 
 NO_USER_CONFIG = Path("/nonexistent/config.toml")
@@ -158,6 +158,53 @@ def test_happy_path_reaches_done_with_a_complete_event_trail(tmp_path: Path) -> 
         }
         assert "task.validation_result" in event_types
         assert "task.completed" in event_types
+    finally:
+        writer.close()
+
+
+def test_uncommitted_docs_specs_no_longer_blocks_the_merge(tmp_path: Path) -> None:
+    """Regression, reported live: `cosmo spec add`/`spec queue` write
+    `docs/specs/**` straight into `repo_path` (Cosmo's own `base_branch`
+    checkout) without ever committing it -- exactly what `spec add`
+    populated for this task sat there uncommitted, so `git.merge.
+    _assert_ready` refused the merge with "has uncommitted changes -- refusing
+    to merge". `_do_merging` now commits `docs/specs` in its own commit right
+    before attempting the merge, so the task reaches DONE and that content
+    ends up committed on `base_branch`, separate from the merge commit."""
+    cfg, repo, writer, emitter, ctx = _setup(tmp_path)
+    (repo / "docs" / "specs").mkdir(parents=True)
+    (repo / "docs" / "specs" / "add-foo-spec.md").write_text("# add-foo\n")
+    adapter = FakeHarnessAdapter(
+        cfg, cwd=ctx.worktree_path, script=ScriptedCall(FakeOutcome.SUCCESS)
+    )
+    gate = FakeGate(ScriptedGateResult(passed=True))
+
+    try:
+        status = run_task(
+            ctx=ctx,
+            config=cfg,
+            writer=writer,
+            emitter=emitter,
+            adapter=adapter,
+            repo_path=repo,
+            gate_runner=_gate_runner(gate),
+        )
+
+        assert status is TaskStatus.DONE
+        status_check = subprocess.run(
+            ["git", "-C", str(repo), "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        assert status_check.stdout.strip() == ""
+        log = subprocess.run(
+            ["git", "-C", str(repo), "log", "--format=%s"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        assert "cosmo: commit docs/specs" in log.stdout.splitlines()
     finally:
         writer.close()
 
@@ -477,3 +524,74 @@ def test_git_commit_decisions_log_uses_local_identity_when_unified(tmp_path: Pat
     _git_commit_decisions_log(repo, cfg)
 
     assert _decisions_log_commit_author(repo) == "Local Dev <local@example.com>"
+
+
+def _last_commit_message(repo: Path) -> str:
+    log = subprocess.run(
+        ["git", "-C", str(repo), "log", "-1", "--format=%s"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return log.stdout.strip()
+
+
+def _commit_count(repo: Path) -> int:
+    log = subprocess.run(
+        ["git", "-C", str(repo), "rev-list", "--count", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return int(log.stdout.strip())
+
+
+def test_git_commit_uncommitted_specs_commits_new_spec_content(tmp_path: Path) -> None:
+    """Regression: `cosmo spec add`/`spec queue` write `docs/specs/**`
+    directly into `repo_path` and never commit it, which then made
+    `git.merge._assert_ready` refuse to merge with "has uncommitted changes"
+    -- confirmed live against a real run."""
+    repo = _repo_with_local_identity(tmp_path)
+    (repo / "docs" / "specs").mkdir()
+    (repo / "docs" / "specs" / "add-foo-spec.md").write_text("# add-foo\n")
+    cfg = _fast_config(tmp_path)
+
+    _git_commit_uncommitted_specs(repo, cfg)
+
+    assert _last_commit_message(repo) == "cosmo: commit docs/specs"
+    status = subprocess.run(
+        ["git", "-C", str(repo), "status", "--porcelain", "--", "docs/specs"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert status.stdout.strip() == ""
+
+
+def test_git_commit_uncommitted_specs_is_a_noop_with_nothing_to_commit(tmp_path: Path) -> None:
+    repo = _repo_with_local_identity(tmp_path)
+    (repo / "docs" / "specs").mkdir()
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "commit", "-q", "-m", "base"], check=True, capture_output=True
+    )
+    cfg = _fast_config(tmp_path)
+    before = _commit_count(repo)
+
+    _git_commit_uncommitted_specs(repo, cfg)
+
+    assert _commit_count(repo) == before
+
+
+def test_git_commit_uncommitted_specs_is_a_noop_when_docs_specs_is_absent(tmp_path: Path) -> None:
+    repo = _repo_with_local_identity(tmp_path)
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "commit", "-q", "-m", "base"], check=True, capture_output=True
+    )
+    cfg = _fast_config(tmp_path)
+    before = _commit_count(repo)
+
+    _git_commit_uncommitted_specs(repo, cfg)
+
+    assert _commit_count(repo) == before

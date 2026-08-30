@@ -1,5 +1,5 @@
 # Cosmo runtime state — never versioned
-data/
+/data/
 work/
 logs/
 

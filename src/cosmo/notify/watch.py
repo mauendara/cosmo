@@ -34,14 +34,25 @@ _SEVERITY_ORDER = {"info": 0, "warning": 1, "error": 2, "critical": 3}
 _ALWAYS_NOTIFY_TYPES = frozenset(
     {EventType.RUN_SUMMARY.value, EventType.RUN_STOPPED.value, EventType.TASK_COMPLETED.value}
 )
+_NEVER_NOTIFY_TYPES = frozenset({EventType.TASK_HEARTBEAT.value})
+"""`task.heartbeat` rows land every `progress.poll_interval_seconds` while a
+task is active (see `NotifyConfig.stale_after_seconds`'s own docstring) --
+a liveness signal for the staleness check below, never something worth a
+phone notification on its own. Excluded regardless of `min_severity`
+(unlike everything else, which `info` can let through) since it is always
+`severity=info` and a user who sets `min_severity="info"` for other event
+types has no other way to escape being paged on every single poll tick."""
 
 
 def _should_notify(row: EventRow, min_severity: Severity) -> bool:
     """`RUN_SUMMARY`/`RUN_STOPPED`/`TASK_COMPLETED` are always notification-
     worthy even though they're emitted at `severity=info` (a run ending, or
     a task finishing, matters regardless of the configured threshold);
-    everything else is gated on `min_severity` (part 3's `[notify]` config,
-    `WARNING`+ by default)."""
+    `TASK_HEARTBEAT` is the opposite case, never notification-worthy
+    regardless of severity; everything else is gated on `min_severity`
+    (part 3's `[notify]` config, `WARNING`+ by default)."""
+    if row.event_type in _NEVER_NOTIFY_TYPES:
+        return False
     if row.event_type in _ALWAYS_NOTIFY_TYPES:
         return True
     return _SEVERITY_ORDER.get(row.severity, 0) >= _SEVERITY_ORDER[min_severity.value]

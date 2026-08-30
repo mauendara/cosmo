@@ -2,7 +2,7 @@
 
 🇬🇧 English | [🇪🇸 Español](README.es.md)
 
-> **v0.1.0, first release — not production ready.** Real-world testing so
+> **v0.1.1 — not production ready.** Real-world testing so
 > far has been limited to the Claude Code harness on a $20/month Pro
 > subscription, against small greenfield projects built on the
 > `vite-react-local` template (frontend-only stack). Other harnesses,
@@ -47,6 +47,8 @@ $ cosmo run --repo ~/code/my-app
 stopped (queue_empty)
 completed=3 blocked=0 requeued=0 retried=1
 ```
+
+![Cosmo running a task queue overnight](assets/cosmo-demo.gif)
 
 ## Why this exists
 

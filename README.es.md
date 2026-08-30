@@ -4,7 +4,7 @@
 
 > Nota: esta traducción puede no estar actualizada. El inglés es la fuente canónica de esta documentación — consulta la [versión en inglés](README.md).
 
-> **v0.1.0, primer lanzamiento — no listo para producción.** Las pruebas en
+> **v0.1.1 — no listo para producción.** Las pruebas en
 > el mundo real hasta ahora se han limitado al harness de Claude Code con
 > una suscripción Pro de $20/mes, contra proyectos greenfield pequeños
 > construidos sobre la plantilla `vite-react-local` (stack solo de
@@ -50,6 +50,8 @@ $ cosmo run --repo ~/code/my-app
 stopped (queue_empty)
 completed=3 blocked=0 requeued=0 retried=1
 ```
+
+![Cosmo ejecutando una cola de tareas durante la noche](assets/cosmo-demo.gif)
 
 ## Por qué existe esto
 

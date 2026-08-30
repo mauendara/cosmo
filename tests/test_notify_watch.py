@@ -61,6 +61,32 @@ def test_an_info_event_below_min_severity_is_not_forwarded(tmp_path: Path) -> No
     writer.close()
 
 
+def test_heartbeat_is_never_forwarded_even_at_min_severity_info(tmp_path: Path) -> None:
+    """Regression: a real deployment sets `min_severity="info"` so no other
+    event type gets missed, which would otherwise let every `task.heartbeat`
+    (itself `severity=info`, emitted on every progress poll tick) through
+    too -- unlike every other info-severity event, heartbeats must stay
+    excluded regardless of the configured threshold."""
+    db_path = tmp_path / "cosmo.db"
+    writer = StoreWriter(db_path)
+    EventEmitter(writer).emit(
+        event_type=EventType.TASK_HEARTBEAT, severity=Severity.INFO, task_id="a"
+    )
+    sink = _FakeSink()
+    state = WatchState(since_rowid=0, last_activity_monotonic=0.0)
+
+    watch_once(
+        db_path=db_path,
+        sink=sink,
+        config=_config(min_severity=Severity.INFO),
+        state=state,
+        now_monotonic=0.0,
+    )
+
+    assert sink.sent == []
+    writer.close()
+
+
 def test_run_summary_is_always_forwarded_despite_info_severity(tmp_path: Path) -> None:
     db_path = tmp_path / "cosmo.db"
     writer = StoreWriter(db_path)
