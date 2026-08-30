@@ -48,26 +48,47 @@ not a record of how we got here.
 - **AI-attribution trailers were stripped from the entire git history** via
   `git filter-repo` — every commit hash from before 2026-08-28 changed as a
   result. Don't expect old hashes quoted anywhere to `git show`.
-- **Branch topology**: `private` (this branch, as of this session) is the
-  maintainer's day-to-day branch — CONTRIBUTING.md's branching model routes
-  `private` → `develop` → the public remote, never `private` straight to
-  public. `develop` is the PR-integration/release branch; `private` is
-  currently 6 commits ahead of it (this session's v0.1.1 patch work, not
-  yet merged). `master` is a stale 1-commit skeleton, far behind — not part
-  of any push. `webapp` (a separate in-progress monitoring-UI feature) is
-  missing `LICENSE` and not release-ready — don't push it without doing
-  that work first. `.githooks/pre-push` (active via `core.hooksPath`)
-  refuses to push a branch literally named `private` to whatever `origin`
-  resolves to; it does **not** guard against pushing `master`/`webapp` by
-  habit, so name the branch explicitly when pushing.
-- **Remotes**: `private-origin` (`git@github.com:deltam-dev/private-cosmo.git`)
-  is configured and is where `private` gets pushed for backup — it's also 6
-  commits behind local `private` right now (this session's work hasn't been
-  pushed there yet). No public `origin` remote is configured yet; no `gh`
-  CLI on this host. **v0.1.0 was never actually pushed publicly** — v0.1.1
-  (this patch) is what will actually make the first public push once
-  `private` merges into `develop` and the maintainer sets up the public
-  remote themselves.
+- **v0.1.1 is now the first real public release.** `private` → `develop`
+  was merged and pushed to the public `origin`, a PR from `develop` →
+  `master` was opened and merged on GitHub, and a `v0.1.1` GitHub Release
+  (tag `v0.1.1`, marked **pre-release** — not production ready) was
+  published against `master`. All three local branches (`private`,
+  `develop`, `master`) and `private-origin` now share this history; `git
+  merge-base` confirms it, no divergence to reconcile.
+- **Public `origin`'s `develop`/`master` were auto-initialized by GitHub**
+  with a bare-README `Initial commit` (`afa894e`) when the repo was
+  created, unrelated to this project's real history. Resolved once via
+  `git merge origin/develop --allow-unrelated-histories` (keeping the
+  local README, discarding the placeholder) — that merge commit is now a
+  shared ancestor of `develop`/`master`/`private`, so don't be surprised to
+  see `afa894e` in `git log`; it's inert.
+- **Branch protection is on for `master`** on the public repo (GitHub
+  ruleset): block force-pushes, restrict deletions, require a PR before
+  merging (0 required approvals — solo maintainer). `develop` is not yet
+  protected. The PR head branch `v0.1.1` (GitHub auto-named it from the
+  local branch of the same name used for the PR) was deleted after merge,
+  both locally and on `origin` — don't confuse it with the `v0.1.1` **tag**,
+  which is kept.
+- **Branch topology**: `private` (this branch) is the maintainer's
+  day-to-day branch — CONTRIBUTING.md's branching model routes `private` →
+  `develop` → the public remote, never `private` straight to public.
+  `develop` is the PR-integration/release branch. `master` now tracks the
+  public release line (currently == `develop` post-merge). `webapp` (a
+  separate in-progress monitoring-UI feature) is missing `LICENSE` and not
+  release-ready — don't push it without doing that work first.
+  `.githooks/pre-push` (active via `core.hooksPath`) refuses to push a
+  branch literally named `private` to whatever `origin` resolves to; it
+  does **not** guard against pushing `master`/`webapp`/`develop` by habit,
+  so name the branch explicitly when pushing.
+- **Remotes**: `private-origin` (`git@github.com:deltam-dev/private-cosmo.git`,
+  default SSH identity) is the maintainer's private backup remote — `private`
+  stays in sync with it. `origin` (`git@github.com-mauendara:mauendara/cosmo.git`)
+  is the **public** repo, under a second GitHub account (`mauendara`); it
+  authenticates via a dedicated SSH key and the `github.com-mauendara` host
+  alias in `~/.ssh/config` (see the SSH gotcha below) — never use a bare
+  `git@github.com:...` URL for it, that resolves to the wrong account's key.
+  No `gh` CLI on this host; all GitHub-side actions (PR, release, branch
+  protection, repo metadata) were done through the web UI.
 
 ## Read these first, in this order
 
@@ -128,6 +149,15 @@ superseded/consumed.
   `acquire_run_lock` is one `cosmo run` at a time **per `data_dir`, not per
   project** — a manual `cosmo run` and a service auto-start against
   different projects can collide with `RunLockHeldError`.
+- **This WSL box now has two GitHub identities.** `~/.ssh/id_ed25519`
+  (default, comment `deltam.contact@gmail.com`) is the maintainer's main
+  account, used for `private-origin`. `~/.ssh/id_ed25519_mauendara` is a
+  second key for the `mauendara` account, used for the public `origin`
+  repo, reachable only via the `github.com-mauendara` Host alias in
+  `~/.ssh/config` — a bare `github.com` URL silently authenticates as the
+  wrong account (fails, or worse, succeeds against the wrong repo if both
+  accounts have access). Check `git remote -v` before pushing if unsure
+  which identity a remote expects.
 - **Manually seeding/removing `task_queue` rows** against the real store
   requires respecting real foreign-key dependents (`task_failures`,
   `task_transitions`, `events`, `task_progress`, `task_heartbeat`,
@@ -157,6 +187,10 @@ superseded/consumed.
 - **Boundary tests are load-bearing, not optional.** `test_harness_boundary.py`,
   `test_store_boundary.py`, `test_git_boundary.py`, `test_gate_boundary.py`.
 - **Run `./check.sh` before committing.** All four checks must pass.
+- **Never `git push` (including `--force`) without the user's explicit,
+  per-turn approval** — see `CLAUDE.md`'s "Pushing to remotes" section.
+  A prior approval doesn't carry over to the next push; state the exact
+  command and wait each time.
 - **When something fails, check with a real invocation before trusting a
   unit test's green.** Most deviations in the cumulative table were found
   this way, including some a real attempt at validating something *else*
