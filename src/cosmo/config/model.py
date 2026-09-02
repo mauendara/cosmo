@@ -27,6 +27,26 @@ class HarnessConfig(_Strict):
     permission_mode: str = Field(min_length=1)
     max_turns: int = Field(gt=0)
     model: str = Field(min_length=1)
+    """The default/fallback model -- used for `cosmo harness probe` and for
+    any of the three role-specific overrides below left unset."""
+
+    propose_model: str | None = None
+    """Model for the `PROPOSING` state's `propose()` call (`cosmo run`'s
+    OpenSpec-change-creation step) and `cosmo spec add`'s enrichment/
+    decomposition call -- both are planning-shaped work in the same sense,
+    so they share one override rather than each getting their own.
+    `None` falls back to `model`."""
+
+    implement_model: str | None = None
+    """Model for the `IMPLEMENTING` state's `implement()` call.
+    `None` falls back to `model`."""
+
+    review_model: str | None = None
+    """Model for the `REVIEWING` state's `review()` call (v4 workflow
+    changes' adversarial review -- a genuinely separate session with no
+    memory of the implementation, so a different model here is a real
+    second pair of eyes, not just a cost/quality knob). `None` falls back
+    to `model`."""
 
 
 class TimeoutConfig(_Strict):

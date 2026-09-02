@@ -13,7 +13,11 @@ name = "claude"
 permission_mode = "dontAsk"
 max_turns = 80
 # Not a spec value -- pinned so a run's model doesn't silently drift with
-# whatever the host's `claude` CLI happens to default to.
+# whatever the host's `claude` CLI happens to default to. Also the fallback
+# for any of propose_model/implement_model/review_model left unset -- set
+# those in a user config file to run PROPOSING/IMPLEMENTING/REVIEWING on
+# different models (e.g. opus for planning, sonnet for implementation, a
+# third model as a separate pair of eyes for adversarial review).
 model = "claude-sonnet-5"
 
 [timeouts]

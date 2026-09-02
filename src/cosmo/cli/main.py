@@ -1348,7 +1348,9 @@ def spec_add(
 
     def _run() -> None:
         try:
-            result_box.append(adapter.probe(prompt, on_activity=_print_activity))
+            result_box.append(
+                adapter.probe(prompt, on_activity=_print_activity, model=cfg.harness.propose_model)
+            )
         except BaseException as exc:  # noqa: BLE001 -- surfaced on the main thread below
             error_box.append(exc)
 

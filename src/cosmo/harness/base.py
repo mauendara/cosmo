@@ -104,13 +104,22 @@ class HarnessAdapter(ABC):
 
     @abstractmethod
     def probe(
-        self, prompt: str, *, on_activity: Callable[[str], None] | None = None
+        self,
+        prompt: str,
+        *,
+        on_activity: Callable[[str], None] | None = None,
+        model: str | None = None,
     ) -> HarnessResult:
         """Run a single raw prompt through the harness and return the uniform
         result. A second extension to spec 2.2 (see `preflight()` above):
         `cosmo harness probe` (plan Phase 3 exit criterion) needs a
         harness-agnostic smoke-test entry point that doesn't presuppose an
-        OpenSpec change on disk the way `propose`/`implement` do.
+        OpenSpec change on disk the way `propose`/`implement` do. `cosmo
+        spec add`'s enrichment/decomposition call also goes through here
+        (it has no OpenSpec change on disk yet either), which is why `model`
+        exists as a caller-supplied override -- unlike `propose`/`implement`/
+        `review`, this method has no fixed state-machine role of its own to
+        resolve a config override from internally.
 
         `on_activity`, if given, is called with one short human-readable
         line per notable live event (a tool call, session start) -- a
@@ -119,6 +128,10 @@ class HarnessAdapter(ABC):
         reads. Deliberately a plain string here, not a harness-specific
         event type: keeps `task.machine`/`run.loop` harness-agnostic, same
         reasoning as `HarnessResult` itself.
+
+        `model`, if given, overrides `config.harness.model` for this call
+        only. `None` (the default) uses the harness's own configured
+        default.
         """
 
     @abstractmethod

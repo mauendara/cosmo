@@ -241,6 +241,10 @@ son contenido real, versionado en git, que puedes editar a mano.
 Si los archivos de tareas ya existen, se te pregunta si quieres volver a
 ejecutar el harness (no es gratis) o reutilizarlos.
 
+Se ejecuta con `harness.propose_model` (usa `harness.model` si no está
+definido) -- ver la sección `[harness]` de `config-schema.md` para ejecutar
+esto con un modelo distinto al de `IMPLEMENTING`/`REVIEWING`.
+
 | Argumento | Descripción |
 | --- | --- |
 | `name` | Nombre corto en kebab-case para este spec. |

@@ -133,9 +133,18 @@ class ClaudeCodeAdapter(HarnessAdapter):
         return results
 
     def probe(
-        self, prompt: str, *, on_activity: Callable[[str], None] | None = None
+        self,
+        prompt: str,
+        *,
+        on_activity: Callable[[str], None] | None = None,
+        model: str | None = None,
     ) -> HarnessResult:
-        return self._invoke(task_id="probe", prompt=prompt, on_activity=on_activity)
+        return self._invoke(
+            task_id="probe",
+            prompt=prompt,
+            model=model or self.config.harness.model,
+            on_activity=on_activity,
+        )
 
     def propose(
         self,
@@ -165,7 +174,8 @@ class ClaudeCodeAdapter(HarnessAdapter):
             f"do not pick a different name, even a shorter or more natural-looking one. "
             f"Follow this repository's operating policy for how to invoke OpenSpec."
         )
-        return self._invoke(task_id=task_id, prompt=prompt, on_activity=on_activity)
+        model = self.config.harness.propose_model or self.config.harness.model
+        return self._invoke(task_id=task_id, prompt=prompt, model=model, on_activity=on_activity)
 
     def implement(
         self,
@@ -178,7 +188,8 @@ class ClaudeCodeAdapter(HarnessAdapter):
         prompt = f"Implement the OpenSpec change at {spec_path} (task {task_id})."
         if retry_context:
             prompt += f"\n\nThe previous attempt failed:\n{retry_context}"
-        return self._invoke(task_id=task_id, prompt=prompt, on_activity=on_activity)
+        model = self.config.harness.implement_model or self.config.harness.model
+        return self._invoke(task_id=task_id, prompt=prompt, model=model, on_activity=on_activity)
 
     def review(
         self,
@@ -207,7 +218,8 @@ class ClaudeCodeAdapter(HarnessAdapter):
             f'`{{"verdict": "approved"}}` or `{{"verdict": "rejected", "reason": "<why, '
             f'specific enough to act on>"}}`.'
         )
-        return self._invoke(task_id=task_id, prompt=prompt, on_activity=on_activity)
+        model = self.config.harness.review_model or self.config.harness.model
+        return self._invoke(task_id=task_id, prompt=prompt, model=model, on_activity=on_activity)
 
     def get_progress(self, task_id: str) -> tuple[int, int]:
         raise NotImplementedError(
@@ -233,7 +245,7 @@ class ClaudeCodeAdapter(HarnessAdapter):
 
     # -- invocation mechanics ------------------------------------------------
 
-    def _build_argv(self, prompt: str) -> list[str]:
+    def _build_argv(self, prompt: str, model: str) -> list[str]:
         argv = [
             self._binary,
             "-p",
@@ -246,7 +258,7 @@ class ClaudeCodeAdapter(HarnessAdapter):
             "--permission-mode",
             self.config.harness.permission_mode,
             "--model",
-            self.config.harness.model,
+            model,
             # A headless run must run under Cosmo's own project settings
             # (spec 2.5 guardrail hooks, .claude/settings.json) and nothing
             # else -- `user` scope is the operator's global ~/.claude
@@ -306,9 +318,10 @@ class ClaudeCodeAdapter(HarnessAdapter):
         *,
         task_id: str,
         prompt: str,
+        model: str,
         on_activity: Callable[[str], None] | None = None,
     ) -> HarnessResult:
-        argv = self._build_argv(prompt)
+        argv = self._build_argv(prompt, model)
         env = self._build_env(task_id)
         raw_log_path = (
             self.config.paths.log_dir / "harness" / task_id / f"{uuid.uuid4().hex}.ndjson"

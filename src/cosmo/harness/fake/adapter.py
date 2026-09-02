@@ -97,7 +97,11 @@ class FakeHarnessAdapter(HarnessAdapter):
     # here needs to fake).
 
     def probe(
-        self, prompt: str, *, on_activity: Callable[[str], None] | None = None
+        self,
+        prompt: str,
+        *,
+        on_activity: Callable[[str], None] | None = None,
+        model: str | None = None,
     ) -> HarnessResult:
         return self._run("probe", "probe", None)
 

@@ -39,7 +39,22 @@ El único lugar en el núcleo de Cosmo que nombra un harness específico.
 | `name` | string | `"claude"` | Qué adaptador usar. Orden de resolución: flag `--harness` → registro del proyecto → esta clave. |
 | `permission_mode` | string | `"dontAsk"` | Postura de permisos pasada al harness. El adaptador de Claude acepta `dontAsk` o `auto`, y rechaza `bypassPermissions` de plano. |
 | `max_turns` | int > 0 | `80` | Tope de turnos por llamada al harness. |
-| `model` | string | `"claude-sonnet-5"` | Fijado para que el modelo de una ejecución no varíe según lo que la CLI del host tenga por defecto en cada momento. |
+| `model` | string | `"claude-sonnet-5"` | Fijado para que el modelo de una ejecución no varíe según lo que la CLI del host tenga por defecto en cada momento. También es el valor de respaldo para las tres claves siguientes cuando no están definidas. |
+| `propose_model` | string o sin definir | sin definir (usa `model`) | Modelo para la llamada `propose()` de `PROPOSING` y para la llamada de enriquecimiento/descomposición de `cosmo spec add` -- ambas son trabajo de planificación, y comparten una sola clave de override. |
+| `implement_model` | string o sin definir | sin definir (usa `model`) | Modelo para la llamada `implement()` de `IMPLEMENTING`. |
+| `review_model` | string o sin definir | sin definir (usa `model`) | Modelo para la llamada `review()` (revisión adversarial) de `REVIEWING` -- una sesión aparte, sin memoria de la implementación, así que un modelo distinto aquí es un segundo par de ojos real. |
+
+Define cualquiera de estas tres claves en un archivo de configuración de
+usuario para ejecutar cada etapa con un modelo distinto, por ejemplo Opus
+para planificación, Sonnet para implementación, y un tercer modelo como
+revisor independiente:
+
+```toml
+[harness]
+propose_model = "claude-opus-5"
+implement_model = "claude-sonnet-5"
+review_model = "claude-haiku-4-5"
+```
 
 ## `[timeouts]`
 

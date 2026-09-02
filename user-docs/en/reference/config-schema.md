@@ -35,7 +35,21 @@ The only place in Cosmo's core that names a specific harness.
 | `name` | string | `"claude"` | Which adapter to use. Resolution order: `--harness` flag → project registration → this. |
 | `permission_mode` | string | `"dontAsk"` | Permission posture passed to the harness. The Claude adapter accepts `dontAsk` or `auto`, and refuses `bypassPermissions` outright. |
 | `max_turns` | int > 0 | `80` | Turn ceiling per harness call. |
-| `model` | string | `"claude-sonnet-5"` | Pinned so a run's model doesn't drift with whatever the host CLI defaults to. |
+| `model` | string | `"claude-sonnet-5"` | Pinned so a run's model doesn't drift with whatever the host CLI defaults to. Also the fallback for any of the three overrides below left unset. |
+| `propose_model` | string or unset | unset (falls back to `model`) | Model for `PROPOSING`'s `propose()` call and `cosmo spec add`'s enrichment/decomposition call -- both planning-shaped work, sharing one override. |
+| `implement_model` | string or unset | unset (falls back to `model`) | Model for `IMPLEMENTING`'s `implement()` call. |
+| `review_model` | string or unset | unset (falls back to `model`) | Model for `REVIEWING`'s adversarial-review `review()` call -- a separate session with no memory of the implementation, so a different model here is a genuine second pair of eyes. |
+
+Set any of these three in a user config file to run different stages on
+different models, e.g. Opus for planning, Sonnet for implementation, and a
+third model as a distinct reviewer:
+
+```toml
+[harness]
+propose_model = "claude-opus-5"
+implement_model = "claude-sonnet-5"
+review_model = "claude-haiku-4-5"
+```
 
 ## `[timeouts]`
 

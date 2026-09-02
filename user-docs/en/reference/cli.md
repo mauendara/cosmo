@@ -237,6 +237,10 @@ git-tracked content you can hand-edit.
 If task files already exist, you are asked whether to re-run the harness (not
 free) or reuse them.
 
+Runs on `harness.propose_model` (falling back to `harness.model` if unset) --
+see `config-schema.md`'s `[harness]` section to run this on a different model
+than `IMPLEMENTING`/`REVIEWING`.
+
 | Argument | Description |
 | --- | --- |
 | `name` | Short kebab-case name for this spec. |

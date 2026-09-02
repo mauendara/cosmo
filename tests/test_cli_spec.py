@@ -158,7 +158,11 @@ def test_spec_add_wires_live_activity_output_to_the_probe_call(
     captured: dict[str, object] = {}
 
     def _probe(
-        self: FakeHarnessAdapter, prompt: str, *, on_activity: object = None
+        self: FakeHarnessAdapter,
+        prompt: str,
+        *,
+        on_activity: object = None,
+        model: str | None = None,
     ) -> HarnessResult:
         captured["on_activity"] = on_activity
         assert callable(on_activity)
@@ -183,6 +187,59 @@ def test_spec_add_wires_live_activity_output_to_the_probe_call(
 
     assert captured["on_activity"] is cli_main._print_activity
     assert "enriching..." in result.stdout
+
+
+def test_spec_add_passes_propose_model_to_the_probe_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`spec add`'s harness call is `probe`, not `propose` -- `probe` has no
+    fixed state-machine role of its own to resolve a config override from
+    internally (unlike `propose`/`implement`/`review`), so `cli.main.
+    spec_add` passes `harness.propose_model` through explicitly as an
+    argument (see `ClaudeCodeAdapter.probe`'s `model` parameter)."""
+    config_path = tmp_path / "cosmo.toml"
+    config_path.write_text('[harness]\npropose_model = "claude-opus-5"\n', encoding="utf-8")
+    monkeypatch.setenv("COSMO_CONFIG", str(config_path))
+
+    repo = tmp_path / "target"
+    repo.mkdir()
+    _register(repo, harness="fake")
+    raw = tmp_path / "raw.md"
+    raw.write_text("# Demo\nAdd a health check endpoint.\n", encoding="utf-8")
+    captured: dict[str, object] = {}
+
+    def _probe(
+        self: FakeHarnessAdapter,
+        prompt: str,
+        *,
+        on_activity: object = None,
+        model: str | None = None,
+    ) -> HarnessResult:
+        captured["model"] = model
+        return HarnessResult(
+            success=True,
+            output_summary="ok",
+            raw_log_path=None,
+            files_changed=[],
+            duration_seconds=0.1,
+            total_cost_usd=None,
+            exit_code=0,
+            session_id=None,
+        )
+
+    monkeypatch.setattr(FakeHarnessAdapter, "probe", _probe)
+
+    runner.invoke(
+        app,
+        ["spec", "add", "demo", "--repo", str(repo), "--from", str(raw), "--harness", "fake"],
+    )
+
+    # Not asserting exit_code: the fake `_probe` above writes no *-task.md
+    # files, which `spec_add` itself then reports as an error -- a
+    # pre-existing, unrelated CLI behavior this test doesn't need to
+    # exercise. Only the model actually threaded through to `probe` matters
+    # here, and that's captured before the error path is reached.
+    assert captured["model"] == "claude-opus-5"
 
 
 def test_spec_add_with_existing_task_files_and_declined_confirmation_skips_the_harness(
