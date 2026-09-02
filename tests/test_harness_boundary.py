@@ -38,6 +38,8 @@ HARNESS_SPECIFIC_TOKENS = [
     "--permission-mode",
     "dangerously-skip-permissions",
     "max-turns",
+    "OPENROUTER_API_KEY",
+    "ORI_TELEMETRY",
 ]
 
 
@@ -59,8 +61,10 @@ def test_core_never_names_harness_specific_tokens(token: str) -> None:
 
 
 def test_core_never_hardcodes_a_harness_name() -> None:
-    """The literal 'claude' may appear only in the adapter, registry, and config data."""
-    pattern = re.compile(r"""["']claude["']""")
+    """The literal 'claude'/'ori-claude' may appear only in the adapter,
+    registry, and config data. 'claude' also names an `ori` subcommand and
+    the binary it execs -- both allowlisted for the same reason."""
+    pattern = re.compile(r"""["'](claude|ori-claude)["']""")
     offenders = [
         str(p.relative_to(SRC)) for p in _core_python_files() if pattern.search(p.read_text())
     ]
