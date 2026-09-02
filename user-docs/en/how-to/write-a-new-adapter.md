@@ -40,7 +40,7 @@ from cosmo.harness.mytool import MyToolAdapter
 _REGISTRY: dict[str, type[HarnessAdapter]] = {
     ClaudeCodeAdapter.name: ClaudeCodeAdapter,
     FakeHarnessAdapter.name: FakeHarnessAdapter,
-    MyToolAdapter.name: MyToolAdapter,       # ← add this
+    MyToolAdapter.name: MyToolAdapter,  # ← add this
 }
 ```
 
@@ -93,13 +93,13 @@ a weaker guarantee.
 ```python
 @dataclass(frozen=True, slots=True)
 class HarnessCapabilities:
-    reports_native_progress: bool    # False -> Cosmo watches the change's tasks.md
-    supports_retry_context: bool     # False -> Cosmo composes a synthetic retry prompt
-    has_internal_timeout: bool       # False -> Cosmo imposes an external timeout
-    reports_native_cost: bool        # False -> estimate from tokens, or disable cost stop
-    supports_gating: bool            # False -> post-hoc diff inspection only (weaker)
-    supports_structured_stream: bool # False -> file-mtime liveness; the stall
-                                     #          timeout is then the only guard
+    reports_native_progress: bool  # False -> Cosmo watches the change's tasks.md
+    supports_retry_context: bool  # False -> Cosmo composes a synthetic retry prompt
+    has_internal_timeout: bool  # False -> Cosmo imposes an external timeout
+    reports_native_cost: bool  # False -> estimate from tokens, or disable cost stop
+    supports_gating: bool  # False -> post-hoc diff inspection only (weaker)
+    supports_structured_stream: bool  # False -> file-mtime liveness; the stall
+    #          timeout is then the only guard
 ```
 
 **Declare honestly.** `supports_gating=True` when your harness can't actually
@@ -119,16 +119,16 @@ this boundary.
 ```python
 @dataclass(frozen=True, slots=True)
 class HarnessResult:
-    success: bool                    # required
-    output_summary: str              # required: short label, from structured output
-    raw_log_path: Path | None        # required: where you wrote the raw session log
-    files_changed: list[str]         # required (may be empty)
-    duration_seconds: float          # required
-    total_cost_usd: float | None     # required (None if unknown)
-    exit_code: int | None            # required (None if not process-based)
-    session_id: str | None           # required (None if your harness has no concept)
-    quota_window: str | None = None      # "five_hour" | "weekly" | None
-    quota_resets_at: str | None = None   # UTC ISO 8601, or None
+    success: bool  # required
+    output_summary: str  # required: short label, from structured output
+    raw_log_path: Path | None  # required: where you wrote the raw session log
+    files_changed: list[str]  # required (may be empty)
+    duration_seconds: float  # required
+    total_cost_usd: float | None  # required (None if unknown)
+    exit_code: int | None  # required (None if not process-based)
+    session_id: str | None  # required (None if your harness has no concept)
+    quota_window: str | None = None  # "five_hour" | "weekly" | None
+    quota_resets_at: str | None = None  # UTC ISO 8601, or None
     tool_call_count: int = 0
 ```
 
@@ -154,15 +154,16 @@ Notes that matter:
 ```python
 from cosmo.checks import CheckResult, check_executable, ok, warn, fail
 
-ok("check name", "detail")     # informational
-warn("check name", "detail")   # visible, non-blocking
-fail("check name", "detail")   # blocking: cosmo doctor exits non-zero
+ok("check name", "detail")  # informational
+warn("check name", "detail")  # visible, non-blocking
+fail("check name", "detail")  # blocking: cosmo doctor exits non-zero
 ```
 
 ## The interface
 
 ```python
 from cosmo.harness.base import HarnessAdapter, HarnessCapabilities, HarnessResult
+
 
 class MyToolAdapter(HarnessAdapter):
     name: ClassVar[str] = "mytool"
@@ -318,7 +319,7 @@ process = ManagedProcess(
     raw_log_path=raw_log_path,
     cwd=self.cwd,
     env=env,
-    on_stdout_chunk=reader.feed,   # optional: streaming callback
+    on_stdout_chunk=reader.feed,  # optional: streaming callback
 )
 exit_code = process.wait()
 ```
@@ -339,8 +340,12 @@ def cancel(self, task_id: str) -> None:
         return
     if self._emitter is not None:
         cancel_and_reap(
-            process, run_id=self._run_id or "", task_id=task_id,
-            worktree_path=self.cwd, config=self.config, emitter=self._emitter,
+            process,
+            run_id=self._run_id or "",
+            task_id=task_id,
+            worktree_path=self.cwd,
+            config=self.config,
+            emitter=self._emitter,
         )
     else:
         process.cancel(grace_s=self.config.timeouts.kill_grace)

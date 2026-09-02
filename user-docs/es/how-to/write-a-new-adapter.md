@@ -45,7 +45,7 @@ from cosmo.harness.mytool import MyToolAdapter
 _REGISTRY: dict[str, type[HarnessAdapter]] = {
     ClaudeCodeAdapter.name: ClaudeCodeAdapter,
     FakeHarnessAdapter.name: FakeHarnessAdapter,
-    MyToolAdapter.name: MyToolAdapter,       # ← agrega esto
+    MyToolAdapter.name: MyToolAdapter,  # ← agrega esto
 }
 ```
 
@@ -104,13 +104,13 @@ conservadora siempre es segura, solo te da una garantía más débil.
 ```python
 @dataclass(frozen=True, slots=True)
 class HarnessCapabilities:
-    reports_native_progress: bool    # False -> Cosmo observa el tasks.md del change
-    supports_retry_context: bool     # False -> Cosmo arma un prompt de reintento sintético
-    has_internal_timeout: bool       # False -> Cosmo impone un timeout externo
-    reports_native_cost: bool        # False -> estima desde tokens, o desactiva el corte por costo
-    supports_gating: bool            # False -> solo inspección post-hoc del diff (más débil)
-    supports_structured_stream: bool # False -> liveness por mtime del archivo; el timeout
-                                     #          de estancamiento es entonces la única guarda
+    reports_native_progress: bool  # False -> Cosmo observa el tasks.md del change
+    supports_retry_context: bool  # False -> Cosmo arma un prompt de reintento sintético
+    has_internal_timeout: bool  # False -> Cosmo impone un timeout externo
+    reports_native_cost: bool  # False -> estima desde tokens, o desactiva el corte por costo
+    supports_gating: bool  # False -> solo inspección post-hoc del diff (más débil)
+    supports_structured_stream: bool  # False -> liveness por mtime del archivo; el timeout
+    #          de estancamiento es entonces la única guarda
 ```
 
 **Declara con honestidad.** Que `supports_gating=True` cuando tu harness en
@@ -131,16 +131,16 @@ filtra más allá de este límite.
 ```python
 @dataclass(frozen=True, slots=True)
 class HarnessResult:
-    success: bool                    # obligatorio
-    output_summary: str              # obligatorio: etiqueta corta, de salida estructurada
-    raw_log_path: Path | None        # obligatorio: dónde escribiste el log de la sesión en crudo
-    files_changed: list[str]         # obligatorio (puede estar vacío)
-    duration_seconds: float          # obligatorio
-    total_cost_usd: float | None     # obligatorio (None si se desconoce)
-    exit_code: int | None            # obligatorio (None si no está basado en un proceso)
-    session_id: str | None           # obligatorio (None si tu harness no tiene ese concepto)
-    quota_window: str | None = None      # "five_hour" | "weekly" | None
-    quota_resets_at: str | None = None   # UTC ISO 8601, o None
+    success: bool  # obligatorio
+    output_summary: str  # obligatorio: etiqueta corta, de salida estructurada
+    raw_log_path: Path | None  # obligatorio: dónde escribiste el log de la sesión en crudo
+    files_changed: list[str]  # obligatorio (puede estar vacío)
+    duration_seconds: float  # obligatorio
+    total_cost_usd: float | None  # obligatorio (None si se desconoce)
+    exit_code: int | None  # obligatorio (None si no está basado en un proceso)
+    session_id: str | None  # obligatorio (None si tu harness no tiene ese concepto)
+    quota_window: str | None = None  # "five_hour" | "weekly" | None
+    quota_resets_at: str | None = None  # UTC ISO 8601, o None
     tool_call_count: int = 0
 ```
 
@@ -168,15 +168,16 @@ Notas que importan:
 ```python
 from cosmo.checks import CheckResult, check_executable, ok, warn, fail
 
-ok("check name", "detail")     # informativo
-warn("check name", "detail")   # visible, no bloqueante
-fail("check name", "detail")   # bloqueante: cosmo doctor sale con código distinto de cero
+ok("check name", "detail")  # informativo
+warn("check name", "detail")  # visible, no bloqueante
+fail("check name", "detail")  # bloqueante: cosmo doctor sale con código distinto de cero
 ```
 
 ## La interfaz
 
 ```python
 from cosmo.harness.base import HarnessAdapter, HarnessCapabilities, HarnessResult
+
 
 class MyToolAdapter(HarnessAdapter):
     name: ClassVar[str] = "mytool"
@@ -340,7 +341,7 @@ process = ManagedProcess(
     raw_log_path=raw_log_path,
     cwd=self.cwd,
     env=env,
-    on_stdout_chunk=reader.feed,   # opcional: callback de streaming
+    on_stdout_chunk=reader.feed,  # opcional: callback de streaming
 )
 exit_code = process.wait()
 ```
@@ -361,8 +362,12 @@ def cancel(self, task_id: str) -> None:
         return
     if self._emitter is not None:
         cancel_and_reap(
-            process, run_id=self._run_id or "", task_id=task_id,
-            worktree_path=self.cwd, config=self.config, emitter=self._emitter,
+            process,
+            run_id=self._run_id or "",
+            task_id=task_id,
+            worktree_path=self.cwd,
+            config=self.config,
+            emitter=self._emitter,
         )
     else:
         process.cancel(grace_s=self.config.timeouts.kill_grace)
