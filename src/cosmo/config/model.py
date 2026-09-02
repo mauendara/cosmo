@@ -22,6 +22,18 @@ class _Strict(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
 
+class HarnessModelOverrides(_Strict):
+    """Per-harness model ids (v13 plan). A harness's model namespace is its
+    own -- an OpenRouter id (`openai/gpt-5`) is meaningless to native Claude
+    Code and a bare `claude-sonnet-5` is meaningless to OpenRouter -- so a
+    host that runs both cannot express both in one flat `[harness]` table."""
+
+    model: str | None = None
+    propose_model: str | None = None
+    implement_model: str | None = None
+    review_model: str | None = None
+
+
 class HarnessConfig(_Strict):
     name: str = Field(min_length=1)
     permission_mode: str = Field(min_length=1)
@@ -47,6 +59,46 @@ class HarnessConfig(_Strict):
     memory of the implementation, so a different model here is a real
     second pair of eyes, not just a cost/quality knob). `None` falls back
     to `model`."""
+
+    overrides: dict[str, HarnessModelOverrides] = Field(default_factory=dict)
+    """Per-harness-name model overrides (v13 plan), keyed by an opaque
+    harness name never matched against a literal here -- same discipline as
+    `resolve_harness_name`. Lets one config file hold sane models for both
+    `claude` and `ori-claude` at once; switching is a `--harness` flag, not
+    a config edit."""
+
+    def resolve_model(self, harness: str, role: str) -> str:
+        """Resolution order, narrowest first: `overrides[harness].<role>_model`
+        -> `overrides[harness].model` -> `<role>_model` -> `model`.
+
+        `role` is one of `"probe"`, `"propose"`, `"implement"`, `"review"`;
+        `"probe"` has no dedicated override field on either rung and resolves
+        straight to the `model` rungs, matching pre-v13 behavior."""
+        role_models: dict[str, str | None] = {
+            "propose": self.propose_model,
+            "implement": self.implement_model,
+            "review": self.review_model,
+        }
+        override_role_models: dict[str, str | None] = {}
+        override = self.overrides.get(harness)
+        if override is not None:
+            override_role_models = {
+                "propose": override.propose_model,
+                "implement": override.implement_model,
+                "review": override.review_model,
+            }
+
+        if override is not None:
+            value = override_role_models.get(role)
+            if value is not None:
+                return value
+            if override.model is not None:
+                return override.model
+
+        value = role_models.get(role)
+        if value is not None:
+            return value
+        return self.model
 
 
 class TimeoutConfig(_Strict):

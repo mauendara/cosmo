@@ -20,6 +20,15 @@ max_turns = 80
 # third model as a separate pair of eyes for adversarial review).
 model = "claude-sonnet-5"
 
+# Per-harness model overrides. Each harness's model namespace is its own; an
+# OpenRouter model id means nothing to native Claude Code and vice versa.
+# See HarnessConfig.resolve_model for the resolution order.
+# [harness.overrides.ori-claude]
+# model = "anthropic/claude-sonnet-4.5"
+# propose_model = "openai/gpt-5"
+# implement_model = "qwen/qwen3-coder"
+# review_model = "google/gemini-2.5-pro"
+
 [timeouts]
 # Spec 3.3. All seconds. Anchored to an observed 5-15 min validation gate;
 # retune empirically once p95 gate data exists (Open Item 2).

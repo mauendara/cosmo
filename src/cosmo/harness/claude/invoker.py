@@ -162,7 +162,7 @@ class _ClaudeCodeInvoker(HarnessAdapter):
         return self._invoke(
             task_id="probe",
             prompt=prompt,
-            model=model or self.config.harness.model,
+            model=model or self.config.harness.resolve_model(self.name, "probe"),
             on_activity=on_activity,
         )
 
@@ -194,7 +194,7 @@ class _ClaudeCodeInvoker(HarnessAdapter):
             f"do not pick a different name, even a shorter or more natural-looking one. "
             f"Follow this repository's operating policy for how to invoke OpenSpec."
         )
-        model = self.config.harness.propose_model or self.config.harness.model
+        model = self.config.harness.resolve_model(self.name, "propose")
         return self._invoke(task_id=task_id, prompt=prompt, model=model, on_activity=on_activity)
 
     def implement(
@@ -208,7 +208,7 @@ class _ClaudeCodeInvoker(HarnessAdapter):
         prompt = f"Implement the OpenSpec change at {spec_path} (task {task_id})."
         if retry_context:
             prompt += f"\n\nThe previous attempt failed:\n{retry_context}"
-        model = self.config.harness.implement_model or self.config.harness.model
+        model = self.config.harness.resolve_model(self.name, "implement")
         return self._invoke(task_id=task_id, prompt=prompt, model=model, on_activity=on_activity)
 
     def review(
@@ -238,7 +238,7 @@ class _ClaudeCodeInvoker(HarnessAdapter):
             f'`{{"verdict": "approved"}}` or `{{"verdict": "rejected", "reason": "<why, '
             f'specific enough to act on>"}}`.'
         )
-        model = self.config.harness.review_model or self.config.harness.model
+        model = self.config.harness.resolve_model(self.name, "review")
         return self._invoke(task_id=task_id, prompt=prompt, model=model, on_activity=on_activity)
 
     def get_progress(self, task_id: str) -> tuple[int, int]:
