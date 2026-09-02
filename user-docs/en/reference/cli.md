@@ -275,7 +275,10 @@ there is no separate approval UI.
 ### `cosmo events tail`
 
 Print recent events. The table carries `seq`, `timestamp`, `severity`,
-`event_type`, `run_id`, `task_id`.
+`event_type`, `run_id`, `task_id`. `timestamp` (and every other timestamp
+`cosmo` prints to the console) renders in the host's local timezone --
+storage stays UTC internally, and `--payload`'s raw JSON keeps whatever
+timezone the underlying event carries.
 
 | Option | Default | Description |
 | --- | --- | --- |

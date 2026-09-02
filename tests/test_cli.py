@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -34,6 +35,18 @@ def _isolated_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _db_path() -> Path:
     return load_config().paths.db_path
+
+
+def _pin_tz(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch, tz: str) -> None:
+    """Console timestamps now render in the host's local timezone (not
+    UTC) -- pin it so a test asserting an exact rendered time isn't at the
+    mercy of whatever TZ the machine running the suite happens to have.
+    `time.tzset()`'s C-library-level effect outlives `monkeypatch.setenv`'s
+    own teardown (which only unsets the env var), so it needs its own
+    finalizer to actually restore the real local timezone afterward."""
+    monkeypatch.setenv("TZ", tz)
+    time.tzset()
+    request.addfinalizer(time.tzset)
 
 
 def test_version() -> None:
@@ -606,6 +619,7 @@ def test_doctor_resolves_the_project_tier_from_a_registered_project(tmp_path: Pa
 
 
 def test_print_emit_shows_task_state_changed_with_task_id_and_states(
+    request: pytest.FixtureRequest,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """`_print_emit` (`cosmo run`'s live-terminal `on_emit` sink) used to
@@ -618,6 +632,7 @@ def test_print_emit_shows_task_state_changed_with_task_id_and_states(
     tag rather than printed."""
     from rich.console import Console
 
+    _pin_tz(request, monkeypatch, "America/New_York")
     buf = io.StringIO()
     monkeypatch.setattr(cli_main, "console", Console(file=buf, width=200))
 
@@ -639,7 +654,8 @@ def test_print_emit_shows_task_state_changed_with_task_id_and_states(
     assert "task.state_changed" in output
     assert "scaffold-app-task" in output
     assert "implementing -> validating" in output
-    assert "18:22:52Z" in output
+    # UTC 18:22:52 rendered in the host's (pinned) local timezone, not UTC.
+    assert "14:22:52 EDT" in output
 
 
 def test_print_emit_still_filters_out_chatty_info_events(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -279,7 +279,10 @@ confirmación; no existe una UI de aprobación separada.
 ### `cosmo events tail`
 
 Imprime los eventos recientes. La tabla incluye `seq`, `timestamp`,
-`severity`, `event_type`, `run_id`, `task_id`.
+`severity`, `event_type`, `run_id`, `task_id`. `timestamp` (y cualquier otra
+marca de tiempo que `cosmo` imprime en la consola) se muestra en la zona
+horaria local del host -- el almacenamiento interno sigue siendo UTC, y el
+JSON crudo de `--payload` conserva la zona horaria del evento subyacente.
 
 | Opción | Por defecto | Descripción |
 | --- | --- | --- |

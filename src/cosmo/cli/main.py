@@ -11,7 +11,6 @@ import threading
 import time
 import uuid
 from dataclasses import Field
-from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -70,6 +69,7 @@ from cosmo.run.recovery import RunLockHeldError, acquire_run_lock, reconcile_int
 from cosmo.run.types import RunOutcome
 from cosmo.spec import SpecTaskFile, TaskFileError, list_task_files
 from cosmo.store import StoreWriter, TaskNotFoundError
+from cosmo.store.clock import format_local
 from cosmo.store.enums import BlockedReason, RunStatus, StopReason, TaskStatus
 from cosmo.store.failure_signature import detect_repeat_block
 from cosmo.store.reader import (
@@ -172,10 +172,7 @@ def _print_emit(event: Event) -> None:
     if event.task_id or detail_text:
         prefix = f"[{event.task_id}] " if event.task_id else ""
         detail = " " + escape(f"{prefix}{detail_text}".strip())
-    try:
-        when = datetime.fromisoformat(event.timestamp).strftime("%H:%M:%SZ")
-    except ValueError:
-        when = event.timestamp
+    when = format_local(event.timestamp, "%H:%M:%S %Z")
     console.print(f"[dim]{when}[/dim] [bold {style}]>> {event.event_type}[/bold {style}]{detail}")
 
 
@@ -1517,6 +1514,8 @@ def queue_show(task_id: str, config: ConfigOption = None) -> None:
     table.add_column("field", style="bold")
     table.add_column("value")
     for field_name, value in dataclasses.asdict(task).items():
+        if field_name in ("created_at", "updated_at") and isinstance(value, str):
+            value = format_local(value)
         table.add_row(field_name, str(value))
     console.print(table)
 
@@ -1548,7 +1547,7 @@ def queue_failures(
     for f in failures:
         console.print(
             f"\n[bold]attempt {f.attempt_number}[/bold] "
-            f"[dim]{f.timestamp}[/dim]  run={f.run_id or '-'}"
+            f"[dim]{format_local(f.timestamp)}[/dim]  run={f.run_id or '-'}"
         )
         console.print(f"  type:    {f.failure_type} @ {f.failure_stage}")
         console.print(f"  summary: {f.error_summary}")
@@ -1622,7 +1621,7 @@ def queue_retry(
         )
         for occ in repeat.occurrences:
             err_console.print(
-                f"  [dim]{occ.timestamp}[/dim]  run={occ.run_id or '-'}  "
+                f"  [dim]{format_local(occ.timestamp)}[/dim]  run={occ.run_id or '-'}  "
                 f"attempt={occ.attempt_number}  {occ.error_summary}"
             )
         err_console.print(
@@ -1788,7 +1787,7 @@ def events_tail(
     for e in rows:
         table.add_row(
             str(e.sequence),
-            e.timestamp,
+            format_local(e.timestamp),
             e.severity,
             e.event_type,
             e.run_id or "-",
@@ -1819,7 +1818,7 @@ def events_tail(
                 if event_type is not None and e.event_type != event_type:
                     continue
                 console.print(
-                    f"{e.sequence}\t{e.timestamp}\t{e.severity}\t{e.event_type}\t"
+                    f"{e.sequence}\t{format_local(e.timestamp)}\t{e.severity}\t{e.event_type}\t"
                     f"{e.run_id or '-'}\t{e.task_id or '-'}"
                 )
                 if payload:
@@ -1895,8 +1894,8 @@ def _render_run_report(cfg: CosmoConfig, run_id: str) -> None:
     if row.stop_reason:
         stop_style = "green" if row.stop_reason in ("completed", "queue_empty") else "red"
         console.print(f"  stop reason:   [{stop_style}]{row.stop_reason}[/{stop_style}]")
-    console.print(f"  started at:    {row.started_at}")
-    console.print(f"  stopped at:    {row.stopped_at or '-'}")
+    console.print(f"  started at:    {format_local(row.started_at)}")
+    console.print(f"  stopped at:    {format_local(row.stopped_at) if row.stopped_at else '-'}")
 
     interrupted = list_events(
         cfg.paths.db_path,
