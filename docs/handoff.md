@@ -5,7 +5,7 @@ session-by-session narrative (what changed, what was found, how it was
 fixed) has been cut. That history isn't lost — it's in `git log` (every
 commit message explains its own *why*) and in
 [v3-implementation-state.md](v3-implementation-state.md)'s cumulative
-deviations table (the complete bug/fix log, entries 1-82). This file now
+deviations table (the complete bug/fix log, entries 1-84). This file now
 only carries what a session needs to *orient itself* before doing new work,
 not a record of how we got here.
 
@@ -18,8 +18,23 @@ not a record of how we got here.
   — see its own plan doc; it needs a second real stack to prove the
   abstraction, and the user is doing that testing separately before it gets
   picked up again.
-- **562 tests passing, 9 skipped, `./check.sh` green** as of the last code
+- **570 tests passing, 9 skipped, `./check.sh` green** as of the last code
   change. Every fix in the deviations table has a regression test.
+- **Two features shipped since v0.1.1's release, both requested directly**
+  (deviations 83-84 in `v3-implementation-state.md`, two separate commits
+  on `private`, neither released yet): (1) console-facing timestamps now
+  render in the host's local timezone (`store.clock.to_local`/
+  `format_local`) instead of raw UTC — storage is unchanged, only display
+  converts, applied everywhere a timestamp reaches the console plus the
+  shared `events.format.event_detail` (also used by the Telegram sink).
+  (2) `harness.propose_model`/`implement_model`/`review_model` let
+  `PROPOSING`/`spec add`, `IMPLEMENTING`, and `REVIEWING` each run on a
+  different Claude model (e.g. Opus for planning, Sonnet for
+  implementation, a separate model for adversarial review), each falling
+  back to the existing `harness.model` when unset. Deliberately scoped to
+  global per-role config only, not per-spec/per-batch — confirmed with the
+  user rather than assumed; that would need task-row persistence and new
+  CLI flags, a bigger feature than asked for.
 - **v0.1.1 is a patch release**: v0.1.0 got its first real usage (a real
   `cosmo run` against a real target repo, not this repo's own test suite)
   and surfaced three real bugs, all fixed and covered by a regression test
@@ -80,6 +95,13 @@ not a record of how we got here.
   branch literally named `private` to whatever `origin` resolves to; it
   does **not** guard against pushing `master`/`webapp`/`develop` by habit,
   so name the branch explicitly when pushing.
+- **Uncommitted, pre-existing local reformatting**: `user-docs/{en,es}/
+  how-to/write-a-new-adapter.md` carry a whitespace/comment-alignment-only
+  diff (inline `#` comment columns re-aligned in Python code blocks) that
+  predates the 83/84 session and was deliberately left unstaged rather than
+  bundled into either of that session's commits — it's unrelated to both
+  features. Check `git diff` before assuming a clean tree; commit or
+  discard it deliberately, don't fold it silently into an unrelated commit.
 - **Remotes**: `private-origin` (`git@github.com:deltam-dev/private-cosmo.git`,
   default SSH identity) is the maintainer's private backup remote — `private`
   stays in sync with it. `origin` (`git@github.com-mauendara:mauendara/cosmo.git`)
@@ -96,7 +118,7 @@ not a record of how we got here.
 |---|---|---|
 | [v3-cosmo-autonomous-agent-spec.md](v3-cosmo-autonomous-agent-spec.md) | The authoritative specification | **Source of truth** for the original 0-10 plan. v1/v2 are superseded — read only for history |
 | [v3-implementation-plan.md](v3-implementation-plan.md) | 11-phase build plan | The map for what's built. **Do not edit** — record decisions in `v3-implementation-state.md` instead |
-| [v3-implementation-state.md](v3-implementation-state.md) | What actually exists, plus the cumulative deviations table (1-82) and implementation-time decisions | Read the most recent deviation entries before doing anything non-trivial |
+| [v3-implementation-state.md](v3-implementation-state.md) | What actually exists, plus the cumulative deviations table (1-84) and implementation-time decisions | Read the most recent deviation entries before doing anything non-trivial |
 | [v4-changes-to-workflow-plan.md](v4-changes-to-workflow-plan.md) | The raw-spec-workflow feature design | Implemented — see its own Status line |
 | [v5-improvements-plan.md](v5-improvements-plan.md) | Crash/pause resume, Telegram notifications, `--follow`, live-terminal observability, quota-bypass, harness failure-pattern research | Implemented — see its own Status line |
 | [v6-project-template-aware-stuff-plan.md](v6-project-template-aware-stuff-plan.md) | Making the gate/failure-classifier project-template-aware, for stacks beyond Java+Spring/Vite+React | **Not started — design record only.** Needs a real second stack before it's buildable; don't start opportunistically |
@@ -204,7 +226,7 @@ superseded/consumed.
 
 1. `./check.sh` green (if any code changed at all).
 2. Record any new deviation in `v3-implementation-state.md`'s cumulative
-   table (next number is **83**).
+   table (next number is **85**).
 3. Commit to the current branch (`private`, per CONTRIBUTING.md's branching
    model — day-to-day work never targets `develop` directly) with a message
    explaining *why*, in the style of the existing commit history.
