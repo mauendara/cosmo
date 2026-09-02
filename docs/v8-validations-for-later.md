@@ -64,3 +64,46 @@ pointer from `docs/handoff.md` once nothing here is still open.
 - **A real `bypass_5h_with_credits=true` run** needs a real, deliberate
   5-hour quota exhaustion window to test against — real spend, real
   waiting, not something to force casually.
+
+- **`ori-claude` harness Phase 6 validations (V1-V6)**, from
+  [v13-ori-cc-harness-template-plan.md](v13-ori-cc-harness-template-plan.md).
+  Phases 1-5 (shared invoker extraction, per-harness model config,
+  `OriClaudeAdapter`, the `ori-claude` template, and all their unit/parity
+  tests) are implemented and merged — `check.sh` green. None of V1-V6 have
+  run: this host has neither the `ori` binary nor `OPENROUTER_API_KEY`
+  installed/set, and installing a third-party binary via a piped
+  install script plus wiring in an API credential is a deliberate,
+  user-approved action, not something to do opportunistically mid-session
+  (confirmed with the user 2026-09-02: they'll set both up themselves).
+  Each item is unrun until someone with `ori` + a real OpenRouter key
+  drives it against a scratch repo:
+  - **V1** `cosmo harness probe --harness ori-claude` — does `--output-format
+    stream-json --verbose` actually work through Ori (v12 only tested
+    plain `json`)?
+  - **V2 — the gate on the whole plan.** A `Bash`-denying `PreToolUse` hook
+    in an `ori-claude`-synced scratch worktree, driven through the real
+    adapter argv (`--setting-sources project` included). If Ori's own
+    inline `--settings` displaces the project's `settings.json` hooks,
+    `supports_gating=True` on `OriClaudeAdapter` is currently a lie and
+    must be corrected (either drop `--setting-sources project` on this
+    route, accepting the spec 2.5 operator-global-config leak, or flip the
+    capability to `False` and document this route as diff-gate-only).
+  - **V3** No `--model` conflict end to end: a second `--model` must not
+    reach `claude`, and `ANTHROPIC_MODEL` must actually be honored.
+  - **V4** A long-running `Bash` call cancelled mid-flight via
+    `adapter.cancel` — no surviving process in the group. (Unit-tested
+    with a stand-in fixture in `tests/test_harness_ori_adapter.py`; this
+    item is specifically about the real `ori`/`claude` process tree, not
+    the fixture.)
+  - **V5** Full `cosmo run --harness ori-claude` on a scratch project, one
+    small task, propose → implement → gate → review → commit.
+  - **V6** Informational: does any rate-limit-shaped stream event appear at
+    all through OpenRouter? Expected: no, degrading to spec 7.2's
+    secondary/tertiary quota detectors by design.
+
+  Per the plan's own commit-shape rule, the plan's Phase 6 docs commit
+  (updating `config-schema.md`, `write-a-new-adapter.md`,
+  `architecture-overview.md`, `quota-and-safety-model.md`, `README.md`,
+  and `docs/v3-implementation-state.md`'s deviation table) must not land
+  before these actually run — it would otherwise assert a gating guarantee
+  nobody has watched work.
