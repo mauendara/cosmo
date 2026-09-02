@@ -21,6 +21,15 @@ HARNESS_ROOT_LINKS: dict[str, tuple[tuple[str, str], ...]] = {
         ("agents", "agents"),
         ("skills", "skills"),
     ),
+    # Same four names: the tool reading them is still Claude Code, so it
+    # still looks for `.claude`/`CLAUDE.md` -- only the `.agent/<harness>/`
+    # tree they resolve into differs.
+    "ori-claude": (
+        ("CLAUDE.md", "CLAUDE.md"),
+        (".claude", ""),
+        ("agents", "agents"),
+        ("skills", "skills"),
+    ),
 }
 
 
