@@ -35,6 +35,48 @@ not a record of how we got here.
   global per-role config only, not per-spec/per-batch — confirmed with the
   user rather than assumed; that would need task-row persistence and new
   CLI flags, a bigger feature than asked for.
+- **Cline researched as a possible new harness adapter** (driven through
+  OpenRouter, so different models could be tried against Cosmo) —
+  **research only, nothing implemented, no code changed this session.**
+  Findings are in
+  [v11-cline-harness-info.md](v11-cline-harness-info.md): real headless
+  invocation confirmed working (`cline --json -P openrouter -m <model-id>`),
+  a real structured JSON terminal event exists (`run_result`, with
+  cost/duration/finishReason), but **no gating mechanism reachable from
+  headless one-shot invocation currently works** — `CLINE_COMMAND_PERMISSIONS`
+  is documented but is dead code (zero call sites anywhere in `cline/cline`,
+  confirmed by cloning and grepping the real source), a vendored
+  Claude-Code-shaped `--hooks-dir` hook system didn't fire in testing, and a
+  third mechanism (`CLINE_TOOL_APPROVAL_MODE=desktop` file-IPC approval) is
+  real and well-designed but is blocked by a specific, well-scoped ordering
+  bug in `cline`'s own `run-agent.ts` (session id set after the one-shot
+  turn already ran). None of this has been filed upstream yet. If this gets
+  picked up again: read v11 first, and don't re-trust `docs.cline.bot`
+  without cross-checking the real source — several pages there describe
+  behavior that doesn't correspond to shipped code.
+- **Ori Harness and OpenCode researched next, following directly from the
+  Cline gating dead-end** — **research only, nothing implemented, no code
+  changed this session.** Both have a real, confirmed-by-real-invocation
+  pre-execution gating mechanism (the thing Cline lacked). Findings are in
+  [v12-ori-opencode-harness-info.md](v12-ori-opencode-harness-info.md):
+  `ori claude` is a thin wrapper that execs the real Claude Code binary
+  through OpenRouter — its `PreToolUse` hooks fire and block exactly like
+  native Claude Code (confirmed: a real hook denied a `Bash` call, surfaced
+  in `permission_denials`, same JSON schema the existing adapter already
+  parses), headless auth resolves from `OPENROUTER_API_KEY` with zero
+  setup, and cancellation needs no adapter changes (Ori execs in place, no
+  wrapper process survives). OpenCode has no built-in gating but a
+  hand-written `tool.execute.before` plugin genuinely blocked a tool call
+  under headless `--auto`, confirmed by real invocation — real work to
+  build (new adapter, new template, JS/TS guardrail plugins) but the
+  stronger long-term pick for testing non-Anthropic models, since its agent
+  loop is provider-agnostic rather than Claude Code's loop retargeted.
+  Hermes and Pi were in scope but not hands-on verified (deprioritized once
+  Ori/OpenCode came back positive) — v12 records surface-level, unverified
+  leads on both; Pi ships with no gating by design, Hermes's approval flow
+  looks console-oriented rather than scriptable, closer to Cline's broken
+  shape than to Ori/OpenCode's. If this gets picked up again: read v12
+  first alongside v11.
 - **v0.1.1 is a patch release**: v0.1.0 got its first real usage (a real
   `cosmo run` against a real target repo, not this repo's own test suite)
   and surfaced three real bugs, all fixed and covered by a regression test
@@ -126,6 +168,8 @@ not a record of how we got here.
 | [v8-validations-for-later.md](v8-validations-for-later.md) | Real-invocation validations still owed | **Tracking document, not a plan.** Update an entry in place when it gets a real run |
 | [v9-out-of-scope-desirables.md](v9-out-of-scope-desirables.md) | Everything declared out of scope, deferred, or still an open design decision | **Tracking document, not a plan.** Read before assuming a gap is an oversight |
 | [v10-user-docs-discrepancies.md](v10-user-docs-discrepancies.md) | Where the public-docs brief described Cosmo differently from what the code does | **Tracking document, not a plan.** Read before touching `task.guardrail_tripped`, the diff gate's `test_path_modified` rule, or assuming gate stage commands are configurable |
+| [v11-cline-harness-info.md](v11-cline-harness-info.md) | Research findings on Cline's CLI as a possible new harness adapter (via OpenRouter) | **Findings only, not a plan or a `HarnessCapabilities` proposal.** Nothing implemented. Read before starting real adapter work for Cline — especially the gating section, which found a real but currently-broken mechanism, not an absent one |
+| [v12-ori-opencode-harness-info.md](v12-ori-opencode-harness-info.md) | Research findings on Ori Harness (`ori claude`, real Claude Code through OpenRouter) and OpenCode as possible new harness adapters | **Findings only, not a plan or a `HarnessCapabilities` proposal.** Nothing implemented. Both have real, confirmed-working headless gating, unlike Cline — read this before choosing which harness to build next |
 
 Internal `vN` documents above are **not** the user-facing ones. Public docs
 live in `README.md`, `user-docs/`, and the four root docs — written for a
