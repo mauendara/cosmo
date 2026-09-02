@@ -18,7 +18,10 @@ SRC = Path(__file__).resolve().parents[1] / "src" / "cosmo"
 ALLOWED_HARNESS_AWARE = {
     SRC / "harness" / "claude" / "__init__.py",
     SRC / "harness" / "claude" / "adapter.py",
+    SRC / "harness" / "claude" / "invoker.py",  # shared mechanics, both claude-binary routes
     SRC / "harness" / "claude" / "stream.py",
+    SRC / "harness" / "ori" / "__init__.py",
+    SRC / "harness" / "ori" / "adapter.py",
     SRC / "harness" / "registry.py",  # maps names to classes; that is its job
     SRC / "config" / "defaults.toml",  # configuration data, not logic
     # Spec 10.2: which paths a harness expects symlinked at the target repo's
