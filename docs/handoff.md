@@ -77,6 +77,31 @@ not a record of how we got here.
   looks console-oriented rather than scriptable, closer to Cline's broken
   shape than to Ori/OpenCode's. If this gets picked up again: read v12
   first alongside v11.
+- **The Ori+Claude-Code path now has a build plan** —
+  [v13-ori-cc-harness-template-plan.md](v13-ori-cc-harness-template-plan.md),
+  **plan only, nothing implemented, no code changed.** It treats native
+  Claude Code and Ori-routed Claude Code as two separate harnesses
+  (`claude` and `ori-claude`), each with its own template, rather than a
+  config toggle on one adapter. Four design decisions were put to the user
+  and chosen rather than assumed: extract a shared `_ClaudeCodeInvoker` so
+  neither adapter is the other's base class; a **full independent copy** at
+  `templates/harness/ori-claude/` (no template-inheritance machinery), held
+  against drift by a byte-parity test on the hook scripts; per-harness model
+  config via new `[harness.overrides.<name>]` tables, because an OpenRouter
+  model id is meaningless to native Claude Code and vice versa; and scope
+  limited to Ori+Claude only, named `ori-claude` so a future `ori-codex`
+  needs no rename. Two things a session picking this up must not skip: the
+  **whole plan is gated on validation V2** (v12 confirmed hooks fire through
+  Ori, but *without* `--setting-sources project` in the argv, and Ori passes
+  its own inline `--settings` JSON — if those displace the project's
+  `settings.json` hooks then `supports_gating=True` is a lie and the adapter
+  must say so instead), and the **billing check inverts** on this path
+  (`ANTHROPIC_API_KEY` is scrubbed but is never a hard `fail` since Ori
+  supplies its own; the real footgun is metered OpenRouter tokens running
+  overnight with `cost.max_cost_per_run_usd = 0.0`, the shipped default,
+  which is why that becomes a preflight `warn`). Quota detection is expected
+  to degrade to spec 7.2's secondary/tertiary detectors on this path, and
+  the plan deliberately lets it rather than special-casing the parser.
 - **v0.1.1 is a patch release**: v0.1.0 got its first real usage (a real
   `cosmo run` against a real target repo, not this repo's own test suite)
   and surfaced three real bugs, all fixed and covered by a regression test
@@ -170,6 +195,7 @@ not a record of how we got here.
 | [v10-user-docs-discrepancies.md](v10-user-docs-discrepancies.md) | Where the public-docs brief described Cosmo differently from what the code does | **Tracking document, not a plan.** Read before touching `task.guardrail_tripped`, the diff gate's `test_path_modified` rule, or assuming gate stage commands are configurable |
 | [v11-cline-harness-info.md](v11-cline-harness-info.md) | Research findings on Cline's CLI as a possible new harness adapter (via OpenRouter) | **Findings only, not a plan or a `HarnessCapabilities` proposal.** Nothing implemented. Read before starting real adapter work for Cline — especially the gating section, which found a real but currently-broken mechanism, not an absent one |
 | [v12-ori-opencode-harness-info.md](v12-ori-opencode-harness-info.md) | Research findings on Ori Harness (`ori claude`, real Claude Code through OpenRouter) and OpenCode as possible new harness adapters | **Findings only, not a plan or a `HarnessCapabilities` proposal.** Nothing implemented. Both have real, confirmed-working headless gating, unlike Cline — read this before choosing which harness to build next |
+| [v13-ori-cc-harness-template-plan.md](v13-ori-cc-harness-template-plan.md) | The build plan for `ori-claude` as a second harness adapter and template, alongside native `claude` | **Not started — plan only.** Read v12 first for the evidence it rests on. Its four design decisions were chosen by the user, not derived — don't relitigate them; its Phase 6 validations (especially V2, the gating one) are what the plan is conditional on |
 
 Internal `vN` documents above are **not** the user-facing ones. Public docs
 live in `README.md`, `user-docs/`, and the four root docs — written for a
