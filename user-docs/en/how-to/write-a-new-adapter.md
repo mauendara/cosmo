@@ -1,10 +1,25 @@
 # How to write a harness adapter
 
 A **harness** is the coding agent Cosmo drives — the thing that actually
-proposes and writes code. Claude Code is the only adapter implemented today.
-This document specifies the interface precisely enough that you can add
-another (Codex CLI, OpenCode, an in-house agent) without asking anyone a
-question.
+proposes and writes code. Two adapters are implemented today: `claude`
+(native Claude Code, subscription-billed) and `ori-claude` (the same real
+`claude` binary, routed through [Ori](https://openrouter.ai/labs/ori) to
+OpenRouter, metered per token). This document specifies the interface
+precisely enough that you can add another (Codex CLI, OpenCode, an in-house
+agent) without asking anyone a question.
+
+**Two adapters wrapping the same underlying tool, not one adapter with a
+config toggle** is the pattern `ori-claude` established, and it's worth
+following if your new adapter is also "the same real binary, launched a
+different way" rather than a genuinely different tool: extract the shared
+invocation mechanics (argv assembly minus the couple of genuinely differing
+flags, env assembly, `_invoke`, `cancel`, the process-supervision logic
+below) into one internal base class neither adapter subclasses the other
+from, and let each concrete adapter declare only what's actually different
+— `preflight`, and the couple of `_build_argv`/`_build_env` lines that
+differ. See `src/cosmo/harness/claude/invoker.py`'s `_ClaudeCodeInvoker`
+for a real instance of this shape, with `ClaudeCodeAdapter` and
+`OriClaudeAdapter` as its two thin subclasses.
 
 Contributions of new adapters are explicitly welcome. See
 [CONTRIBUTING.md](../../../CONTRIBUTING.md) for the PR conventions.
@@ -39,6 +54,7 @@ from cosmo.harness.mytool import MyToolAdapter
 
 _REGISTRY: dict[str, type[HarnessAdapter]] = {
     ClaudeCodeAdapter.name: ClaudeCodeAdapter,
+    OriClaudeAdapter.name: OriClaudeAdapter,
     FakeHarnessAdapter.name: FakeHarnessAdapter,
     MyToolAdapter.name: MyToolAdapter,  # ← add this
 }

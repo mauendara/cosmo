@@ -70,7 +70,7 @@ fails the build, not review:
 | --- | --- |
 | `cosmo.gate` never imports `cosmo.harness` | `tests/test_gate_boundary.py` |
 | `cosmo.git` never imports `cosmo.harness` | `tests/test_git_boundary.py` |
-| Only the Claude adapter module names Claude-specific binaries, flags or env vars | `tests/test_harness_boundary.py` |
+| Only a harness adapter's own module names its binaries, flags or env vars | `tests/test_harness_boundary.py` |
 | `--dangerously-skip-permissions` / `bypassPermissions` never appear in constructed argv | adapter assertion plus an external test |
 
 These make guarantees structural rather than conventional. The gate can't be

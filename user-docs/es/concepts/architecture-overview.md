@@ -42,9 +42,15 @@ fuente, no por convención:
   por lo tanto nunca se le devuelve al agente para que lo resuelva a ciegas —
   no hay ningún adaptador dentro del alcance de esa ruta de código al cual
   entregárselo.
-- **Solo el módulo adaptador de Claude puede nombrar binarios, flags o
-  variables de entorno específicos de Claude.** El código central de
-  orquestación nunca se ramifica según qué harness esté configurado.
+- **Solo el propio módulo de un adaptador de harness puede nombrar sus
+  binarios, flags o variables de entorno.** El código central de
+  orquestación nunca se ramifica según qué harness esté configurado. Hoy hay
+  dos adaptadores registrados: `claude` (Claude Code nativo, facturado por
+  suscripción) y `ori-claude` (el mismo binario real de `claude`, enrutado
+  a través de Ori hacia OpenRouter, con tarifa medida por token) —
+  comparten su mecánica de invocación a través de una clase base interna,
+  pero ninguno es la clase base del otro, y el código central no puede
+  distinguirlos.
 
 ## Serial por diseño
 
@@ -264,6 +270,9 @@ Aclarado aquí para que no se confunda con una funcionalidad ya entregada:
   desde afuera. Es una capacidad distinta de que Cosmo *use* un agente como
   harness, y las dos cosas no deben confundirse. **Hoy no existe tal
   servidor.**
-- **Adaptadores distintos de Claude Code.** La interfaz es real y el límite
-  está impuesto por tests; el segundo adaptador aún no está escrito.
+- **Adaptadores distintos de `claude` y `ori-claude`.** La interfaz es real
+  y el límite está impuesto por tests; un tercer adaptador (por ejemplo
+  OpenCode, cuyo bucle de agente agnóstico de proveedor es una forma
+  genuinamente distinta a la de los dos adaptadores existentes) aún no está
+  escrito.
 - **Ejecución paralela de tareas.** Ver "Serial por diseño" arriba.

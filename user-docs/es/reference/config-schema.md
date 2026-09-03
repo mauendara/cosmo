@@ -56,6 +56,45 @@ implement_model = "claude-sonnet-5"
 review_model = "claude-haiku-4-5"
 ```
 
+### `[harness.overrides.<name>]`
+
+Overrides de modelo por harness, indexados por nombre de harness. El
+espacio de nombres de modelos de un harness es propio -- un id de modelo de
+OpenRouter (`anthropic/claude-sonnet-4.5`) no significa nada para Claude
+Code nativo, y un id nativo de Claude Code (`claude-sonnet-5`) no significa
+nada para OpenRouter -- así que un solo archivo de configuración puede tener
+los modelos correctos para cada harness registrado a la vez, y cambiar de
+harness es un flag `--harness`, no una edición de configuración.
+
+| Clave | Tipo | Por defecto | Descripción |
+| --- | --- | --- | --- |
+| `model` | string o sin definir | sin definir | Modelo por defecto/de respaldo para este harness. |
+| `propose_model` | string o sin definir | sin definir | Sobrescribe `[harness] propose_model` solo para este harness. |
+| `implement_model` | string o sin definir | sin definir | Sobrescribe `[harness] implement_model` solo para este harness. |
+| `review_model` | string o sin definir | sin definir | Sobrescribe `[harness] review_model` solo para este harness. |
+
+Orden de resolución para un harness y rol dados, de más específico a menos:
+`overrides[harness].<rol>_model` → `overrides[harness].model` →
+`[harness] <rol>_model` → `[harness] model`. `probe` (la prueba de humo con
+prompt crudo y la llamada de enriquecimiento de `cosmo spec add`) no tiene
+un campo `probe_model` propio en ningún nivel y resuelve directamente a los
+niveles de `model`.
+
+**El harness `ori-claude` necesita esta tabla para funcionar.** El valor
+por defecto de `[harness] model` (`"claude-sonnet-5"`) es un id de modelo
+nativo de Claude Code -- no está en el catálogo de OpenRouter, así que
+`ori-claude` lo pasa sin reconocer y la llamada falla al autenticar. Define
+al menos `[harness.overrides.ori-claude].model` con un id de modelo real de
+OpenRouter:
+
+```toml
+[harness.overrides.ori-claude]
+model = "anthropic/claude-sonnet-4.5"
+propose_model = "openai/gpt-5"
+implement_model = "qwen/qwen3-coder"
+review_model = "google/gemini-2.5-pro"
+```
+
 ## `[timeouts]`
 
 Todos los valores en segundos, todos deben ser > 0.
@@ -117,6 +156,15 @@ compartidos, no un entorno roto.
 Una tarea bloqueada por `cost` se reevalúa contra el tope *actual* al inicio
 de la siguiente ejecución y se desbloquea automáticamente si un humano lo
 elevó o lo desactivó mientras tanto.
+
+**`ori-claude` es de tarifa medida, a diferencia de `claude` nativo.** El
+valor por defecto `0.0` (desactivado) es la postura correcta para Claude
+Code nativo, que se factura por suscripción. `ori-claude` enruta a través
+de OpenRouter, donde cada token es gasto real por llamada -- ejecutarlo con
+`max_cost_per_run_usd` todavía en `0.0` significa que una ejecución
+desatendida no tiene ningún tope duro de gasto. Define un tope real aquí
+antes de ejecutar `ori-claude` sin supervisión; esta sección se comparte
+entre todos los harnesses (no existe una tabla `[cost]` por harness).
 
 ## `[gate]`
 
@@ -196,6 +244,16 @@ necesidad de él.
 La heurística de reloj de pared nunca se reporta como una señal confirmada,
 y siempre se trata como la ventana de cinco horas más corta y segura; no hay
 forma de inferir una ventana semanal solo a partir del tiempo.
+
+**En `ori-claude`**, la detección primaria (estructurada) de cuota degrada a
+los detectores secundario (`result_error_subtypes`) y terciario (heurística
+de reloj de pared) de esta sección -- confirmado por invocación real:
+OpenRouter nunca emite el evento de stream con forma de límite de tasa
+específico de Anthropic que busca el detector primario. Esto es el
+mecanismo de respaldo documentado en la spec 7.2 para un harness sin señal
+primaria funcionando como está diseñado, no un vacío. `bypass_5h_with_credits`
+no tiene sentido en este harness (no hay una ventana de suscripción de
+cinco horas que saltarse) y queda inerte si se define.
 
 ## `[notify]`
 

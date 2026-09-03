@@ -51,6 +51,43 @@ implement_model = "claude-sonnet-5"
 review_model = "claude-haiku-4-5"
 ```
 
+### `[harness.overrides.<name>]`
+
+Per-harness model overrides, keyed by harness name. A harness's model
+namespace is its own — an OpenRouter model id (`anthropic/claude-sonnet-4.5`)
+is meaningless to native Claude Code, and a bare Claude Code id
+(`claude-sonnet-5`) is meaningless to OpenRouter — so one config file can
+hold correct models for every registered harness at once, and switching
+harnesses is a `--harness` flag, not a config edit.
+
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `model` | string or unset | unset | Default/fallback model for this harness. |
+| `propose_model` | string or unset | unset | Overrides `[harness] propose_model` for this harness only. |
+| `implement_model` | string or unset | unset | Overrides `[harness] implement_model` for this harness only. |
+| `review_model` | string or unset | unset | Overrides `[harness] review_model` for this harness only. |
+
+Resolution order for a given harness and role, narrowest first:
+`overrides[harness].<role>_model` → `overrides[harness].model` →
+`[harness] <role>_model` → `[harness] model`. `probe` (the raw-prompt
+smoke test and `cosmo spec add`'s enrichment call) has no dedicated
+`probe_model` field on either rung and resolves straight to the `model`
+rungs.
+
+**The `ori-claude` harness needs this table to work at all.** The shipped
+`[harness] model` default (`"claude-sonnet-5"`) is a native Claude Code
+model id — it is not in OpenRouter's catalog, so `ori-claude` passes it
+through unrecognized and the call fails authentication. Set at least
+`[harness.overrides.ori-claude].model` to a real OpenRouter model id:
+
+```toml
+[harness.overrides.ori-claude]
+model = "anthropic/claude-sonnet-4.5"
+propose_model = "openai/gpt-5"
+implement_model = "qwen/qwen3-coder"
+review_model = "google/gemini-2.5-pro"
+```
+
 ## `[timeouts]`
 
 All values in seconds, all must be > 0.
@@ -111,6 +148,14 @@ not a broken environment.
 A task blocked on `cost` is re-evaluated against the *current* ceiling at the
 next run's startup and unblocked automatically if a human raised or disabled
 it in between.
+
+**`ori-claude` is metered, unlike native `claude`.** The `0.0` (disabled)
+default is the right posture for native Claude Code, which is
+subscription-billed. `ori-claude` routes through OpenRouter, where every
+token is real, per-call spend — running it with `max_cost_per_run_usd`
+still at `0.0` means an unattended run has no spend hard stop at all. Set a
+real ceiling here before running `ori-claude` unattended; this section is
+shared across every harness (there is no per-harness `[cost]` table).
 
 ## `[gate]`
 
@@ -189,6 +234,15 @@ must not exist without the spend ceiling it creates the need for.
 The wall-clock heuristic is never reported as a confirmed signal, and is
 always treated as the shorter, safer five-hour window; there is no way to
 infer a weekly window from timing alone.
+
+**On `ori-claude`**, primary (structured) quota detection degrades to this
+section's secondary (`result_error_subtypes`) and tertiary (wall-clock
+heuristic) detectors — confirmed by real invocation: OpenRouter never emits
+the Anthropic-specific rate-limit-shaped stream event the primary detector
+looks for. This is spec 7.2's documented fallback for a harness with no
+primary signal working as designed, not a gap. `bypass_5h_with_credits` is
+meaningless on this route (there is no five-hour subscription window to
+bypass) and stays inert if set.
 
 ## `[notify]`
 

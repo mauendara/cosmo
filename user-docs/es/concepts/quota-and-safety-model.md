@@ -90,13 +90,20 @@ Las ventanas de rate-limit son la restricción que realmente afecta a una
 ejecución nocturna facturada por suscripción. Cosmo detecta el agotamiento
 de tres maneras, en orden descendente de confianza.
 
-**1. Primaria — la señal estructurada propia del harness.** El adaptador de
-Claude extrae una señal de rate-limit del stream de salida de la CLI, que
-entrega una ventana (`five_hour` o `weekly`) y, cuando el canal la incluye,
-una hora de reinicio. Confirmada. Solo es procesable en una llamada
-*fallida*: una señal de rate-limit vista a mitad de stream no significa que
-la llamada haya fallado — el reintento interno propio de la CLI a menudo la
-absorbe y la llamada de todos modos tiene éxito.
+**1. Primaria — la señal estructurada propia del harness.** El adaptador
+nativo de `claude` extrae una señal de rate-limit del stream de salida de
+la CLI, que entrega una ventana (`five_hour` o `weekly`) y, cuando el canal
+la incluye, una hora de reinicio. Confirmada. Solo es procesable en una
+llamada *fallida*: una señal de rate-limit vista a mitad de stream no
+significa que la llamada haya fallado — el reintento interno propio de la
+CLI a menudo la absorbe y la llamada de todos modos tiene éxito.
+
+En `ori-claude`, esta señal primaria nunca se dispara — confirmado por
+invocación real: OpenRouter no emite ningún evento de rate-limit con forma
+de Anthropic. Las ejecuciones de `ori-claude` siempre degradan directamente
+a los detectores secundario y terciario de abajo; este es el mecanismo de
+respaldo documentado en la spec 7.2 para un harness sin señal primaria, no
+un vacío específico de este adaptador.
 
 **2. Secundaria — el subtipo de error del resultado final**, comparado
 contra `quota.result_error_subtypes` (por defecto `["error_rate_limit"]`).
@@ -139,13 +146,16 @@ gasto acumulado hasta el momento.
 niega a cargar una configuración con el bypass activado y sin techo de
 gasto — el bypass existe para eliminar lo que de otro modo detendría el
 gasto, así que no puede publicarse sin el respaldo que lo recrea.
+`bypass_5h_with_credits` no tiene sentido en `ori-claude` — no hay una
+ventana de suscripción de cinco horas que saltarse en una ruta de tarifa
+medida por OpenRouter — y queda inerte si se define ahí.
 
 ## Costo
 
 Dos techos independientes, ambos con valor por defecto `0.0`, lo cual
-significa *sin freno duro* — la postura correcta para un harness facturado
-por suscripción, donde las ventanas de cuota gobiernan en lugar de los
-dólares.
+significa *sin freno duro* — la postura correcta para `claude` nativo, un
+harness facturado por suscripción donde las ventanas de cuota gobiernan en
+lugar de los dólares.
 
 - **`cost.max_cost_per_run_usd`** — la ejecución completa. Un evento
   `run.cost_warning` se dispara en `cost.warn_at_fraction` (por defecto
@@ -154,7 +164,14 @@ dólares.
   tarea con `blocked_reason=cost` y continúa, en lugar de detener la
   ejecución.
 
-Configura ambos si estás en facturación medida.
+Configura ambos si estás en facturación medida — **y define al menos
+`max_cost_per_run_usd` antes de ejecutar `ori-claude` sin supervisión.** A
+diferencia de `claude` nativo, `ori-claude` tiene tarifa medida por token de
+OpenRouter sin importar el tipo de cuenta, así que el valor por defecto
+`0.0` deja a una ejecución desatendida sin ningún freno duro de gasto.
+`[cost]` se comparte entre todos los harnesses — no hay una tabla de costo
+por harness — así que este techo también se aplica a las ejecuciones de
+`claude` una vez definido.
 
 Una tarea bloqueada por costo tiene una propiedad útil: solo puede
 desbloquearse legítimamente si un humano sube el techo, ya que el costo
@@ -222,7 +239,10 @@ Al inicio de cada ejecución:
 
 ## El modelo de permisos
 
-Específico del adaptador de Claude Code, aunque la postura se generaliza.
+Específico del propio sistema de permisos del binario `claude` — compartido
+por los dos adaptadores que lo lanzan (`claude` y `ori-claude`, confirmado
+idéntico por invocación real en ambas rutas), aunque la postura se
+generaliza también hacia un futuro adaptador que no sea Claude Code.
 
 - **`dontAsk` falla cerrado.** Solo se ejecutan las llamadas a herramientas
   que coinciden con la lista de permitidos. Nada que no esté explícitamente

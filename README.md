@@ -3,11 +3,16 @@
 🇬🇧 English | [🇪🇸 Español](README.es.md)
 
 > **v0.1.1 — not production ready.** Real-world testing so
-> far has been limited to the Claude Code harness on a $20/month Pro
+> far has been limited to the native `claude` harness on a $20/month Pro
 > subscription, against small greenfield projects built on the
-> `vite-react-local` template (frontend-only stack). Other harnesses,
-> larger or brownfield repos, and the backend-inclusive templates are
-> implemented but not battle-tested. Expect rough edges outside that path.
+> `vite-react-local` template (frontend-only stack). A second harness,
+> `ori-claude` (the same `claude` binary routed through
+> [Ori](https://openrouter.ai/labs/ori) to OpenRouter, metered per token),
+> is implemented and its adapter mechanics validated by real invocation, but
+> has not been run through a full overnight multi-task acceptance run the
+> way native `claude` has. Larger or brownfield repos and the
+> backend-inclusive templates are implemented but not battle-tested either.
+> Expect rough edges outside the well-trodden path.
 
 **An overnight coding agent will tell you it finished. Cosmo doesn't take its
 word for it.**
@@ -126,7 +131,9 @@ and a working harness. Full prerequisites and first run:
 
 Cosmo never invokes a coding-agent CLI directly. Every call goes through one
 adapter interface, and no orchestration code branches on which harness is
-configured. **Claude Code is the only adapter implemented today** — that's a
+configured. **Two adapters are implemented today**: `claude` (native Claude
+Code) and `ori-claude` (the same `claude` binary routed through Ori to
+OpenRouter, for running non-subscription/non-Anthropic models) — that's a
 starting point, not the ceiling. Writing another one is a single class:
 [write-a-new-adapter](user-docs/en/how-to/write-a-new-adapter.md).
 
@@ -162,15 +169,18 @@ commitment:
 
 - **An MCP wrapper** around the queue and run control, so an editor or
   another agent can drive Cosmo without shelling out to the CLI.
-- **A Cursor adapter and harness template** — a second `HarnessAdapter`
-  implementation, to prove the harness-agnostic design against a second real
-  tool.
+- **An OpenCode (or Cursor/Codex) adapter and harness template** — a third
+  `HarnessAdapter` implementation and a genuinely different underlying tool,
+  not just a different route to Claude Code the way `ori-claude` is. The
+  harness-agnostic design is already proven against a second real adapter;
+  this would prove it against a second real *tool*, with its own stream
+  format and gating story to build from scratch.
 - **A small webapp for monitoring runs** — a read-only view over the event
   log and queue state, for watching an overnight run without `cosmo events
   tail` in a terminal.
 
 Want to build one? [write-a-new-adapter](user-docs/en/how-to/write-a-new-adapter.md)
-is the starting point for the Cursor adapter; open an issue to discuss the
+is the starting point for a third adapter; open an issue to discuss the
 other two.
 
 ## License

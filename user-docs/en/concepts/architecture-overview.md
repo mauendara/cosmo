@@ -39,9 +39,13 @@ not by convention:
 - **The merge ladder never imports the harness.** A merge conflict is
   therefore never handed back to the agent to resolve blind — there is no
   adapter in scope for that code path to hand it to.
-- **Only the Claude adapter module may name Claude-specific binaries, flags
-  or environment variables.** Core orchestration code never branches on which
-  harness is configured.
+- **Only a harness adapter's own module may name its binaries, flags or
+  environment variables.** Core orchestration code never branches on which
+  harness is configured. Two adapters are registered today: `claude` (native
+  Claude Code, subscription-billed) and `ori-claude` (the same real `claude`
+  binary, routed through Ori to OpenRouter, metered per token) — they share
+  their invocation mechanics through one internal base class, but neither is
+  the other's base class, and core code can't tell them apart.
 
 ## Serial by design
 
@@ -243,6 +247,8 @@ Stated here so it isn't mistaken for a shipped feature:
   cancel, logs) from the outside. This is a distinct capability from Cosmo
   *using* an agent as a harness, and the two shouldn't be conflated. **No
   such server exists today.**
-- **Adapters other than Claude Code.** The interface is real and the
-  boundary is test-enforced; the second adapter isn't written.
+- **Adapters other than `claude` and `ori-claude`.** The interface is real
+  and the boundary is test-enforced; a third adapter (e.g. OpenCode, whose
+  provider-agnostic agent loop is a genuinely different shape than either
+  existing adapter) isn't written.
 - **Parallel task execution.** See "Serial by design" above.

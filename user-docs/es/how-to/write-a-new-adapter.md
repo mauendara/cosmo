@@ -3,10 +3,28 @@
 > Nota: esta traducción puede no estar actualizada. El inglés es la fuente canónica de esta documentación — consulta la [versión en inglés](../../en/how-to/write-a-new-adapter.md).
 
 Un **harness** es el agente de codificación que Cosmo controla — lo que
-realmente propone y escribe código. Claude Code es el único adaptador
-implementado hasta hoy. Este documento especifica la interfaz con la
-precisión suficiente para que puedas agregar otro (Codex CLI, OpenCode, un
-agente propio) sin tener que preguntarle nada a nadie.
+realmente propone y escribe código. Hoy hay dos adaptadores implementados:
+`claude` (Claude Code nativo, facturado por suscripción) y `ori-claude` (el
+mismo binario real de `claude`, enrutado a través de
+[Ori](https://openrouter.ai/labs/ori) hacia OpenRouter, con tarifa medida
+por token). Este documento especifica la interfaz con la precisión
+suficiente para que puedas agregar otro (Codex CLI, OpenCode, un agente
+propio) sin tener que preguntarle nada a nadie.
+
+**Dos adaptadores que envuelven la misma herramienta subyacente, en lugar de
+un solo adaptador con un interruptor de configuración** es el patrón que
+estableció `ori-claude`, y vale la pena seguirlo si tu nuevo adaptador
+también es "el mismo binario real, lanzado de otra manera" en vez de una
+herramienta genuinamente distinta: extrae la mecánica de invocación
+compartida (el armado del argv salvo por los pocos flags que realmente
+difieren, el armado del entorno, `_invoke`, `cancel`, la lógica de
+supervisión de procesos de más abajo) en una clase base interna que ninguno
+de los dos adaptadores hereda del otro, y deja que cada adaptador concreto
+declare solo lo que realmente es distinto -- `preflight`, y las pocas líneas
+de `_build_argv`/`_build_env` que difieren. Consulta `src/cosmo/harness/
+claude/invoker.py`'s `_ClaudeCodeInvoker` para una instancia real de esta
+forma, con `ClaudeCodeAdapter` y `OriClaudeAdapter` como sus dos subclases
+delgadas.
 
 Las contribuciones de nuevos adaptadores son explícitamente bienvenidas.
 Consulta [CONTRIBUTING.md](../../../CONTRIBUTING.md) para conocer las
@@ -44,6 +62,7 @@ from cosmo.harness.mytool import MyToolAdapter
 
 _REGISTRY: dict[str, type[HarnessAdapter]] = {
     ClaudeCodeAdapter.name: ClaudeCodeAdapter,
+    OriClaudeAdapter.name: OriClaudeAdapter,
     FakeHarnessAdapter.name: FakeHarnessAdapter,
     MyToolAdapter.name: MyToolAdapter,  # ← agrega esto
 }
