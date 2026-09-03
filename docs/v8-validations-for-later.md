@@ -65,45 +65,91 @@ pointer from `docs/handoff.md` once nothing here is still open.
   5-hour quota exhaustion window to test against — real spend, real
   waiting, not something to force casually.
 
-- **`ori-claude` harness Phase 6 validations (V1-V6)**, from
+- **`ori-claude` harness Phase 6 validations (V1-V6) — RESOLVED, all run for
+  real 2026-09-02**, from
   [v13-ori-cc-harness-template-plan.md](v13-ori-cc-harness-template-plan.md).
-  Phases 1-5 (shared invoker extraction, per-harness model config,
-  `OriClaudeAdapter`, the `ori-claude` template, and all their unit/parity
-  tests) are implemented and merged — `check.sh` green. None of V1-V6 have
-  run: this host has neither the `ori` binary nor `OPENROUTER_API_KEY`
-  installed/set, and installing a third-party binary via a piped
-  install script plus wiring in an API credential is a deliberate,
-  user-approved action, not something to do opportunistically mid-session
-  (confirmed with the user 2026-09-02: they'll set both up themselves).
-  Each item is unrun until someone with `ori` + a real OpenRouter key
-  drives it against a scratch repo:
-  - **V1** `cosmo harness probe --harness ori-claude` — does `--output-format
-    stream-json --verbose` actually work through Ori (v12 only tested
-    plain `json`)?
-  - **V2 — the gate on the whole plan.** A `Bash`-denying `PreToolUse` hook
-    in an `ori-claude`-synced scratch worktree, driven through the real
-    adapter argv (`--setting-sources project` included). If Ori's own
-    inline `--settings` displaces the project's `settings.json` hooks,
-    `supports_gating=True` on `OriClaudeAdapter` is currently a lie and
-    must be corrected (either drop `--setting-sources project` on this
-    route, accepting the spec 2.5 operator-global-config leak, or flip the
-    capability to `False` and document this route as diff-gate-only).
-  - **V3** No `--model` conflict end to end: a second `--model` must not
-    reach `claude`, and `ANTHROPIC_MODEL` must actually be honored.
-  - **V4** A long-running `Bash` call cancelled mid-flight via
-    `adapter.cancel` — no surviving process in the group. (Unit-tested
-    with a stand-in fixture in `tests/test_harness_ori_adapter.py`; this
-    item is specifically about the real `ori`/`claude` process tree, not
-    the fixture.)
-  - **V5** Full `cosmo run --harness ori-claude` on a scratch project, one
-    small task, propose → implement → gate → review → commit.
-  - **V6** Informational: does any rate-limit-shaped stream event appear at
-    all through OpenRouter? Expected: no, degrading to spec 7.2's
-    secondary/tertiary quota detectors by design.
+  User set up `ori` + `OPENROUTER_API_KEY` (via
+  `/home/dev/.config/cosmo/.env`) themselves; all six items were driven
+  against a scratch repo (`/home/dev/delta/cosmo-tests/_scratch-v13-phase6`,
+  deleted after), never the real store or a real target repo. Total real
+  OpenRouter spend across every call in this validation session: **$1.42**
+  (a `[cost] max_cost_per_run_usd = 6.0` ceiling was added to the user's real
+  `~/.config/cosmo/config.toml` first, via `write_user_config_table`, before
+  the full-pipeline run).
+  - **V1 — PASS.** `cosmo harness probe --harness ori-claude` produced a real
+    `stream-json --verbose` NDJSON stream through Ori, terminal `result` with
+    a populated `total_cost_usd` and `session_id`.
+  - **V2 — PASS — the gate on the whole plan.** A real prompt drove the
+    harness to call `Bash` with `git push origin develop` inside an
+    `ori-claude`-synced scratch worktree, through the adapter's real argv
+    (`--setting-sources project` included). `commit_integrity_guard.py`'s
+    `PreToolUse` hook denied it for real: the terminal result's
+    `permission_denials` carried the exact tool call, and the tool result
+    was the guard's own deny message. Ori's inline `--settings` does **not**
+    displace the project's `settings.json` hooks. `supports_gating=True` on
+    `OriClaudeAdapter` is now a confirmed fact, not an assumption.
+  - **V3 — PASS.** `--model` placed once, before `ori`'s own `--`;
+    `ANTHROPIC_MODEL` honored end to end (confirmed both via a raw `claude`
+    shim dumping the child's env, and via real successful completions at the
+    requested model). One real gotcha found: the shipped default
+    `harness.model = "claude-sonnet-5"` is a native Claude Code id, not an
+    OpenRouter one — with no `[harness.overrides.ori-claude]` model set, Ori
+    logs `"--model claude-sonnet-5 is not in the OpenRouter catalog, passing
+    it through untouched"` and the call fails authentication. **A working
+    `[harness.overrides.ori-claude] model = "..."` (an OpenRouter id, e.g.
+    `anthropic/claude-sonnet-4.5`) is not optional for this harness** — worth
+    a documentation callout, not a code fix (the shared `model` fallback
+    existing at all is correct; it's just never a valid value for this
+    route).
+  - **V4 — PASS for the outer process** (SIGTERM reached the `ori`/`claude`
+    group promptly on cancel — confirmed via `cosmo harness probe --timeout`
+    triggering `adapter.cancel` mid-flight on a real `sleep 60` `Bash` call:
+    exit code 143, ~10s elapsed, not the full 60s). Also reproduced, for
+    real, the pre-existing and already-documented spec 2.4 step 4 limitation
+    (`proc/orphans.find_worktree_holders`'s own docstring): Claude Code's own
+    `Bash` tool implementation detaches each shell command into its own
+    session, so a bare `killpg` (what a plain `adapter.cancel()` with no
+    `run_id`/`emitter` does, e.g. `cosmo harness probe`) cannot reach it —
+    the same behavior the native adapter already has, not new to Ori. The
+    real `cosmo run` path always supplies `run_id`/`emitter`, so it goes
+    through `cancel_and_reap`'s worktree-path-based orphan sweep instead;
+    that mechanism is harness-agnostic (cwd-based, not pgid-based) and
+    already covered by `test_proc_reap.py`, not re-tested here.
+  - **V5 — PASS.** Full `cosmo run --repo <scratch> --task add-hello-doc
+    --harness ori-claude` (a trivial one-file task, `_blank` project template
+    so the gate's backend/frontend build/test stages were legitimately
+    skipped rather than faked) reached `done` end to end: real
+    `queued → proposing → proposed → implementing → validating → reviewing →
+    committing → merging → done → finishing → done`, a real `openspec new
+    change`, a real implementation commit, a real (trivially-passing, no
+    stacks present) gate run, a real separate reviewing session writing
+    `.cosmo/review-result.json`, a real merge to `develop`, and a real
+    `openspec archive`. Incidentally re-confirmed crash recovery for this
+    harness too: an accidental `SIGTERM` from a tool timeout mid-`IMPLEMENTING`
+    was cleanly requeued and re-proposed on the next `cosmo run` invocation,
+    same as the native adapter's already-documented behavior.
+  - **V6 — informational, confirmed.** No rate-limit-shaped stream event
+    (`rate_limit_event`/`system/api_retry`) appeared in any of the ~10 real
+    terminal results captured across V1-V5. Matches the plan's prediction:
+    quota detection degrades to spec 7.2's secondary/tertiary detectors on
+    this route, exactly the documented fallback, no special-casing needed.
+  - **Also found, testing-environment-only, not a code issue**: driving
+    `cosmo`/`ori claude` from inside an *already-running* Claude Code session
+    (as this validation session itself was) leaks that session's own
+    `CLAUDECODE`/`CLAUDE_CODE_*` env vars into the child through
+    `os.environ` inheritance, and the nested `claude` then reports "Not
+    logged in · Please run /login" instead of authenticating via Ori's
+    credential — confirmed root-caused by stripping exactly those vars
+    (`env -u CLAUDECODE -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION
+    -u CLAUDE_CODE_MESSAGING_SOCKET -u CLAUDE_CODE_MESSAGING_TOKEN -u
+    CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_EXECPATH -u
+    CLAUDE_AGENT_SDK_VERSION -u CLAUDE_PID -u CLAUDE_EFFORT -u
+    CLAUDE_CODE_ENABLE_TASKS -u CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING -u
+    AI_AGENT`), after which every call succeeded. Won't affect a real
+    deployment (systemd service, cron, a plain terminal) — only a developer
+    testing `ori-claude` locally from inside their own Claude Code terminal
+    hits this, and would otherwise misread it as a broken adapter.
 
-  Per the plan's own commit-shape rule, the plan's Phase 6 docs commit
-  (updating `config-schema.md`, `write-a-new-adapter.md`,
-  `architecture-overview.md`, `quota-and-safety-model.md`, `README.md`,
-  and `docs/v3-implementation-state.md`'s deviation table) must not land
-  before these actually run — it would otherwise assert a gating guarantee
-  nobody has watched work.
+  Now that V1-V6 have run, the plan's own Phase 6 docs commit (public
+  user-docs updates) is unblocked — see `docs/v3-implementation-state.md`'s
+  deviation 85 and `docs/handoff.md` for what shipped.
