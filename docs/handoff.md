@@ -130,6 +130,31 @@ not a record of how we got here.
   [v8-validations-for-later.md](v8-validations-for-later.md)'s now-resolved
   entry, which also has the complete V1-V6 narrative; deviations 85-86 in
   `v3-implementation-state.md` for the implementation/validation split).
+- **`docs/v14-cosmo-branch-isolation-plan.md` written 2026-09-02 — design
+  only, nothing implemented, no code changed.** A new optional
+  `cosmo_branch` base-branch mode (alongside today's `direct`, which stays
+  the default): `cosmo init` forks a new branch off the real configured
+  base branch and treats the fork as the effective base branch for
+  everything from then on (worktrees, diff gate, merges), so template/
+  harness scaffolding never lands on the developer's real `develop`/
+  `main`. Grounded in the real mechanism, not guessed: `bootstrap.
+  git_branch.commit_bootstrap_output` already commits `cosmo init`'s
+  scaffolding onto whatever branch the target repo is checked out on at
+  the end of `init`, so the whole feature reduces to making sure the repo
+  ends up on the new branch by then -- no changes needed to asset sync,
+  symlinks, or the commit step itself. Uncommitted changes on the real base
+  branch at fork time get `git stash push -u`'d and left stashed (not
+  auto-popped anywhere), reported back with the exact recovery command.
+  Mode/branch-name are meant to persist per-project (a new `projects` table
+  migration), not in global config, since `git.base_branch` being
+  global-only today is a known pre-existing limitation this shouldn't
+  repeat. Three explicit non-goals for v1: no auto-sync of an existing
+  `cosmo` branch with upstream base-branch commits, no command to change an
+  already-registered project's mode after the fact, and no changes to
+  `direct` mode's existing behavior. If this gets picked up: read the v14
+  doc in full first, in the section order it's written in (config surface,
+  then `bootstrap/git_branch.py`, then `bootstrap/init.py`, then the
+  wizard, then tests).
 - **v0.1.1 is a patch release**: v0.1.0 got its first real usage (a real
   `cosmo run` against a real target repo, not this repo's own test suite)
   and surfaced three real bugs, all fixed and covered by a regression test
@@ -224,6 +249,7 @@ not a record of how we got here.
 | [v11-cline-harness-info.md](v11-cline-harness-info.md) | Research findings on Cline's CLI as a possible new harness adapter (via OpenRouter) | **Findings only, not a plan or a `HarnessCapabilities` proposal.** Nothing implemented. Read before starting real adapter work for Cline — especially the gating section, which found a real but currently-broken mechanism, not an absent one |
 | [v12-ori-opencode-harness-info.md](v12-ori-opencode-harness-info.md) | Research findings on Ori Harness (`ori claude`, real Claude Code through OpenRouter) and OpenCode as possible new harness adapters | **Findings only, not a plan or a `HarnessCapabilities` proposal.** Nothing implemented. Both have real, confirmed-working headless gating, unlike Cline — read this before choosing which harness to build next |
 | [v13-ori-cc-harness-template-plan.md](v13-ori-cc-harness-template-plan.md) | The build plan for `ori-claude` as a second harness adapter and template, alongside native `claude` | **Done — Phases 1-6 all complete**, including Phase 6's real-invocation validations (V2, the gating one, confirmed passing) and the public-docs commit. See this handoff's own bullet above and [v8-validations-for-later.md](v8-validations-for-later.md). Nothing left open. Its four design decisions were chosen by the user, not derived — don't relitigate them if extending it (e.g. a third adapter) |
+| [v14-cosmo-branch-isolation-plan.md](v14-cosmo-branch-isolation-plan.md) | Optional `cosmo_branch` base-branch mode: `cosmo init` forks an isolated branch off the real base branch so templates/harness scaffolding never lands on `develop`/`main` | **Not started — design record only.** Three open forks were resolved with the user (per-project persistence on the `projects` table via a new migration, not global config; stash-and-leave-stashed for uncommitted changes, not auto-pop; no auto-sync of an existing `cosmo` branch with upstream commits in v1) — don't relitigate them if picked up |
 
 Internal `vN` documents above are **not** the user-facing ones. Public docs
 live in `README.md`, `user-docs/`, and the four root docs — written for a
