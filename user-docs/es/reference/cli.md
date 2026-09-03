@@ -58,7 +58,7 @@ Verificaciones principales: `python`, `git`, `docker`, `openspec`,
 Verificaciones del adaptador de Claude: `claude cli`, `subscription billing`
 (falla si `ANTHROPIC_API_KEY` está configurada), `permission mode`.
 
-## `cosmo init TARGET_PATH`
+## `cosmo init [TARGET_PATH]`
 
 Inicializa un repositorio objetivo: `git init` y la rama base si hace falta,
 `openspec/`, `docs/`, `.agent/<harness>/`, symlinks en la raíz, registro del
@@ -66,7 +66,7 @@ proyecto.
 
 | Argumento | Descripción |
 | --- | --- |
-| `target_path` | Ruta al repositorio objetivo. Ejecuta `git init` por su cuenta si aún no lo es. |
+| `target_path` | Ruta al repositorio objetivo. Ejecuta `git init` por su cuenta si aún no lo es. Opcional solo si se combina con `-i`/`--interactive`, que la pide por prompt. |
 
 | Opción | Por defecto | Descripción |
 | --- | --- | --- |
@@ -76,6 +76,7 @@ proyecto.
 | `--git-author-name <str>` | — | Identidad de Git a configurar localmente en el repositorio objetivo. Se combina con `--git-author-email`; si se dan ambas juntas, se salta el prompt interactivo. |
 | `--git-author-email <str>` | — | Ver `--git-author-name`. |
 | `--config`, `-c <path>` | — | Archivo de configuración. |
+| `-i`, `--interactive` | desactivado | Modo asistente: pide por prompt la ruta objetivo, el harness, la plantilla de proyecto, la rama base, la sobrescritura de docs y (opcionalmente) overrides de modelos por harness -- para lo que no se haya dado ya como flag. Los overrides de modelos, si se ingresan, se escriben en el archivo de configuración *global* del usuario (`[harness.overrides.<harness>]`), no quedan limitados a este proyecto. Nunca se activa solo; las invocaciones con scripts/CI no se ven afectadas a menos que pasen `-i` ellas mismas. |
 
 ## `cosmo validate WORKTREE`
 

@@ -34,6 +34,7 @@ from cosmo.bootstrap import (
     sync_harness_assets,
 )
 from cosmo.checks import CheckResult, CheckStatus
+from cosmo.cli import init_wizard
 from cosmo.config import (
     DEFAULTS_PATH,
     CosmoConfig,
@@ -882,11 +883,12 @@ _SYMLINK_STYLE = {
 @app.command()
 def init(
     target_path: Annotated[
-        Path,
+        Path | None,
         typer.Argument(
-            help="Path to the target repo. Runs `git init` itself if not already a git repo."
+            help="Path to the target repo. Runs `git init` itself if not already a git repo. "
+            "Omit only when combined with -i/--interactive."
         ),
-    ],
+    ] = None,
     harness: HarnessOption = None,
     project_template: Annotated[
         str | None,
@@ -908,16 +910,66 @@ def init(
         str | None, typer.Option("--git-author-email", help="See --git-author-name.")
     ] = None,
     config: ConfigOption = None,
+    interactive: Annotated[
+        bool,
+        typer.Option(
+            "-i",
+            "--interactive",
+            help="Wizard mode: prompt for target path/harness/project template/base branch/"
+            "docs-overwrite/model overrides, for whichever of those weren't already given as "
+            "a flag. Never triggers on its own -- scripted/CI invocations are unaffected "
+            "unless they pass -i themselves.",
+        ),
+    ] = False,
 ) -> None:
     """Bootstrap a target repo: git init + base_branch if needed, openspec/,
     docs/, .agent/<harness>/, root symlinks (spec 10.4)."""
     cfg = _load(config)
+
+    model_overrides: dict[str, str] = {}
+    if interactive:
+        default_harness = resolve_harness_name(harness, None, cfg.harness.name)[0]
+        choices = init_wizard.collect(
+            console=console,
+            target_path_flag=target_path,
+            harness_flag=harness,
+            project_template_flag=project_template,
+            force_flag=force,
+            cfg=cfg,
+            default_harness=default_harness,
+        )
+        target_path = choices.target_path
+        harness = choices.harness
+        project_template = choices.project_template
+        base_branch = choices.base_branch
+        force = choices.force_docs
+        model_overrides = choices.model_overrides
+    elif target_path is None:
+        err_console.print(
+            "[red]Missing argument 'TARGET_PATH'.[/red] (or pass -i/--interactive to be "
+            "prompted for it)"
+        )
+        raise typer.Exit(code=2)
+    else:
+        base_branch = cfg.git.base_branch
+
     resolved_harness, source = resolve_harness_name(harness, None, cfg.harness.name)
+    if interactive:
+        source = "-i wizard"
     resolved_template = project_template or "_blank"
     console.print(f"harness: [bold]{resolved_harness}[/bold] (from {source})")
     console.print(f"project template: [bold]{resolved_template}[/bold]")
 
-    if force:
+    if model_overrides:
+        config_path = config if config is not None else user_config_path()
+        write_user_config_table(
+            config_path, "harness", {"overrides": {resolved_harness: model_overrides}}
+        )
+        console.print(
+            f"[green]wrote model overrides[/green] for {resolved_harness!r} to {config_path}"
+        )
+
+    if force and not interactive:
         proceed = typer.confirm(
             f"--force will overwrite any existing docs/ file that the "
             f"{resolved_template!r} template also provides. Continue?"
@@ -932,7 +984,7 @@ def init(
             target_path,
             harness=resolved_harness,
             project_template=resolved_template,
-            base_branch=cfg.git.base_branch,
+            base_branch=base_branch,
             force_docs=force,
             writer=writer,
             db_path=cfg.paths.db_path,
@@ -945,16 +997,16 @@ def init(
 
     _GIT_BRANCH_MESSAGES = {
         GitBranchOutcome.REPO_INITIALIZED_AND_BRANCH_CREATED: (
-            f"[green]git init[/green], then created and checked out {cfg.git.base_branch!r}"
+            f"[green]git init[/green], then created and checked out {base_branch!r}"
         ),
         GitBranchOutcome.BRANCH_CREATED: (
-            f"[green]created and checked out[/green] {cfg.git.base_branch!r}"
+            f"[green]created and checked out[/green] {base_branch!r}"
         ),
-        GitBranchOutcome.ALREADY_ON_BASE_BRANCH: f"already has {cfg.git.base_branch!r}",
+        GitBranchOutcome.ALREADY_ON_BASE_BRANCH: f"already has {base_branch!r}",
         GitBranchOutcome.SKIPPED_DIRTY: (
-            f"[yellow]not on {cfg.git.base_branch!r} and the working tree has uncommitted "
+            f"[yellow]not on {base_branch!r} and the working tree has uncommitted "
             f"changes -- commit or stash first, then create it yourself "
-            f"(`git checkout -b {cfg.git.base_branch}`)[/yellow]"
+            f"(`git checkout -b {base_branch}`)[/yellow]"
         ),
     }
     console.print(f"git branch: {_GIT_BRANCH_MESSAGES[result.git_branch]}")

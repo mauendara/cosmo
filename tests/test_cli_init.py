@@ -262,3 +262,104 @@ def test_init_explicit_git_author_flags_skip_the_prompt_entirely(tmp_path: Path)
 
     assert result.exit_code == 0, result.stdout
     assert read_configured_identity(target) == GitIdentity(name="CI Bot", email="ci@example.com")
+
+
+def test_init_without_target_path_or_interactive_fails_clean() -> None:
+    result = runner.invoke(app, ["init"])
+
+    assert result.exit_code == 2
+    assert "TARGET_PATH" in result.stderr
+    assert "--interactive" in result.stderr
+
+
+@pytest.mark.skipif(
+    subprocess.run(["which", "openspec"], capture_output=True, check=False).returncode != 0,
+    reason="real openspec CLI not on PATH",
+)
+def test_init_interactive_wizard_accepts_every_default(tmp_path: Path) -> None:
+    target = _git_repo(tmp_path)
+    # harness / template / base branch / force-docs confirm / model-overrides
+    # confirm / git-identity confirm -- one blank line per prompt, each
+    # falling back to its own default.
+    result = runner.invoke(app, ["init", str(target), "-i"], input="\n\n\n\n\n\n")
+
+    assert result.exit_code == 0, result.stdout
+    assert "claude" in result.stdout and "-i wizard" in result.stdout
+    assert "project template: _blank" in result.stdout
+    assert "registered" in result.stdout
+
+
+@pytest.mark.skipif(
+    subprocess.run(["which", "openspec"], capture_output=True, check=False).returncode != 0,
+    reason="real openspec CLI not on PATH",
+)
+def test_init_interactive_skips_prompts_for_values_already_given_as_flags(
+    tmp_path: Path,
+) -> None:
+    target = _git_repo(tmp_path)
+
+    result = runner.invoke(
+        app,
+        [
+            "init",
+            str(target),
+            "-i",
+            "--harness",
+            "ori-claude",
+            "--project-template",
+            "java-spring-react",
+        ],
+        # base branch / force-docs confirm / model-overrides confirm / git-identity confirm
+        input="\n\n\n\n",
+    )
+
+    assert result.exit_code == 0, result.stdout
+    assert "Harness (" not in result.stdout
+    assert "Project template (" not in result.stdout
+    assert "harness: ori-claude" in result.stdout and "-i wizard" in result.stdout
+    assert "project template: java-spring-react" in result.stdout
+
+
+@pytest.mark.skipif(
+    subprocess.run(["which", "openspec"], capture_output=True, check=False).returncode != 0,
+    reason="real openspec CLI not on PATH",
+)
+def test_init_interactive_reprompts_on_an_unknown_harness_name(tmp_path: Path) -> None:
+    target = _git_repo(tmp_path)
+
+    result = runner.invoke(
+        app,
+        ["init", str(target), "-i"],
+        input="bogus-harness\nclaude\n\n\n\n\n\n",
+    )
+
+    assert result.exit_code == 0, result.stdout
+    assert "isn't one of" in result.stdout
+    assert "harness: claude" in result.stdout
+
+
+@pytest.mark.skipif(
+    subprocess.run(["which", "openspec"], capture_output=True, check=False).returncode != 0,
+    reason="real openspec CLI not on PATH",
+)
+def test_init_interactive_model_overrides_only_write_the_fields_entered(
+    tmp_path: Path,
+) -> None:
+    target = _git_repo(tmp_path)
+    # harness/template/base_branch defaults, force-docs declined, model
+    # overrides accepted, only propose_model filled in, git identity default.
+    result = runner.invoke(
+        app,
+        ["init", str(target), "-i"],
+        input="\n\n\nn\ny\n\ncustom-propose-model\n\n\n\n",
+    )
+
+    assert result.exit_code == 0, result.stdout
+    assert "wrote model overrides" in result.stdout
+
+    cfg = load_config()
+    override = cfg.harness.overrides["claude"]
+    assert override.propose_model == "custom-propose-model"
+    assert override.model is None
+    assert override.implement_model is None
+    assert override.review_model is None

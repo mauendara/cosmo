@@ -55,7 +55,7 @@ gate containers`.
 Claude adapter checks: `claude cli`, `subscription billing`
 (fails if `ANTHROPIC_API_KEY` is set), `permission mode`.
 
-## `cosmo init TARGET_PATH`
+## `cosmo init [TARGET_PATH]`
 
 Bootstrap a target repo: `git init` and the base branch if needed,
 `openspec/`, `docs/`, `.agent/<harness>/`, root symlinks, project
@@ -63,7 +63,7 @@ registration.
 
 | Argument | Description |
 | --- | --- |
-| `target_path` | Path to the target repo. Runs `git init` itself if it isn't one. |
+| `target_path` | Path to the target repo. Runs `git init` itself if it isn't one. Optional only when combined with `-i`/`--interactive`, which prompts for it. |
 
 | Option | Default | Description |
 | --- | --- | --- |
@@ -73,6 +73,7 @@ registration.
 | `--git-author-name <str>` | — | Git identity to configure locally in the target repo. Paired with `--git-author-email`; given together, skips the interactive prompt. |
 | `--git-author-email <str>` | — | See `--git-author-name`. |
 | `--config`, `-c <path>` | — | Config file. |
+| `-i`, `--interactive` | off | Wizard mode: prompts for target path, harness, project template, base branch, docs-overwrite, and (optionally) per-harness model overrides -- for whichever of those weren't already given as a flag. Model overrides, if entered, are written to the *global* user config file (`[harness.overrides.<harness>]`), not scoped to this project. Never triggers on its own; scripted/CI invocations are unaffected unless they pass `-i` themselves. |
 
 ## `cosmo validate WORKTREE`
 

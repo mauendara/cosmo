@@ -18,11 +18,20 @@ not a record of how we got here.
   — see its own plan doc; it needs a second real stack to prove the
   abstraction, and the user is doing that testing separately before it gets
   picked up again.
-- **601 tests passing, 9 skipped, `./check.sh` green** as of the last code
-  change. Every fix in the deviations table has a regression test.
-- **Two features shipped since v0.1.1's release, both requested directly**
-  (deviations 83-84 in `v3-implementation-state.md`, two separate commits
-  on `private`, neither released yet): (1) console-facing timestamps now
+- **606 tests passing, 9 skipped** as of the last code change.
+  `./check.sh` itself currently exits 1 at the `ruff format --check .` step,
+  but **not from anything in `src/`/`tests/`** — the sole offender is a
+  pre-existing, already-committed Python code block inside
+  `docs/v13-ori-cc-harness-template-plan.md` that a current `ruff format`
+  wants to reformat (inline-comment column alignment, one dict literal's
+  line wrapping). It predates this session; `ruff check .`, `mypy`, and the
+  full `pytest` run are all clean on their own. Worth fixing (re-run `ruff
+  format docs/v13-ori-cc-harness-template-plan.md` and commit the result)
+  before trusting a bare `./check.sh` exit code again. Every fix in the
+  deviations table has a regression test.
+- **Three features shipped since v0.1.1's release, all requested directly**
+  (deviations 83-84 and 87 in `v3-implementation-state.md`, separate
+  commits on `private`, none released yet): (1) console-facing timestamps now
   render in the host's local timezone (`store.clock.to_local`/
   `format_local`) instead of raw UTC — storage is unchanged, only display
   converts, applied everywhere a timestamp reaches the console plus the
@@ -35,6 +44,17 @@ not a record of how we got here.
   global per-role config only, not per-spec/per-batch — confirmed with the
   user rather than assumed; that would need task-row persistence and new
   CLI flags, a bigger feature than asked for.
+  (3) `cosmo init -i`/`--interactive` — a wizard mode (new
+  `cli/init_wizard.py`) that prompts for target path/harness/project
+  template/base branch/docs-overwrite/optional per-harness model overrides,
+  only for whichever of those wasn't already given as a flag; flag-driven/
+  CI invocations are completely unaffected. Model overrides, if entered,
+  write to the *global* config file, which the wizard says explicitly
+  before writing. See deviation 87 for the full design and a real `typer`/
+  `click` gotcha found building it (this repo's pinned `typer` 0.27.1 has
+  no importable top-level `click` module under `uv run` — don't reach for
+  `click.*` directly in CLI code here; follow `notify_config`'s existing
+  plain-`typer.prompt`-plus-manual-validation pattern instead).
 - **Cline researched as a possible new harness adapter** (driven through
   OpenRouter, so different models could be tried against Cosmo) —
   **research only, nothing implemented, no code changed this session.**
@@ -317,7 +337,7 @@ superseded/consumed.
 
 1. `./check.sh` green (if any code changed at all).
 2. Record any new deviation in `v3-implementation-state.md`'s cumulative
-   table (next number is **87**).
+   table (next number is **88**).
 3. Commit to the current branch (`private`, per CONTRIBUTING.md's branching
    model — day-to-day work never targets `develop` directly) with a message
    explaining *why*, in the style of the existing commit history.
