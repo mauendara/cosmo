@@ -5,7 +5,7 @@ session-by-session narrative (what changed, what was found, how it was
 fixed) has been cut. That history isn't lost — it's in `git log` (every
 commit message explains its own *why*) and in
 [v3-implementation-state.md](v3-implementation-state.md)'s cumulative
-deviations table (the complete bug/fix log, entries 1-84). This file now
+deviations table (the complete bug/fix log, entries 1-86). This file now
 only carries what a session needs to *orient itself* before doing new work,
 not a record of how we got here.
 
@@ -18,7 +18,7 @@ not a record of how we got here.
   — see its own plan doc; it needs a second real stack to prove the
   abstraction, and the user is doing that testing separately before it gets
   picked up again.
-- **592 tests passing, 9 skipped, `./check.sh` green** as of the last code
+- **601 tests passing, 9 skipped, `./check.sh` green** as of the last code
   change. Every fix in the deviations table has a regression test.
 - **Two features shipped since v0.1.1's release, both requested directly**
   (deviations 83-84 in `v3-implementation-state.md`, two separate commits
@@ -77,79 +77,39 @@ not a record of how we got here.
   looks console-oriented rather than scriptable, closer to Cline's broken
   shape than to Ori/OpenCode's. If this gets picked up again: read v12
   first alongside v11.
-- **The `ori-claude` harness is fully implemented and validated** —
+- **The `ori-claude` harness is done — implemented, validated by real
+  invocation, and documented.**
   [v13-ori-cc-harness-template-plan.md](v13-ori-cc-harness-template-plan.md)'s
-  Phases 1-6, **all done, including real-invocation validation**. Native
-  Claude Code and Ori-routed Claude Code are two separate registered
-  harnesses (`claude` and `ori-claude`), each with its own template, not a
-  config toggle on one adapter — exactly the shape the plan's four
-  user-confirmed design decisions called for: `harness/claude/invoker.py`'s
-  `_ClaudeCodeInvoker` holds everything genuinely shared (`_invoke`,
-  `cancel`, the `probe`/`propose`/`implement`/`review` prompts, the
-  `_claude_flags` argv helper, `check_permission_mode`) so neither adapter is
-  the other's base class; `OriClaudeAdapter` (`harness/ori/adapter.py`) and
-  `ClaudeCodeAdapter` each declare only `preflight`/`_build_argv`/
-  `_build_env`; `templates/harness/ori-claude/` is a full independent copy of
-  `templates/harness/claude/`, held against drift by a byte-parity test
-  (`test_harness_template_parity.py`) on the hook scripts rather than
-  template-inheritance machinery; `HarnessConfig.resolve_model(harness,
-  role)` adds `[harness.overrides.<name>]` tables (narrowest-first: override
-  role model → override model → role model → model) since an OpenRouter
-  model id is meaningless to native Claude Code and vice versa; scope stayed
-  Ori+Claude only, named `ori-claude` so a future `ori-codex` needs no
-  rename. Six commits on `private` so far (five code/docs + this one),
-  `./check.sh` green throughout (592 tests passing, up from 570).
-  - **Phase 6's real-invocation validations V1-V6 all ran for real and all
-    pass**, once the user set up `ori` + `OPENROUTER_API_KEY` themselves
-    (`/home/dev/.config/cosmo/.env`, 2026-09-02) and a real `[cost]
-    max_cost_per_run_usd = 6.0` ceiling was added to their real
-    `~/.config/cosmo/config.toml` (`write_user_config_table`, at their
-    request, before the uncapped-by-default full-pipeline run). Everything
-    ran against a scratch repo (`cosmo-tests/_scratch-v13-phase6`, deleted
-    after), never the real store. Total real OpenRouter spend: **$1.42**.
-    **V2 — the gate on the whole plan — passes**: a real prompted `Bash`
-    call (`git push origin develop`) through the adapter's exact real argv
-    (`--setting-sources project` included) was genuinely denied by
-    `commit_integrity_guard.py`'s `PreToolUse` hook — `permission_denials`
-    populated on the real terminal result. Ori's inline `--settings` does
-    **not** displace the project's `settings.json` hooks;
-    `OriClaudeAdapter.capabilities.supports_gating=True` is now a confirmed
-    fact, not an assumption. V1/V3 also confirmed directly (stream-json +
-    populated `total_cost_usd`/`session_id`; `ANTHROPIC_MODEL` honored, no
-    `--model` conflict). V4 confirmed the outer process is reliably killed
-    on cancel, and separately reproduced — not new, already documented at
-    `proc/orphans.find_worktree_holders` — the pre-existing spec 2.4 step 4
-    limitation that a bare `killpg` can't reach a `Bash`-tool-detached
-    grandchild; the real `cosmo run` path already routes through
-    `cancel_and_reap`'s harness-agnostic orphan sweep instead. V5: a full
-    `cosmo run --harness ori-claude` (one trivial task) reached `done`
-    through every real state including a real merge to `develop`, and
-    incidentally reconfirmed crash recovery works identically on this route.
-    V6 (informational): no rate-limit-shaped stream event appeared in any
-    real terminal result, confirming the expected spec 7.2 degradation.
-    **Two real, non-code findings worth knowing if this gets touched
-    again**: (1) driving `ori claude` from *inside an already-running Claude
-    Code session* (as this validation session itself was) leaks that
-    session's own `CLAUDECODE`/`CLAUDE_CODE_*` env vars into the child and
-    breaks auth ("Not logged in") — irrelevant to any real deployment, but
-    strip those vars (`env -u CLAUDECODE -u CLAUDE_CODE_SESSION_ID` etc.,
-    full list in `v8-validations-for-later.md`) when testing this locally
-    from inside Claude Code, or it reads as a broken adapter when it isn't.
-    (2) the shipped default `harness.model = "claude-sonnet-5"` is a native
-    id, not an OpenRouter one — a real `[harness.overrides.ori-claude] model
-    = "..."` is not optional for this harness to actually work, worth a
-    callout in the docs commit below, not a code change. Full narrative:
-    [v8-validations-for-later.md](v8-validations-for-later.md)'s now-resolved
-    entry; deviation 86 in `v3-implementation-state.md`.
-  - **What's left**: the plan's own Phase 6 docs commit — updating
-    `user-docs/{en,es}/reference/config-schema.md` (the `[harness.overrides.
-    <name>]` table, resolution order, and the "a real OpenRouter model id is
-    required" callout above), `write-a-new-adapter.md` (the shared-invoker
-    pattern, "Claude Code is the only adapter" is now false),
-    `architecture-overview.md`/`quota-and-safety-model.md` (the harness table
-    and quota-degradation sentence), and `README.md` if it enumerates
-    harnesses. Was correctly deferred until V1-V6 actually ran (the plan's
-    own commit-shape rule); nothing blocks it now.
+  Phases 1-6 are all complete; nothing left open on this plan. `claude`
+  (native, subscription-billed) and `ori-claude` (the same `claude` binary
+  routed through Ori to OpenRouter, metered per token) are two separate
+  registered harnesses sharing their invocation mechanics through
+  `harness/claude/invoker.py`'s `_ClaudeCodeInvoker` (neither is the other's
+  base class); `HarnessConfig.resolve_model(harness, role)` adds
+  `[harness.overrides.<name>]` config; `templates/harness/ori-claude/` is a
+  full independent copy of the native template, held against drift by a
+  byte-parity test. **Phase 6's real-invocation validations (V1-V6) all ran
+  for real 2026-09-02 and all pass** — most importantly **V2, the gate on
+  the whole plan**: a real `Bash` `git push` call through the adapter's exact
+  argv was genuinely denied by a real `PreToolUse` hook, so
+  `OriClaudeAdapter.capabilities.supports_gating=True` is a confirmed fact,
+  not an assumption. Total real OpenRouter spend across validation: $1.42,
+  against a `[cost] max_cost_per_run_usd = 6.0` ceiling added to the user's
+  real `~/.config/cosmo/config.toml` first, at their request. Public docs
+  (`README.md`/`README.es.md` and four `user-docs` pages, EN+ES) updated to
+  match. Seven commits on `private`, `76ffbab` through `8e0bb8c`. Two things
+  worth knowing if this harness gets used or touched again, not obvious from
+  the code: (1) **a real `[harness.overrides.ori-claude].model` (an
+  OpenRouter id) is required for it to authenticate at all** — the shipped
+  `harness.model` default is a native Claude Code id and Ori passes it
+  through unrecognized; (2) testing `ori claude` from *inside an
+  already-running Claude Code session* leaks that session's own
+  `CLAUDECODE`/`CLAUDE_CODE_*` env vars into the child and breaks auth —
+  irrelevant to a real deployment, but strip them by hand when testing
+  locally (full var list in
+  [v8-validations-for-later.md](v8-validations-for-later.md)'s now-resolved
+  entry, which also has the complete V1-V6 narrative; deviations 85-86 in
+  `v3-implementation-state.md` for the implementation/validation split).
 - **v0.1.1 is a patch release**: v0.1.0 got its first real usage (a real
   `cosmo run` against a real target repo, not this repo's own test suite)
   and surfaced three real bugs, all fixed and covered by a regression test
@@ -243,7 +203,7 @@ not a record of how we got here.
 | [v10-user-docs-discrepancies.md](v10-user-docs-discrepancies.md) | Where the public-docs brief described Cosmo differently from what the code does | **Tracking document, not a plan.** Read before touching `task.guardrail_tripped`, the diff gate's `test_path_modified` rule, or assuming gate stage commands are configurable |
 | [v11-cline-harness-info.md](v11-cline-harness-info.md) | Research findings on Cline's CLI as a possible new harness adapter (via OpenRouter) | **Findings only, not a plan or a `HarnessCapabilities` proposal.** Nothing implemented. Read before starting real adapter work for Cline — especially the gating section, which found a real but currently-broken mechanism, not an absent one |
 | [v12-ori-opencode-harness-info.md](v12-ori-opencode-harness-info.md) | Research findings on Ori Harness (`ori claude`, real Claude Code through OpenRouter) and OpenCode as possible new harness adapters | **Findings only, not a plan or a `HarnessCapabilities` proposal.** Nothing implemented. Both have real, confirmed-working headless gating, unlike Cline — read this before choosing which harness to build next |
-| [v13-ori-cc-harness-template-plan.md](v13-ori-cc-harness-template-plan.md) | The build plan for `ori-claude` as a second harness adapter and template, alongside native `claude` | **Fully implemented and validated — Phases 1-6 all done**, including Phase 6's real-invocation validations (V2, the gating one, confirmed passing). See this handoff's own bullet above and [v8-validations-for-later.md](v8-validations-for-later.md). Only the plan's own Phase 6 docs commit (public user-docs updates) remains. Its four design decisions were chosen by the user, not derived — don't relitigate them |
+| [v13-ori-cc-harness-template-plan.md](v13-ori-cc-harness-template-plan.md) | The build plan for `ori-claude` as a second harness adapter and template, alongside native `claude` | **Done — Phases 1-6 all complete**, including Phase 6's real-invocation validations (V2, the gating one, confirmed passing) and the public-docs commit. See this handoff's own bullet above and [v8-validations-for-later.md](v8-validations-for-later.md). Nothing left open. Its four design decisions were chosen by the user, not derived — don't relitigate them if extending it (e.g. a third adapter) |
 
 Internal `vN` documents above are **not** the user-facing ones. Public docs
 live in `README.md`, `user-docs/`, and the four root docs — written for a
@@ -298,6 +258,19 @@ superseded/consumed.
   wrong account (fails, or worse, succeeds against the wrong repo if both
   accounts have access). Check `git remote -v` before pushing if unsure
   which identity a remote expects.
+- **Driving `ori claude` (or `cosmo ... --harness ori-claude`) from inside an
+  already-running Claude Code session** — e.g. this very shell, if you're
+  reading this from within one — leaks that session's own `CLAUDECODE`/
+  `CLAUDE_CODE_*` env vars into the child via `os.environ` inheritance, and
+  the nested `claude` reports "Not logged in · Please run /login" instead of
+  authenticating via Ori's credential. Strip them first: `env -u CLAUDECODE
+  -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION -u
+  CLAUDE_CODE_MESSAGING_SOCKET -u CLAUDE_CODE_MESSAGING_TOKEN -u
+  CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_EXECPATH -u
+  CLAUDE_AGENT_SDK_VERSION -u CLAUDE_PID -u CLAUDE_EFFORT -u
+  CLAUDE_CODE_ENABLE_TASKS -u CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING -u
+  AI_AGENT`. Irrelevant to any real deployment (systemd, cron, a plain
+  terminal never carry these) — this only bites interactive testing.
 - **Manually seeding/removing `task_queue` rows** against the real store
   requires respecting real foreign-key dependents (`task_failures`,
   `task_transitions`, `events`, `task_progress`, `task_heartbeat`,
@@ -344,7 +317,7 @@ superseded/consumed.
 
 1. `./check.sh` green (if any code changed at all).
 2. Record any new deviation in `v3-implementation-state.md`'s cumulative
-   table (next number is **85**).
+   table (next number is **87**).
 3. Commit to the current branch (`private`, per CONTRIBUTING.md's branching
    model — day-to-day work never targets `develop` directly) with a message
    explaining *why*, in the style of the existing commit history.
