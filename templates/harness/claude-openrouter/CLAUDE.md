@@ -56,6 +56,15 @@ for one under any name: run the command in the foreground, in a single
 call that takes ten minutes because `npm install` is slow costs one turn;
 polling it costs dozens.
 
+The `Task` tool (spawning a named subagent) is denied outright for the same
+reason -- found by audit this time, not a repeat live incident: every
+harness result already carries `subagent_stats.requested.background`/
+`started_in_background` counters, proof the same SDK that backgrounds
+`Bash` also backgrounds a subagent, which is exactly one more place for
+work to silently outlive this call. `TaskCreate`/`TaskUpdate`/`TaskGet`/
+`TaskList`/`TaskStop` stay allowed -- they're a synchronous todo list, not
+a background job, and cost nothing to keep.
+
 ## How to drive OpenSpec
 
 Do not guess OpenSpec's workflow -- ask it directly, every time:
@@ -93,6 +102,7 @@ will be silently discarded on the next sync):
 |---|---|---|
 | Editing a file under `src/test/**`, `e2e/**`, or matching `**/*.spec.ts(x)` / `**/*.test.ts(x)` / `**/*.spec.jsx` / `**/*.test.jsx` | Denied, unless this task was explicitly flagged `allow_test_edits` | The tests are the thing being measured. If a task genuinely requires touching tests, that should already be reflected in how the task was queued -- it is not something to work around from inside a session. |
 | `Bash` with `run_in_background: true` | Denied | Found by hand a third time: `ScheduleWakeup`/`ToolSearch`/`TaskOutput` being denied doesn't stop a session from backgrounding a slow command through `Bash` itself and then polling it with ordinary shell commands (`ps`, `kill -0`, `tail --pid`) instead -- same failure, different tool. See this section's own opening paragraph. |
+| `Task` (spawning a subagent) | Denied | Same SDK that backgrounds `Bash` also backgrounds a subagent (`subagent_stats.requested.background` exists in every harness result) -- the same one-shot hazard as the row above, just a different tool. `TaskCreate`/`TaskUpdate`/`TaskGet`/`TaskList`/`TaskStop` stay allowed -- they're a synchronous todo list, not background execution. |
 | Introducing `@Disabled`, `@Ignore`, `test.skip`, `it.skip`, `describe.skip`, or `xit(...)` anywhere | Denied | Disabling a test to make a suite pass is the same failure mode as deleting it. If a test is failing, fix the code or fix the test's assertions -- don't silence it. |
 | `git commit --no-verify` | Denied | Bypasses local pre-commit secret scanning. |
 | `git push` (any form, including force variants) | Denied | Pushing is Cosmo's job, run after the validation gate passes, not yours. |

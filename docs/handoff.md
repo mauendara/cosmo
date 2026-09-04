@@ -11,6 +11,42 @@ not a record of how we got here.
 
 ## Where things stand
 
+- **v18 (2026-09-04): the `Task` (subagent-spawn) tool was never covered
+  by the one-shot-hazard guardrails.** Found by audit, not a live incident
+  this time -- prompted by the user noticing `TaskCreate`/`TaskUpdate`
+  calls in a real `claude-openrouter` run's output and asking whether
+  those were actually supposed to be allowed.
+  - Those two specifically are fine: real transcripts show them used only
+    as a synchronous todo-list (`subject`/`description` on create,
+    `taskId`/`status` on update, `in_progress`/`completed` only) -- no
+    async job, nothing that outlives the turn.
+  - But the actual `Task` tool (spawning a named subagent, same family as
+    `TaskCreate`/etc. but never itself denied) was a real, unaddressed gap:
+    every harness result JSON already carries `subagent_stats.requested.
+    background`/`started_in_background` counters -- proof the same SDK
+    that backgrounds `Bash` (see `v0`-era history below) also backgrounds a
+    subagent, and nothing in `settings.json`'s `permissions.deny` or any
+    `PreToolUse` hook ever inspected it. Confirmed the allowlist isn't the
+    safety net it looks like either: `TaskCreate`/`TaskUpdate` executed
+    successfully in a real transcript despite not being in `--allowedTools
+    Write Edit Bash`, while a same-session `Edit` on a `*.test.tsx` file
+    was correctly denied by `test_path_guard.py` -- so a tool outside the
+    nominal allowlist can and does still run when nothing explicit stops
+    it, which made `Task` going unblocked pure luck, not a working
+    guardrail.
+  - **Fixed:** added `"Task"` to `permissions.deny` in all three harness
+    `settings.json` templates (one line each); `TaskCreate`/`TaskUpdate`/
+    `TaskGet`/`TaskList`/`TaskStop` stay allowed. Each harness's `CLAUDE.md`
+    gained the same explanation in its "one-shot" section and guardrail
+    table. New `test_settings_denies_every_one_shot_hazard_tool`
+    (parametrized over all three harnesses) locks `ScheduleWakeup`/
+    `ToolSearch`/`Task`/`TaskOutput` into the deny list so a future
+    template edit can't silently drop one again.
+  - Not yet re-synced into any in-flight worktree -- a running task's
+    `.agent/<harness>/settings.json` only picks up a template change on
+    worktree creation or `queue retry`'s resync, never mid-task.
+  - `./check.sh` exits 0 fully clean, **666 tests passing, 9 skipped** (was
+    663 as of the entry below).
 - **v17 (2026-09-04): `REVIEWING` could silently discard an approved
   verdict, forcing a costly re-`IMPLEMENTING` retry for nothing.** Found
   investigating why `wa-chat-text-bubbles` (project `wa-chat-component`,

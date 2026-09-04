@@ -68,3 +68,18 @@ def test_settings_declares_no_model_key(harness: str) -> None:
     settings = json.loads((HARNESS_TEMPLATES_ROOT / harness / "settings.json").read_text())
 
     assert "model" not in settings
+
+
+@pytest.mark.parametrize("harness", [*NON_NATIVE_HARNESSES, "claude"])
+def test_settings_denies_every_one_shot_hazard_tool(harness: str) -> None:
+    """`ScheduleWakeup`/`ToolSearch`/`TaskOutput` and (2026-09-04) `Task`
+    itself must stay denied on every harness template -- each was added
+    after a real session tried to make its one-shot call outlive its own
+    turn (see this section's CLAUDE.md, "This call is one-shot"). A future
+    template edit that silently drops one of these would reopen a closed
+    hazard rather than fixing a new one."""
+    settings = json.loads((HARNESS_TEMPLATES_ROOT / harness / "settings.json").read_text())
+
+    deny = settings["permissions"]["deny"]
+    for hazard_tool in ("ScheduleWakeup", "ToolSearch", "Task", "TaskOutput"):
+        assert hazard_tool in deny, f"{harness}/settings.json no longer denies {hazard_tool!r}"
