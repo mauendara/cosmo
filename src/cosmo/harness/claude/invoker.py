@@ -382,7 +382,20 @@ def _summarize(terminal: ClassifiedEvent | None, success: bool, exit_code: int) 
     # (e.g. "success"), not prose -- reading it for a short summary label is
     # exactly the "reads the structured output for the reason" spec 2.3 asks
     # for, distinct from the prose-parsing spec 4 prohibits for classification.
+    #
+    # `subtype` names the *shape* of the result payload, not whether the call
+    # succeeded -- a same-shape API-error result (e.g. an unsupported model)
+    # still carries `subtype: "success"` alongside `is_error: true`, which
+    # made a real 400 ("does not support this model") report itself as
+    # `output_summary == "success"` right up until `cosmo spec add` printed
+    # nothing at all about why the run failed. `is_error` is the actual
+    # structured signal; its own `result` field is the one place the CLI
+    # puts the human-readable reason, so prefer that when it's set.
     if terminal is not None:
+        if terminal.payload.get("is_error"):
+            error_text = terminal.payload.get("result")
+            if isinstance(error_text, str) and error_text:
+                return error_text
         subtype = terminal.payload.get("subtype")
         if isinstance(subtype, str):
             return subtype

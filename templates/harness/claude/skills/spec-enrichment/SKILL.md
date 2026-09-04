@@ -52,6 +52,13 @@ allow_test_edits: true               # omit unless required -- see below
 no other context can implement it correctly.>
 ```
 
+`title` is plain YAML, not a free-text field -- if it contains a `:` followed by
+a space (a natural thing to write, e.g. "Chat shell: app bar, message list"),
+wrap the whole value in double quotes or the frontmatter fails to parse and
+`cosmo spec add`/`cosmo spec queue` cannot read the file back at all. Same
+rule for any other value that starts with a YAML-special character. When in
+doubt, quote it.
+
 ### `allow_test_edits`
 
 Omit this key (it defaults to `false`) unless the task's own deliverable

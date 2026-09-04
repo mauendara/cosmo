@@ -1484,6 +1484,11 @@ def spec_add(
         raise error_box[0]
     if not result_box or not result_box[0].success:
         err_console.print("[red]spec enrichment failed[/red]")
+        if result_box:
+            failed = result_box[0]
+            err_console.print(f"[red]{failed.output_summary}[/red]")
+            if failed.raw_log_path is not None:
+                err_console.print(f"[dim]raw log: {failed.raw_log_path}[/dim]")
         raise typer.Exit(code=1)
 
     try:
