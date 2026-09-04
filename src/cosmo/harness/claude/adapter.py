@@ -98,7 +98,8 @@ class ClaudeCodeAdapter(_ClaudeCodeInvoker):
         assert "bypassPermissions" not in argv
         return argv
 
-    def _build_env(self, task_id: str) -> dict[str, str]:
+    def _build_env(self, task_id: str, model: str) -> dict[str, str]:
+        del model  # resolved via the --model CLI flag on this route, not the environment
         env = dict(os.environ)
         # Spec 2.3: explicitly scrub rather than assume absence.
         env.pop(BILLING_ENV_VAR, None)

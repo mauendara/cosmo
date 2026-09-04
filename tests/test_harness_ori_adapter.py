@@ -111,7 +111,7 @@ def test_env_scrubs_anthropic_api_key_passes_openrouter_key_and_disables_ori_tel
     monkeypatch.setenv("OPENROUTER_API_KEY", "or-real-credential")
     adapter = _adapter(tmp_path)
 
-    env = adapter._build_env("task-1")  # noqa: SLF001
+    env = adapter._build_env("task-1", "openai/gpt-5")  # noqa: SLF001
 
     assert "ANTHROPIC_API_KEY" not in env
     assert env["OPENROUTER_API_KEY"] == "or-real-credential"
@@ -120,7 +120,7 @@ def test_env_scrubs_anthropic_api_key_passes_openrouter_key_and_disables_ori_tel
 
 def test_env_carries_task_id_and_db_path_for_the_guardrail_hooks(tmp_path: Path) -> None:
     adapter = _adapter(tmp_path)
-    env = adapter._build_env("task-42")  # noqa: SLF001
+    env = adapter._build_env("task-42", "openai/gpt-5")  # noqa: SLF001
 
     assert env["COSMO_TASK_ID"] == "task-42"
     assert env["COSMO_DB_PATH"] == str(adapter.config.paths.db_path)

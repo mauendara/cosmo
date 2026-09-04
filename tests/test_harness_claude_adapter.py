@@ -268,7 +268,7 @@ def test_env_carries_task_id_and_db_path_for_the_guardrail_hooks(tmp_path: Path)
     Cosmo's state -- it reads these two env vars to look up
     task_queue.allow_test_edits read-only."""
     adapter = _adapter(tmp_path)
-    env = adapter._build_env("task-42")  # noqa: SLF001
+    env = adapter._build_env("task-42", "claude-sonnet-5")  # noqa: SLF001
 
     assert env["COSMO_TASK_ID"] == "task-42"
     assert env["COSMO_DB_PATH"] == str(adapter.config.paths.db_path)

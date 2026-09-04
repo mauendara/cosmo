@@ -30,6 +30,15 @@ HARNESS_ROOT_LINKS: dict[str, tuple[tuple[str, str], ...]] = {
         ("agents", "agents"),
         ("skills", "skills"),
     ),
+    # Also the real `claude` binary underneath (harness.claude_openrouter.
+    # adapter.ClaudeOpenRouterAdapter routes it at OpenRouter directly, no
+    # `ori` involved) -- same four names again.
+    "claude-openrouter": (
+        ("CLAUDE.md", "CLAUDE.md"),
+        (".claude", ""),
+        ("agents", "agents"),
+        ("skills", "skills"),
+    ),
 }
 
 

@@ -22,6 +22,8 @@ ALLOWED_HARNESS_AWARE = {
     SRC / "harness" / "claude" / "stream.py",
     SRC / "harness" / "ori" / "__init__.py",
     SRC / "harness" / "ori" / "adapter.py",
+    SRC / "harness" / "claude_openrouter" / "__init__.py",
+    SRC / "harness" / "claude_openrouter" / "adapter.py",
     SRC / "harness" / "registry.py",  # maps names to classes; that is its job
     SRC / "config" / "defaults.toml",  # configuration data, not logic
     # Spec 10.2: which paths a harness expects symlinked at the target repo's

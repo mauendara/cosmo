@@ -10,9 +10,6 @@ name Ori-specific binaries, environment variables, or flags -- enforced by
 Facts this rests on, all confirmed by real invocation (v12,
 docs/v12-ori-opencode-harness-info.md):
 
-- `PreToolUse` hooks fire and block through Ori, surfacing in
-  `permission_denials` the same as the native route (subject to V2's
-  `--setting-sources project` interaction check, plan Phase 6).
 - The terminal `result` JSON is byte-for-byte the schema `stream.py` already
   parses, including a populated `total_cost_usd` against a real OpenRouter
   model.
@@ -22,6 +19,43 @@ docs/v12-ori-opencode-harness-info.md):
   `--` would be a conflicting flag, not an override.
 - Ori sets its own `ANTHROPIC_API_KEY` on the child unconditionally, so
   scrubbing the operator's cannot break the call.
+
+**A real, unresolved `ori` bug on this route for non-Anthropic models
+(found by hand, 2026-09-04).** `--output-format stream-json` requires
+`--verbose` (Claude Code itself enforces this -- "requires --verbose" is a
+hard error otherwise), and whenever both are present, `ori` makes Claude
+Code request the `thinking.display: "updates"` Anthropic beta feature on
+every turn. No OpenRouter provider for a non-Anthropic model (confirmed on
+z-ai/glm-4.6 and z-ai/glm-4.7-flash) has an endpoint that supports it, so
+the call 400s before the model ever sees the prompt -- every task blocks on
+an environment_error with zero files touched. `--reasoning-effort` does NOT
+fix this -- tried all five accepted levels (`low`/`medium`/`high`/`xhigh`/
+`max`) against the real `--verbose --output-format stream-json` shape
+Cosmo actually uses, all five still 400. (An earlier version of this
+comment claimed `--reasoning-effort medium` fixed it -- that conclusion
+came from testing with `--output-format json`, non-streaming, which Cosmo
+never actually uses; retested against the real shape and it does not hold.
+Left here as a correction, not silently dropped, so it isn't retried.) No
+known fix from Cosmo's side -- this is an `ori` bug, not a `claude` one:
+`harness/claude_openrouter/adapter.py`'s route talks to the same `claude`
+binary directly with the same `--verbose --output-format stream-json` and
+never triggers it. **Use `claude-openrouter` for any non-Anthropic
+OpenRouter model** -- this route (`ori-claude`) only genuinely works for
+Anthropic models routed through OpenRouter (which support their own beta
+feature fine), a much narrower case than "test a budget model."
+
+A related false lead worth recording so it isn't retried either:
+`--setting-sources` looked, for a few hours by hand the same day, like it
+independently broke `ori`'s OpenRouter credential injection ("Not logged
+in", despite `ori auth` showing a valid credential). Every repro of that one
+turned out to be run from inside an already-running Claude Code session,
+which leaks that session's own `CLAUDECODE`/`CLAUDE_CODE_*` env vars into
+the child (a gotcha docs/handoff.md already recorded, predating this
+investigation) -- stripping those vars fixes it with `--setting-sources
+project` present, no argv change needed. `--setting-sources` was never the
+cause, so `_claude_flags()` (invoker.py) keeps passing it unconditionally
+and this route's PreToolUse guardrail hooks fire exactly like the native
+route's do.
 """
 
 from __future__ import annotations
@@ -127,6 +161,18 @@ class OriClaudeAdapter(_ClaudeCodeInvoker):
         else:
             results.append(ok("cost ceiling", f"${self.config.cost.max_cost_per_run_usd:.2f}/run"))
 
+        results.append(
+            warn(
+                "non-Anthropic model support",
+                "found by hand (2026-09-04): ori makes claude request an Anthropic-only "
+                "beta feature whenever --output-format stream-json is used (Cosmo always "
+                "uses it), which every non-Anthropic OpenRouter provider rejects with a "
+                "400 -- no known fix on this route. Use the claude-openrouter harness for "
+                "a non-Anthropic model; this route only reliably works for Anthropic "
+                "models routed through OpenRouter.",
+            )
+        )
+
         return results
 
     # -- invocation mechanics ------------------------------------------------
@@ -150,7 +196,8 @@ class OriClaudeAdapter(_ClaudeCodeInvoker):
         assert "bypassPermissions" not in argv
         return argv
 
-    def _build_env(self, task_id: str) -> dict[str, str]:
+    def _build_env(self, task_id: str, model: str) -> dict[str, str]:
+        del model  # resolved via --model on this route's own argv, not the environment
         env = dict(os.environ)
         # Different reason than the native adapter's scrub: Ori sets its own
         # ANTHROPIC_API_KEY on the child unconditionally (v12), so the

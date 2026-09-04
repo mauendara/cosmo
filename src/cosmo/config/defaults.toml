@@ -23,7 +23,18 @@ model = "claude-sonnet-5"
 # Per-harness model overrides. Each harness's model namespace is its own; an
 # OpenRouter model id means nothing to native Claude Code and vice versa.
 # See HarnessConfig.resolve_model for the resolution order.
+#
+# ori-claude only reliably works with Anthropic models (found by hand,
+# 2026-09-04: a real ori bug 400s every non-Anthropic OpenRouter model --
+# see harness/ori/adapter.py's module docstring) -- an Anthropic id routed
+# through OpenRouter, as below, is the safe case for it.
 # [harness.overrides.ori-claude]
+# model = "anthropic/claude-sonnet-4.5"
+#
+# claude-openrouter has no such restriction -- talks to `claude` directly,
+# no `ori` involved (see harness/claude_openrouter/adapter.py) -- so this is
+# the one to use for a non-Anthropic model like the qwen3-coder/gpt-5 below.
+# [harness.overrides.claude-openrouter]
 # model = "anthropic/claude-sonnet-4.5"
 # propose_model = "openai/gpt-5"
 # implement_model = "qwen/qwen3-coder"

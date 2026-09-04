@@ -113,15 +113,33 @@ class _ClaudeCodeInvoker(HarnessAdapter):
         route that prepends its own wrapper flags can't reintroduce them."""
 
     @abstractmethod
-    def _build_env(self, task_id: str) -> dict[str, str]:
-        """Full child environment for this route."""
+    def _build_env(self, task_id: str, model: str) -> dict[str, str]:
+        """Full child environment for this route. `model` is threaded
+        through (unused by the two claude-binary routes that resolve it via
+        a CLI flag/wrapper instead) because `claude_openrouter.adapter.
+        ClaudeOpenRouterAdapter` needs it here: it sets `ANTHROPIC_MODEL`
+        directly rather than passing `--model`, the one route where model
+        selection genuinely happens in the environment, not argv."""
 
     def _claude_flags(self) -> list[str]:
         """Everything after `-p <prompt>` that is identical either route --
         notably NOT `--model`: the native route passes it here directly, the
         Ori route passes it to `ori` before its own `--`, since Ori consumes
         `--model` itself and translates it to `ANTHROPIC_MODEL` rather than
-        forwarding it (v12, real invocation)."""
+        forwarding it (v12, real invocation).
+
+        A false lead worth recording so it isn't retried: `--setting-sources`
+        looked, for a few hours by hand (2026-09-04), like it broke `ori`'s
+        OpenRouter credential injection -- every repro happened to be run
+        from inside an already-running Claude Code session, which leaks that
+        session's own `CLAUDECODE`/`CLAUDE_CODE_*` env vars into the child
+        (see this file's own handoff.md gotcha, predating this investigation)
+        and *that* is what actually broke it; stripping those vars fixes it
+        with `--setting-sources project` present, no argv change needed.
+        `--setting-sources` was never the cause. See `harness/ori/adapter.py`
+        and `harness/claude_openrouter/adapter.py` for what *is* real from
+        this same investigation (a genuine, still-unresolved `ori` bug,
+        unrelated to this flag)."""
         flags = [
             "--output-format",
             "stream-json",
@@ -288,7 +306,7 @@ class _ClaudeCodeInvoker(HarnessAdapter):
         on_activity: Callable[[str], None] | None = None,
     ) -> HarnessResult:
         argv = self._build_argv(prompt, model)
-        env = self._build_env(task_id)
+        env = self._build_env(task_id, model)
         raw_log_path = (
             self.config.paths.log_dir / "harness" / task_id / f"{uuid.uuid4().hex}.ndjson"
         )

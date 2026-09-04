@@ -11,6 +11,83 @@ not a record of how we got here.
 
 ## Where things stand
 
+- **v16 (2026-09-04): new `claude-openrouter` harness, and two corrections
+  to the `ori-claude` record above/below.** Driven by the user wanting to
+  actually test cheap non-Anthropic OpenRouter models (GLM, Qwen, etc.)
+  against `wa-chat-component`, which promptly hit two real `ori` problems
+  neither the v13 plan's validations nor the "Ori Harness researched"
+  bullet below had surfaced (both used Anthropic models through OpenRouter,
+  which don't trigger either bug — see below).
+  - **Real, unresolved `ori` bug: non-Anthropic models 400 on
+    `thinking.display`.** `--output-format stream-json` requires
+    `--verbose` (`claude` itself enforces the pairing) — Cosmo always uses
+    both — and whenever `ori` launches `claude` that way, it makes `claude`
+    request the Anthropic-only `thinking.display: "updates"` beta feature.
+    No OpenRouter provider for a non-Anthropic model supports it (confirmed
+    on `z-ai/glm-4.6`, `z-ai/glm-4.7-flash`), so the call 400s before the
+    model ever sees the prompt — every task blocks on `environment_error`
+    with zero files touched. `--reasoning-effort` (all five accepted
+    levels) does **not** fix it against the real `--verbose
+    --output-format stream-json` shape — an earlier version of this entry,
+    and a same-day commit, claimed `medium` did; that conclusion came from
+    testing with `--output-format json` (non-streaming, which Cosmo never
+    uses) and didn't survive retesting against the real shape. No known fix
+    from Cosmo's side — `ori-claude` still keeps its PreToolUse guardrail
+    hooks and is otherwise fine, but is only reliably usable for Anthropic
+    models routed through OpenRouter now, not the "cheap budget model" case
+    it was built for.
+  - **False lead, now retracted: `--setting-sources` was never the
+    problem.** Same investigation, same day, a few hours earlier: dropping
+    `ori-claude`'s `--setting-sources project` (and flipping
+    `supports_gating` to `False`) looked like it fixed a "Not logged in"
+    failure despite `ori auth` showing a valid credential, and shipped in
+    an intermediate commit. It didn't need fixing — every repro was run
+    from inside an already-running Claude Code session (this very
+    investigation's own shell), which leaks `CLAUDECODE`/`CLAUDE_CODE_*`
+    env vars into the child, a gotcha already recorded lower in this file
+    *before* this session started. Stripping those vars makes `ori-claude`
+    work fine with `--setting-sources project` present; the flag removal
+    accomplished nothing and has been reverted — `_claude_flags()`
+    (`harness/claude/invoker.py`) unconditionally passes `--setting-sources
+    project` again, `supports_gating` is `True` again. Worth flagging if
+    this session's own intermediate commits ever get bisected: they briefly
+    had `ori-claude` guardrail-less for the wrong reason.
+  - **New harness: `claude-openrouter`**
+    (`harness/claude_openrouter/adapter.py` + `templates/harness/
+    claude-openrouter/`, registered in `harness/registry.py`, symlinks in
+    `bootstrap/symlinks.py`). Talks to the real `claude` binary directly —
+    `ANTHROPIC_BASE_URL=https://openrouter.ai/api` +
+    `ANTHROPIC_MODEL=<id>` + `--settings '{"apiKeyHelper":"printf %s
+    \"$OPENROUTER_API_KEY\""}'` — no `ori` process in the loop at all, so
+    neither `ori` bug above can reach it. Keeps `--setting-sources project`
+    (guardrails genuinely enforce, unlike the abandoned `ori-claude`
+    workaround). Proven by real invocation twice via `cosmo harness probe`:
+    once on the default model, once explicitly on `z-ai/glm-4.6` (`$0.016`
+    real cost, real success, no `thinking.display` error either time). This
+    is now the recommended route for any non-Anthropic OpenRouter model;
+    `ori-claude` stays registered and working for Anthropic-model-via-
+    OpenRouter testing/comparison, not removed.
+  - `_ClaudeCodeInvoker._build_env` (invoker.py) gained a `model: str`
+    parameter — needed because `claude-openrouter` sets `ANTHROPIC_MODEL`
+    in the environment rather than passing `--model`, the one route where
+    model selection happens there instead of argv. The other two adapters
+    accept and ignore it (`del model` with a one-line reason).
+    `test_harness_template_parity.py` is now parametrized over both
+    non-native harnesses (`ori-claude`, `claude-openrouter`) instead of
+    hardcoded to just `ori-claude`, so a fourth harness template gets the
+    same hooks-byte-identity/settings-shape coverage for free.
+  - `ori` itself was updated on this host, 0.13.0 → 0.14.0, mid-investigation
+    (`ori update`) — did not change either finding above; both reproduced
+    identically on both versions.
+  - The user's own `~/.config/cosmo/wa-chat-component.toml` overlay (not in
+    this repo) now has `[harness.overrides.claude-openrouter]` alongside
+    the pre-existing `[harness.overrides.ori-claude]` block, same GLM/Qwen
+    model choices in both, plus `[cost] max_cost_per_run_usd = 2.0` (their
+    main `~/.config/cosmo/config.toml` still has it at `0` — deliberate,
+    for the native subscription-billed route, see that file's own comments).
+  - `./check.sh` exits 0 fully clean, **659 tests passing, 9 skipped** (was
+    624 as of the entry below) — every claim above has a regression test,
+    not just this narrative.
 - **v15 (2026-09-04): crash-mid-task resumption keeps the worktree instead
   of wiping it** — see deviation 89 in `v3-implementation-state.md` for the
   full account. A task crashed at `PROPOSED`/`IMPLEMENTING`/`VALIDATING`/
@@ -146,6 +223,12 @@ not a record of how we got here.
   [v8-validations-for-later.md](v8-validations-for-later.md)'s now-resolved
   entry, which also has the complete V1-V6 narrative; deviations 85-86 in
   `v3-implementation-state.md` for the implementation/validation split).
+  **Update (2026-09-04, see the v16 entry above):** V2's real `git push`
+  denial still stands (`supports_gating=True` is correct), but this
+  validation's real spend used an Anthropic model through OpenRouter, which
+  doesn't trigger the `thinking.display` bug found later against
+  non-Anthropic models — `ori-claude` is not the harness to reach for
+  testing those; use `claude-openrouter` instead.
 - **`docs/v14-cosmo-branch-isolation-plan.md` (written 2026-09-02) is now
   fully implemented and tested (2026-09-03)** — see `v3-implementation-
   state.md`'s deviation 88 for the complete account. A new optional
