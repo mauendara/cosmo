@@ -207,7 +207,21 @@ class _ClaudeCodeInvoker(HarnessAdapter):
     ) -> HarnessResult:
         prompt = f"Implement the OpenSpec change at {spec_path} (task {task_id})."
         if retry_context:
-            prompt += f"\n\nThe previous attempt failed:\n{retry_context}"
+            # This worktree is not necessarily clean -- an ordinary in-run
+            # retry never resets it (task.machine.run_task's own retry loop),
+            # and a crashed/killed process now resumes in place too (v15,
+            # run.recovery._RESUME_STAGE_BY_STATUS), so a real prior commit or
+            # uncommitted edits are the common case here, not the exception.
+            # Told explicitly rather than left for the agent to discover by
+            # accident, since a one-shot `claude -p` call has no memory of
+            # whatever session produced that state.
+            prompt += (
+                f"\n\nThe previous attempt failed:\n{retry_context}"
+                "\n\nThis worktree may already contain real work from that attempt -- "
+                "committed or not. Before changing anything, check `git log`, `git status`, "
+                "and `openspec status --change <id>` to see what's actually already done, "
+                "and continue from there rather than redoing finished subtasks."
+            )
         model = self.config.harness.resolve_model(self.name, "implement")
         return self._invoke(task_id=task_id, prompt=prompt, model=model, on_activity=on_activity)
 

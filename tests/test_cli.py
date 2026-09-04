@@ -449,6 +449,119 @@ def test_queue_retry_with_an_already_proposed_change_keeps_the_worktree(
     assert task.worktree_path == str(info.path)
 
 
+def test_queue_retry_keep_implementation_keeps_the_failed_attempts_own_code(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """v15: `--keep-implementation` skips `reset_worktree_to_commit`
+    entirely -- the failed attempt's own untracked/uncommitted work must
+    still be sitting there afterward, and the task resumes at `proposed`
+    (skip PROPOSING, straight back to IMPLEMENTING) instead of the default
+    path's `attempt_count`-reset-and-discard behavior."""
+    repo = _repo_on_develop(tmp_path)
+    monkeypatch.chdir(repo)
+    db_path = load_config().paths.db_path
+    writer = StoreWriter(db_path)
+    writer.register_project(target_path=str(repo.resolve()), harness="claude")
+    writer.queue_add(task_id="t1", spec_path="openspec/changes/t1", max_attempts=2)
+    emitter = EventEmitter(writer)
+    info = create_worktree(
+        repo_path=repo,
+        work_dir=tmp_path / "work",
+        run_id="run-1",
+        task_id="t1",
+        spec_id="t1",
+        base_branch="develop",
+        harness="claude",
+        writer=writer,
+        emitter=emitter,
+    )
+
+    def _git(*args: str) -> None:
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(info.path),
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@example.com",
+                *args,
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+    change_dir = info.path / "openspec" / "changes" / "t1"
+    change_dir.mkdir(parents=True)
+    (change_dir / "tasks.md").write_text("- [x] 1.1 Done\n", encoding="utf-8")
+    _git("add", "openspec")
+    _git("commit", "-q", "-m", "Propose t1 OpenSpec change")
+
+    # The failed implementation attempt's own real progress -- untracked,
+    # never committed, exactly what a killed/abandoned IMPLEMENTING session
+    # leaves behind. --keep-implementation must leave this alone.
+    (info.path / "frontend").mkdir()
+    (info.path / "frontend" / "package.json").write_text("{}\n", encoding="utf-8")
+
+    writer.queue_begin_attempt("t1")
+    writer.queue_begin_attempt("t1")
+    writer.queue_block("t1", BlockedReason.CODE_FAILURE)
+    writer.close()
+
+    result = runner.invoke(app, ["queue", "retry", "t1", "--keep-implementation"])
+
+    assert result.exit_code == 0, result.stderr
+    assert "kept the failed implementation attempt's code" in result.stdout
+    assert (info.path / "frontend" / "package.json").is_file()
+    task = get_task(db_path, "t1")
+    assert task is not None
+    assert task.status == "queued"
+    assert task.attempt_count == 0
+    assert task.worktree_path == str(info.path)
+    assert task.resume_at_stage == "proposed"
+
+
+def test_queue_retry_keep_implementation_falls_back_when_never_proposed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--keep-implementation` has nothing to keep when the task never got
+    past PROPOSING -- must fall back to the ordinary full-wipe path rather
+    than erroring out or silently keeping a half-created worktree."""
+    repo = _repo_on_develop(tmp_path)
+    monkeypatch.chdir(repo)
+    db_path = load_config().paths.db_path
+    writer = StoreWriter(db_path)
+    writer.register_project(target_path=str(repo.resolve()), harness="claude")
+    writer.queue_add(task_id="t1", spec_path="openspec/changes/t1", max_attempts=2)
+    emitter = EventEmitter(writer)
+    info = create_worktree(
+        repo_path=repo,
+        work_dir=tmp_path / "work",
+        run_id="run-1",
+        task_id="t1",
+        spec_id="t1",
+        base_branch="develop",
+        harness="claude",
+        writer=writer,
+        emitter=emitter,
+    )
+    writer.queue_block("t1", BlockedReason.CODE_FAILURE)
+    writer.close()
+
+    result = runner.invoke(app, ["queue", "retry", "t1", "--keep-implementation"])
+
+    assert result.exit_code == 0, result.stderr
+    assert "nothing to keep" in result.stderr
+    assert not info.path.exists()
+    task = get_task(db_path, "t1")
+    assert task is not None
+    assert task.status == "queued"
+    assert task.worktree_path is None
+    assert task.resume_at_stage is None
+
+
 def test_queue_retry_on_a_kept_worktree_re_syncs_harness_assets(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

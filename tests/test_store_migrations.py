@@ -552,7 +552,7 @@ def test_migration_11_backward_compat_existing_project_row_reads_back_as_direct(
 
     applied = migrate(conn)
 
-    assert applied == [11]
+    assert applied == [11, 12], "migration 12 also applies from a pre-v14 starting point"
     row = conn.execute(
         "SELECT base_branch_mode, real_base_branch, cosmo_branch_name "
         "FROM projects WHERE project_id = 'p1'"
@@ -560,4 +560,89 @@ def test_migration_11_backward_compat_existing_project_row_reads_back_as_direct(
     assert row[0] == "direct"
     assert row[1] is None
     assert row[2] is None
+    conn.close()
+
+
+def test_migration_12_accepts_proposed_alongside_committing_and_merging(tmp_path: Path) -> None:
+    conn = connect_writer(tmp_path / "cosmo.db")
+    migrate(conn)
+    conn.execute(
+        """
+        INSERT INTO task_queue (
+            task_id, spec_path, status, attempt_count, max_attempts, created_at, updated_at
+        ) VALUES ('t1', 'openspec/changes/t1', 'queued', 0, 2, 't0', 't0')
+        """
+    )
+    conn.commit()
+
+    for value in ("proposed", "committing", "merging"):
+        conn.execute("UPDATE task_queue SET resume_at_stage = ? WHERE task_id = 't1'", (value,))
+        conn.commit()
+        reread = conn.execute(
+            "SELECT resume_at_stage FROM task_queue WHERE task_id = 't1'"
+        ).fetchone()
+        assert reread[0] == value
+    conn.close()
+
+
+def test_migration_12_still_rejects_implementing(tmp_path: Path) -> None:
+    conn = connect_writer(tmp_path / "cosmo.db")
+    migrate(conn)
+    conn.execute(
+        """
+        INSERT INTO task_queue (
+            task_id, spec_path, status, attempt_count, max_attempts, created_at, updated_at
+        ) VALUES ('t1', 'openspec/changes/t1', 'queued', 0, 2, 't0', 't0')
+        """
+    )
+    conn.commit()
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute("UPDATE task_queue SET resume_at_stage = 'implementing' WHERE task_id = 't1'")
+    conn.close()
+
+
+def test_migration_12_preserves_existing_task_queue_rows_and_columns(tmp_path: Path) -> None:
+    """Recreate-copy-swap must not lose `spec_batch_id`/`resume_at_stage`
+    (both added after the original migration 4 rebuild this one is modeled
+    on) or any ordinary column's data."""
+    db_path = tmp_path / "cosmo.db"
+    conn = connect_writer(db_path)
+    pre_v15 = [m for m in MIGRATIONS if m.version <= 11]
+    script = "BEGIN;\n"
+    for m in pre_v15:
+        script += m.sql + "\n"
+    script += (
+        "CREATE TABLE IF NOT EXISTS schema_migrations ("
+        "    version INTEGER PRIMARY KEY,"
+        "    description TEXT NOT NULL,"
+        "    applied_at TEXT NOT NULL"
+        ");\n"
+    )
+    for m in pre_v15:
+        script += (
+            f"INSERT INTO schema_migrations(version, description, applied_at) "
+            f"VALUES ({m.version}, '{m.description}', 't0');\n"
+        )
+    script += "COMMIT;"
+    conn.executescript(script)
+    conn.execute(
+        """
+        INSERT INTO task_queue (
+            task_id, spec_path, status, attempt_count, max_attempts, created_at, updated_at,
+            spec_batch_id, resume_at_stage
+        ) VALUES ('t1', 'openspec/changes/t1', 'queued', 1, 2, 't0', 't0', 'batch-a', 'committing')
+        """
+    )
+    conn.commit()
+    assert current_version(conn) == 11
+
+    applied = migrate(conn)
+
+    assert applied == [12]
+    row = conn.execute(
+        "SELECT spec_batch_id, resume_at_stage, attempt_count FROM task_queue WHERE task_id = 't1'"
+    ).fetchone()
+    assert row[0] == "batch-a"
+    assert row[1] == "committing"
+    assert row[2] == 1
     conn.close()

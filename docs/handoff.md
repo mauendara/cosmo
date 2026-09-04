@@ -5,12 +5,32 @@ session-by-session narrative (what changed, what was found, how it was
 fixed) has been cut. That history isn't lost — it's in `git log` (every
 commit message explains its own *why*) and in
 [v3-implementation-state.md](v3-implementation-state.md)'s cumulative
-deviations table (the complete bug/fix log, entries 1-88). This file now
+deviations table (the complete bug/fix log, entries 1-89). This file now
 only carries what a session needs to *orient itself* before doing new work,
 not a record of how we got here.
 
 ## Where things stand
 
+- **v15 (2026-09-04): crash-mid-task resumption keeps the worktree instead
+  of wiping it** — see deviation 89 in `v3-implementation-state.md` for the
+  full account. A task crashed at `PROPOSED`/`IMPLEMENTING`/`VALIDATING`/
+  `REVIEWING`/`FAILED_RETRY` now resumes there in place (new `resume_at_
+  stage='proposed'`, `Migration(12, ...)`) instead of the old behavior of
+  wiping the worktree and redoing `PROPOSING`+`IMPLEMENTING` from zero; a
+  crash at `COMMITTING`/`MERGING`/`FINISHING` reuses the resume mechanism
+  migration 9 already built. Only a crash during `PROPOSING` itself still
+  gets a full wipe (nothing valid exists yet). `run.loop.run_queue`'s
+  startup sweep now runs *after* `reconcile_interrupted_tasks`, not before
+  — required so a to-be-resumed task's worktree isn't pruned while still
+  sitting at its crashed status. `cli.main.queue_retry`'s own deliberate
+  reset-to-`PROPOSING`-commit default (confirmed with the user as worth
+  keeping, not a gap — a human retry only happens after automated attempts
+  already exhausted `max_attempts`) gained an opt-in `--keep-implementation`
+  flag for the cases where a human judges the failed attempt's code worth
+  continuing instead. The harness's own retry prompt (`harness.claude.
+  invoker`, shared by `claude`/`ori-claude`) now explicitly tells the agent
+  to check `git log`/`git status`/`openspec status` before continuing
+  whenever `retry_context` is set, rather than assume a clean slate.
 - **All 11 build phases done**, plus the v4 raw-spec-workflow feature, the
   v5 improvements plan (crash/resume, Telegram notify, `--follow`,
   live-terminal observability, quota-bypass), and v7 items 1-3. v6
@@ -356,7 +376,7 @@ superseded/consumed.
 
 1. `./check.sh` green (if any code changed at all).
 2. Record any new deviation in `v3-implementation-state.md`'s cumulative
-   table (next number is **88**).
+   table (next number is **90**).
 3. Commit to the current branch (`private`, per CONTRIBUTING.md's branching
    model — day-to-day work never targets `develop` directly) with a message
    explaining *why*, in the style of the existing commit history.

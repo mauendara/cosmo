@@ -1703,22 +1703,37 @@ def queue_retry(
             "one for the same reason (see the repeat-block guard below).",
         ),
     ] = False,
+    keep_implementation: Annotated[
+        bool,
+        typer.Option(
+            "--keep-implementation",
+            help="Keep the failed IMPLEMENTING attempt's own code instead of discarding "
+            "it back to the PROPOSING commit -- the next cosmo run continues on top of "
+            "it rather than redoing it from scratch. attempt_count still resets to 0.",
+        ),
+    ] = False,
     config: ConfigOption = None,
 ) -> None:
     """Reset a `blocked` task back to `queued` for a genuine fresh start:
     `attempt_count` resets to 0 always. If the task's worktree still has the
-    commit `PROPOSING` made (`openspec/changes/<spec_id>/tasks.md`), only
-    the failed `IMPLEMENTING` attempt is discarded (`git reset --hard` to
-    that commit, then `git clean -fdx`) -- the worktree and the already-
-    valid OpenSpec change survive, so the next `cosmo run` picks up at
-    `IMPLEMENTING` instead of paying for `PROPOSING` again (found by hand:
-    the propose step doesn't need re-running unless the spec/docs it was
-    based on actually changed, which a same-worktree retry never does).
-    Only when that commit can't be found -- the task never got past
-    `PROPOSING`, or the worktree is gone -- does this fall back to removing
-    the worktree and branch entirely, matching `git.worktree.
-    sweep_stale_worktrees`'s own "start over" posture for a task that
-    genuinely never produced anything worth keeping.
+    commit `PROPOSING` made (`openspec/changes/<spec_id>/tasks.md`), by
+    default only that commit is kept -- the failed `IMPLEMENTING` attempt's
+    own code is discarded (`git reset --hard` to that commit, then `git
+    clean -fdx`) -- so the next `cosmo run` picks up at `IMPLEMENTING`
+    instead of paying for `PROPOSING` again (found by hand: the propose step
+    doesn't need re-running unless the spec/docs it was based on actually
+    changed, which a same-worktree retry never does). Pass
+    `--keep-implementation` to keep that code too: the next `cosmo run`
+    resumes `IMPLEMENTING` on top of it rather than starting over -- a
+    genuine judgment call between "the code was on the wrong track, throw it
+    out" and "it was close, just fix it," which only a human reviewing the
+    block reason can make; there is no default that's right for both, so
+    this stays opt-in. Only when that commit can't be found -- the task
+    never got past `PROPOSING`, or the worktree is gone -- does this fall
+    back to removing the worktree and branch entirely (`--keep-
+    implementation` has nothing to keep in that case either), matching
+    `git.worktree.sweep_stale_worktrees`'s own "start over" posture for a
+    task that genuinely never produced anything worth keeping.
 
     **Repeat-block guard**: `attempt_count` resetting to 0 on every retry
     means a task's own `max_attempts` budget has no memory of *why* it kept
@@ -1785,6 +1800,7 @@ def queue_retry(
             )
         else:
             clear_worktree = True
+            resume_at_stage: TaskStatus | None = None
             if task.worktree_path is not None:
                 worktree_path = Path(task.worktree_path)
                 spec_id = Path(task.spec_path).stem
@@ -1795,32 +1811,47 @@ def queue_retry(
                 )
                 resolved_repo, project = _resolve_project_repo(repo, cfg)
                 if propose_commit is not None:
-                    reset_worktree_to_commit(worktree_path, propose_commit)
                     clear_worktree = False
-                    console.print(
-                        "[dim]kept the already-proposed OpenSpec change, discarded the "
-                        "failed implementation attempt[/dim]"
-                    )
+                    if keep_implementation:
+                        resume_at_stage = TaskStatus.PROPOSED
+                        console.print(
+                            "[dim]kept the failed implementation attempt's code -- "
+                            "resuming IMPLEMENTING on top of it[/dim]"
+                        )
+                    else:
+                        reset_worktree_to_commit(worktree_path, propose_commit)
+                        console.print(
+                            "[dim]kept the already-proposed OpenSpec change, discarded the "
+                            "failed implementation attempt[/dim]"
+                        )
                     # `reset_worktree_to_commit`'s `git clean -fdx` discards the
                     # worktree's `.agent/<harness>/` back to whatever was
                     # committed as of `propose_commit` -- stale if Cosmo's own
                     # harness templates (guardrail hooks, settings.json) changed
-                    # since this worktree was first created. Unlike
-                    # `create_worktree`'s two call sites, a kept-worktree retry
-                    # never re-syncs on its own; do it here so a fixed guardrail
-                    # actually applies to the retried attempt, not just to the
-                    # next brand-new worktree.
+                    # since this worktree was first created. `--keep-
+                    # implementation` skips that reset but the same staleness
+                    # risk applies (this worktree's `.agent/` may just as easily
+                    # predate a template fix), so re-sync unconditionally either
+                    # way -- unlike `create_worktree`'s two call sites, a kept-
+                    # worktree retry never re-syncs on its own.
                     harness_name, _source = resolve_harness_name(
                         None, project.harness, cfg.harness.name
                     )
                     sync_harness_assets(worktree_path, harness_name, emitter=EventEmitter(writer))
                 else:
+                    if keep_implementation:
+                        err_console.print(
+                            "[yellow]--keep-implementation has nothing to keep -- this task "
+                            "never got past PROPOSING; falling back to a full reset[/yellow]"
+                        )
                     remove_worktree(
                         repo_path=resolved_repo,
                         worktree_path=worktree_path,
                         branch=f"task/{spec_id}",
                     )
-            result = writer.queue_retry(task_id, clear_worktree=clear_worktree)
+            result = writer.queue_retry(
+                task_id, clear_worktree=clear_worktree, resume_at_stage=resume_at_stage
+            )
             emit_state_changed(EventEmitter(writer), result)
     except TaskNotFoundError:
         err_console.print(f"[red]no such task: {task_id!r}[/red]")

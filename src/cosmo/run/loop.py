@@ -153,21 +153,6 @@ def _run_queue_locked(
     # thing to a periodic sweep without a separate cron/timer.
     apply_log_retention(config)
 
-    # Spec 3.2's own "a startup sweep prunes worktrees belonging to
-    # completed runs" -- built in Phase 5 (`git.worktree.sweep_
-    # stale_worktrees`) but never actually called from anywhere until now
-    # (flagged as a real gap in both Phase 8's and Phase 9's own state-doc
-    # sections). Nothing is "running" at process start by definition, so
-    # every worktree currently on disk belongs to a run that already ended
-    # -- a `DONE` task's own worktree is normally removed inline by `git.
-    # merge.merge_task` already, so this mainly recovers a task that
-    # crashed mid-attempt (never reached a terminal `remove_worktree` call
-    # at all) or one left behind by a killed/restarted process (the same
-    # systemd-restart-as-fresh-run scenario the log retention comment
-    # above describes). A `BLOCKED` task's worktree is retained for
-    # inspection (spec 3.2), same as always.
-    sweep_stale_worktrees(repo_path=repo_path, work_dir=config.paths.work_dir, db_path=db_path)
-
     if resume_run_id is not None:
         writer.run_transition(run_id, RunStatus.RUNNING)
         emitter.emit(
@@ -209,6 +194,31 @@ def _run_queue_locked(
     # and `task_failures`/`task_transitions` both hold a real foreign key
     # to `run_state(run_id)`.
     reconcile_interrupted_tasks(db_path=db_path, writer=writer, emitter=emitter, run_id=run_id)
+
+    # Spec 3.2's own "a startup sweep prunes worktrees belonging to
+    # completed runs" -- built in Phase 5 (`git.worktree.sweep_
+    # stale_worktrees`) but never actually called from anywhere until now
+    # (flagged as a real gap in both Phase 8's and Phase 9's own state-doc
+    # sections). Nothing is "running" at process start by definition, so
+    # every worktree currently on disk belongs to a run that already ended
+    # -- a `DONE` task's own worktree is normally removed inline by `git.
+    # merge.merge_task` already, so this mainly recovers a task that
+    # crashed mid-attempt (never reached a terminal `remove_worktree` call
+    # at all) or one left behind by a killed/restarted process (the same
+    # systemd-restart-as-fresh-run scenario the log retention comment
+    # above describes). A `BLOCKED` task's worktree is retained for
+    # inspection (spec 3.2), same as always.
+    #
+    # v15: deliberately placed *after* `reconcile_interrupted_tasks`, not
+    # before -- that call now resumes most crash-interrupted tasks in place
+    # (`run.recovery._RESUME_STAGE_BY_STATUS`) rather than wiping them, which
+    # means their `task_queue.status` only becomes `queued` (this sweep's own
+    # "safe to keep" signal) once reconcile has actually run. Sweeping first,
+    # the old order, would prune a task's worktree out from under it while it
+    # was still sitting at `implementing`/`validating`/etc. -- gone before
+    # reconcile ever got a chance to decide it was worth keeping.
+    sweep_stale_worktrees(repo_path=repo_path, work_dir=config.paths.work_dir, db_path=db_path)
+
     # v7: a second, independent startup reconciliation -- re-evaluates
     # blocked/cost tasks against *this* invocation's config, since that
     # block can only ever legitimately clear between runs (see the

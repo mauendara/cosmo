@@ -85,9 +85,12 @@ def test_a_garbage_lock_file_is_treated_as_stale(tmp_path: Path) -> None:
 # -- reconcile_interrupted_tasks ----------------------------------------------
 
 
-def test_a_mid_flight_task_is_requeued_and_recorded_as_environment_error(
+def test_a_mid_flight_implementing_task_resumes_in_place_keeping_its_worktree(
     tmp_path: Path,
 ) -> None:
+    """v15: a crash mid-IMPLEMENTING no longer wipes the worktree and redoes
+    PROPOSING -- it resumes at PROPOSED (skip proposing, re-enter the retry
+    loop straight at IMPLEMENTING), same as an ordinary in-run retry."""
     db_path = tmp_path / "cosmo.db"
     writer = StoreWriter(db_path)
     emitter = EventEmitter(writer)
@@ -114,7 +117,8 @@ def test_a_mid_flight_task_is_requeued_and_recorded_as_environment_error(
     task = get_task(db_path, "a")
     assert task is not None
     assert task.status == "queued"
-    assert task.worktree_path is None
+    assert task.worktree_path == "/tmp/some/leftover/worktree", "the worktree must be kept"
+    assert task.resume_at_stage == "proposed"
     assert task.attempt_count == 1, "must not consume the code-level retry budget"
 
     failures = list_task_failures(db_path, "a")
@@ -127,6 +131,120 @@ def test_a_mid_flight_task_is_requeued_and_recorded_as_environment_error(
     assert len(interrupted) == 1
     assert interrupted[0].task_id == "a"
     assert interrupted[0].payload["previous_status"] == "implementing"
+    writer.close()
+
+
+@pytest.mark.parametrize(
+    "status",
+    ["proposed", "implementing", "validating", "reviewing", "failed_retry"],
+)
+def test_a_crash_after_proposing_resumes_at_proposed(tmp_path: Path, status: str) -> None:
+    """Every status past PROPOSING but before COMMITTING resumes the same
+    way: keep the worktree, skip PROPOSING, re-enter the retry loop at
+    IMPLEMENTING -- matching what an ordinary in-run retry already does for
+    any of these, crash or not."""
+    db_path = tmp_path / "cosmo.db"
+    writer = StoreWriter(db_path)
+    emitter = EventEmitter(writer)
+    writer.queue_add(task_id="a", spec_path="openspec/changes/a", max_attempts=2)
+    writer.queue_transition(task_id="a", to_state=TaskStatus(status))
+    writer.queue_set_worktree_path("a", Path("/tmp/some/worktree"))
+    writer.run_create(
+        run_id="new-run",
+        harness="claude",
+        permission_mode="dontAsk",
+        max_turns=80,
+        base_branch="develop",
+    )
+
+    reconcile_interrupted_tasks(db_path=db_path, writer=writer, emitter=emitter, run_id="new-run")
+
+    task = get_task(db_path, "a")
+    assert task is not None
+    assert task.status == "queued"
+    assert task.worktree_path == "/tmp/some/worktree"
+    assert task.resume_at_stage == "proposed"
+    writer.close()
+
+
+@pytest.mark.parametrize("status", ["committing"])
+def test_a_crash_at_committing_resumes_directly_at_committing(tmp_path: Path, status: str) -> None:
+    db_path = tmp_path / "cosmo.db"
+    writer = StoreWriter(db_path)
+    emitter = EventEmitter(writer)
+    writer.queue_add(task_id="a", spec_path="openspec/changes/a", max_attempts=2)
+    writer.queue_transition(task_id="a", to_state=TaskStatus(status))
+    writer.queue_set_worktree_path("a", Path("/tmp/some/worktree"))
+    writer.run_create(
+        run_id="new-run",
+        harness="claude",
+        permission_mode="dontAsk",
+        max_turns=80,
+        base_branch="develop",
+    )
+
+    reconcile_interrupted_tasks(db_path=db_path, writer=writer, emitter=emitter, run_id="new-run")
+
+    task = get_task(db_path, "a")
+    assert task is not None
+    assert task.status == "queued"
+    assert task.worktree_path == "/tmp/some/worktree"
+    assert task.resume_at_stage == "committing"
+    writer.close()
+
+
+@pytest.mark.parametrize("status", ["merging", "finishing"])
+def test_a_crash_at_merging_or_finishing_resumes_directly_at_merging(
+    tmp_path: Path, status: str
+) -> None:
+    db_path = tmp_path / "cosmo.db"
+    writer = StoreWriter(db_path)
+    emitter = EventEmitter(writer)
+    writer.queue_add(task_id="a", spec_path="openspec/changes/a", max_attempts=2)
+    writer.queue_transition(task_id="a", to_state=TaskStatus(status))
+    writer.queue_set_worktree_path("a", Path("/tmp/some/worktree"))
+    writer.run_create(
+        run_id="new-run",
+        harness="claude",
+        permission_mode="dontAsk",
+        max_turns=80,
+        base_branch="develop",
+    )
+
+    reconcile_interrupted_tasks(db_path=db_path, writer=writer, emitter=emitter, run_id="new-run")
+
+    task = get_task(db_path, "a")
+    assert task is not None
+    assert task.status == "queued"
+    assert task.worktree_path == "/tmp/some/worktree"
+    assert task.resume_at_stage == "merging"
+    writer.close()
+
+
+def test_a_crash_during_proposing_itself_still_gets_a_full_wipe(tmp_path: Path) -> None:
+    """PROPOSING is the one status with nothing valid to resume into --
+    unchanged, pre-v15 behavior."""
+    db_path = tmp_path / "cosmo.db"
+    writer = StoreWriter(db_path)
+    emitter = EventEmitter(writer)
+    writer.queue_add(task_id="a", spec_path="openspec/changes/a", max_attempts=2)
+    writer.queue_transition(task_id="a", to_state=TaskStatus.PROPOSING)
+    writer.queue_set_worktree_path("a", Path("/tmp/some/worktree"))
+    writer.run_create(
+        run_id="new-run",
+        harness="claude",
+        permission_mode="dontAsk",
+        max_turns=80,
+        base_branch="develop",
+    )
+
+    reconcile_interrupted_tasks(db_path=db_path, writer=writer, emitter=emitter, run_id="new-run")
+
+    task = get_task(db_path, "a")
+    assert task is not None
+    assert task.status == "queued"
+    assert task.worktree_path is None
+    assert task.resume_at_stage is None
     writer.close()
 
 

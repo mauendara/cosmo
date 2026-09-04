@@ -232,11 +232,23 @@ un fallo del gate. Los payloads de eventos nunca lo incluyen.
 
 Restablece una tarea `blocked` a `queued`. `attempt_count` se reinicia a 0.
 
-Si el worktree todavía conserva el commit que hizo `PROPOSING`, solo se
-descarta la implementación fallida (`git reset --hard` a ese commit, luego
-`git clean -fdx`) — el worktree y el cambio de OpenSpec válido sobreviven,
-así que la siguiente ejecución retoma en `IMPLEMENTING`. De lo contrario, el
-worktree y la rama se eliminan y la tarea comienza de nuevo.
+Si el worktree todavía conserva el commit que hizo `PROPOSING`, por defecto
+solo se descarta la implementación fallida (`git reset --hard` a ese commit,
+luego `git clean -fdx`) — el worktree y el cambio de OpenSpec válido
+sobreviven, así que la siguiente ejecución retoma en `IMPLEMENTING`. Pasa
+`--keep-implementation` para conservar también el código del intento
+fallido en lugar de descartarlo — la siguiente ejecución retoma
+`IMPLEMENTING` sobre ese código en vez de rehacerlo desde cero;
+`attempt_count` igual se reinicia a 0 en ambos casos. Si la tarea nunca pasó
+de `PROPOSING` (o el worktree ya no existe), ambas rutas terminan
+eliminando el worktree y la rama por completo y la tarea comienza de
+nuevo — `--keep-implementation` imprime un aviso cuando no hay nada que
+conservar.
+
+Si el bloqueo más reciente de la tarea fue un `environment_error` en
+`COMMITTING` o `MERGING`, nada de lo anterior aplica — la tarea retoma
+directamente en esa etapa, ya que todo lo anterior ya pasó la validación (y
+la revisión, para `MERGING`).
 
 **Protección contra bloqueos repetidos**: una tarea cuyo bloqueo más
 reciente repite `retries.repeat_block_threshold` bloqueos previos por el
@@ -247,6 +259,7 @@ presupuesto de intentos.
 | --- | --- | --- |
 | `--repo <path>` | directorio actual | Repositorio objetivo en el que vive el worktree. |
 | `--force` | desactivado | Continúa más allá de la protección contra bloqueos repetidos. |
+| `--keep-implementation` | desactivado | Conserva el código del intento fallido en lugar de descartarlo hasta el commit de `PROPOSING`. |
 | `--config`, `-c <path>` | — | Archivo de configuración. |
 
 ### `cosmo queue block TASK_ID`

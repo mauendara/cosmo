@@ -227,11 +227,21 @@ never carry it.
 
 Reset a `blocked` task to `queued`. `attempt_count` resets to 0.
 
-If the worktree still holds the commit `PROPOSING` made, only the failed
-implementation is discarded (`git reset --hard` to that commit, then `git
-clean -fdx`) — the worktree and the valid OpenSpec change survive, so the
-next run resumes at `IMPLEMENTING`. Otherwise the worktree and branch are
-removed and the task starts over.
+If the worktree still holds the commit `PROPOSING` made, by default only the
+failed implementation is discarded (`git reset --hard` to that commit, then
+`git clean -fdx`) — the worktree and the valid OpenSpec change survive, so
+the next run resumes at `IMPLEMENTING`. Pass `--keep-implementation` to keep
+the failed attempt's own code too instead of discarding it — the next run
+resumes `IMPLEMENTING` on top of it rather than starting that stage over;
+`attempt_count` still resets to 0 either way. If the worktree never got past
+`PROPOSING` (or is gone), both paths fall back to removing the worktree and
+branch entirely and the task starts over — `--keep-implementation` prints a
+note when it has nothing to keep.
+
+If the task's most recent block was an `environment_error` at `COMMITTING`
+or `MERGING`, neither of the above applies — the task resumes directly at
+that stage instead, since everything before it already passed validation
+(and review, for `MERGING`).
 
 **Repeat-block guard**: a task whose most recent block repeats
 `retries.repeat_block_threshold` prior blocks for the same reason is refused
@@ -241,6 +251,7 @@ rather than silently granted another attempt budget.
 | --- | --- | --- |
 | `--repo <path>` | current directory | Target repo the worktree lives in. |
 | `--force` | off | Proceed past the repeat-block guard. |
+| `--keep-implementation` | off | Keep the failed attempt's own code instead of discarding it back to the `PROPOSING` commit. |
 | `--config`, `-c <path>` | — | Config file. |
 
 ### `cosmo queue block TASK_ID`
