@@ -76,5 +76,15 @@ or
 {"verdict": "rejected", "reason": "<specific, actionable -- see above>"}
 ```
 
+That path is relative to the worktree root you started this session in --
+not to whatever directory you last `cd`'d into to run a build/lint/test
+command while checking the diff (a project with its real code under a
+subdirectory, e.g. `frontend/`, is exactly when this bites). If you ran any
+`cd` at all earlier in this session, use an absolute path for this write
+(prefix `git rev-parse --show-toplevel`'s output, or the `cwd` this session
+started in) rather than a bare relative one -- a verdict written to the
+wrong directory is indistinguishable from never having reviewed at all, and
+Cosmo will discard your approval and pay for a full re-implementation.
+
 Nothing else you say in this session is read by Cosmo -- this file is the
 entire output that matters.

@@ -11,6 +11,56 @@ not a record of how we got here.
 
 ## Where things stand
 
+- **v17 (2026-09-04): `REVIEWING` could silently discard an approved
+  verdict, forcing a costly re-`IMPLEMENTING` retry for nothing.** Found
+  investigating why `wa-chat-text-bubbles` (project `wa-chat-component`,
+  `claude-openrouter` harness) blocked twice and burned $14.25 in one
+  `cosmo run` before tripping the $2/run cost cap.
+  - **Root cause:** `templates/harness/{claude,ori-claude,claude-
+    openrouter}/agents/reviewer.md` told the review session to write its
+    verdict to a worktree-*relative* path, `.cosmo/review-result.json`, but
+    `task/review.py`'s `read_review_verdict` only ever read that path from
+    the worktree root. For a project whose real code lives in a
+    subdirectory (this one's `vite-react-local` template puts everything
+    under `frontend/`), the review session naturally ran `cd frontend &&
+    npm run build/lint/tsc` to check the diff, and — this harness's `Bash`
+    tool keeps cwd persistent across calls within a session — a later
+    relative-path `Write` of the verdict landed at
+    `frontend/.cosmo/review-result.json` instead of the worktree root's.
+    `read_review_verdict` found nothing, returned `None`, and
+    `task.machine._do_reviewing` (~line 755) logged `"review call completed
+    but produced no usable verdict"` — an `environment_error` — discarding
+    a real, well-reasoned `"verdict": "approved"` review and forcing a
+    full re-`IMPLEMENTING` retry. That retry then spent all 80 turns
+    ($5.37) just re-running build/lint/test on already-correct, already-
+    committed code without ever touching a file, because the model
+    (GLM-4.6) found via `git log` that the work was already done but never
+    reached a stopping point before `error_max_turns`.
+  - **Fixed two ways.** `task/review.py` gained `_find_stray_verdict_file`:
+    a bounded structural search (skips `node_modules`/`.git`/`dist`/
+    `build`/`target`) for `.cosmo/review-result.json` anywhere under the
+    worktree, used as a fallback when the canonical path is empty — not
+    prose-parsing (spec 4 still holds; this only ever looks for the same
+    fixed filename), just not assuming which directory it landed in. All
+    three `reviewer.md` templates (kept byte-identical, per `test_harness_
+    template_parity.py`) also gained an explicit warning about the cwd-
+    drift trap and a nudge to use an absolute path if the session `cd`'d
+    anywhere first. New `tests/test_task_review.py` covers the canonical
+    path, the subdirectory-drift case, the pruned-directory case, and the
+    genuinely-nothing-there case.
+  - **Manually unblocked** the real `wa-chat-text-bubbles` task rather than
+    a blind `queue retry`: its implementation, validation, and review had
+    all already genuinely succeeded (confirmed by re-reading the orphaned
+    verdict file with the fixed `read_review_verdict`), so nothing before
+    `COMMITTING` needed redoing. Set `resume_at_stage='committing'`
+    directly via `StoreWriter.queue_resume_at` (the same mechanism `cli.
+    main.queue_retry` already uses automatically for a commit/merge-stage
+    failure, applied here by hand since this block's failure_stage was
+    `implement`) rather than through `cosmo run`, so this note is written
+    before that run has actually happened — check `cosmo queue show
+    wa-chat-text-bubbles` for its real outcome before assuming this landed.
+  - `./check.sh` exits 0 fully clean, **663 tests passing, 9 skipped** (was
+    659 as of the entry below).
 - **v16 (2026-09-04): new `claude-openrouter` harness, and two corrections
   to the `ori-claude` record above/below.** Driven by the user wanting to
   actually test cheap non-Anthropic OpenRouter models (GLM, Qwen, etc.)
