@@ -224,7 +224,7 @@ adapter.py`; one line in `src/cosmo/harness/registry.py`.
 ```python
 ORI_BINARY = "ori"
 ORI_SUBCOMMAND = "claude"
-CLAUDE_BINARY = "claude"          # exec'd by ori; checked in preflight only
+CLAUDE_BINARY = "claude"  # exec'd by ori; checked in preflight only
 CREDENTIAL_ENV_VAR = "OPENROUTER_API_KEY"
 ORI_TELEMETRY_ENV = {"ORI_TELEMETRY": "0"}
 
@@ -236,8 +236,8 @@ class OriClaudeAdapter(_ClaudeCodeInvoker):
         reports_native_progress=False,
         supports_retry_context=True,
         has_internal_timeout=False,
-        reports_native_cost=True,       # total_cost_usd populated -- v12, real invocation
-        supports_gating=True,           # PreToolUse hooks fire and block -- v12, real invocation
+        reports_native_cost=True,  # total_cost_usd populated -- v12, real invocation
+        supports_gating=True,  # PreToolUse hooks fire and block -- v12, real invocation
         supports_structured_stream=True,  # same binary, same stream-json (verify: V1)
     )
 ```
@@ -332,11 +332,21 @@ Deltas from the copied tree, all of them real and none cosmetic:
 
 ```python
 HARNESS_ROOT_LINKS = {
-    "claude": (("CLAUDE.md", "CLAUDE.md"), (".claude", ""), ("agents", "agents"), ("skills", "skills")),
+    "claude": (
+        ("CLAUDE.md", "CLAUDE.md"),
+        (".claude", ""),
+        ("agents", "agents"),
+        ("skills", "skills"),
+    ),
     # Same four names: the tool reading them is still Claude Code, so it still
     # looks for `.claude`/`CLAUDE.md` -- only the `.agent/<harness>/` tree they
     # resolve into differs.
-    "ori-claude": (("CLAUDE.md", "CLAUDE.md"), (".claude", ""), ("agents", "agents"), ("skills", "skills")),
+    "ori-claude": (
+        ("CLAUDE.md", "CLAUDE.md"),
+        (".claude", ""),
+        ("agents", "agents"),
+        ("skills", "skills"),
+    ),
 }
 ```
 

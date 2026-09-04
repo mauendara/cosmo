@@ -5,7 +5,7 @@ session-by-session narrative (what changed, what was found, how it was
 fixed) has been cut. That history isn't lost — it's in `git log` (every
 commit message explains its own *why*) and in
 [v3-implementation-state.md](v3-implementation-state.md)'s cumulative
-deviations table (the complete bug/fix log, entries 1-86). This file now
+deviations table (the complete bug/fix log, entries 1-88). This file now
 only carries what a session needs to *orient itself* before doing new work,
 not a record of how we got here.
 
@@ -18,17 +18,13 @@ not a record of how we got here.
   — see its own plan doc; it needs a second real stack to prove the
   abstraction, and the user is doing that testing separately before it gets
   picked up again.
-- **606 tests passing, 9 skipped** as of the last code change.
-  `./check.sh` itself currently exits 1 at the `ruff format --check .` step,
-  but **not from anything in `src/`/`tests/`** — the sole offender is a
-  pre-existing, already-committed Python code block inside
-  `docs/v13-ori-cc-harness-template-plan.md` that a current `ruff format`
-  wants to reformat (inline-comment column alignment, one dict literal's
-  line wrapping). It predates this session; `ruff check .`, `mypy`, and the
-  full `pytest` run are all clean on their own. Worth fixing (re-run `ruff
-  format docs/v13-ori-cc-harness-template-plan.md` and commit the result)
-  before trusting a bare `./check.sh` exit code again. Every fix in the
-  deviations table has a regression test.
+- **624 tests passing, 9 skipped** as of the last code change. `./check.sh`
+  exits **0, fully clean** — the `docs/v13-ori-cc-harness-template-plan.md`
+  `ruff format --check` offender this section used to flag (and a matching
+  one that had crept into `docs/v14-cosmo-branch-isolation-plan.md`) were
+  both fixed while implementing deviation 88; don't be surprised the old
+  narrative about a dirty `ruff format --check` exit is gone; that's fixed,
+  not stale. Every fix in the deviations table has a regression test.
 - **Three features shipped since v0.1.1's release, all requested directly**
   (deviations 83-84 and 87 in `v3-implementation-state.md`, separate
   commits on `private`, none released yet): (1) console-facing timestamps now
@@ -130,31 +126,28 @@ not a record of how we got here.
   [v8-validations-for-later.md](v8-validations-for-later.md)'s now-resolved
   entry, which also has the complete V1-V6 narrative; deviations 85-86 in
   `v3-implementation-state.md` for the implementation/validation split).
-- **`docs/v14-cosmo-branch-isolation-plan.md` written 2026-09-02 — design
-  only, nothing implemented, no code changed.** A new optional
+- **`docs/v14-cosmo-branch-isolation-plan.md` (written 2026-09-02) is now
+  fully implemented and tested (2026-09-03)** — see `v3-implementation-
+  state.md`'s deviation 88 for the complete account. A new optional
   `cosmo_branch` base-branch mode (alongside today's `direct`, which stays
-  the default): `cosmo init` forks a new branch off the real configured
-  base branch and treats the fork as the effective base branch for
-  everything from then on (worktrees, diff gate, merges), so template/
-  harness scaffolding never lands on the developer's real `develop`/
-  `main`. Grounded in the real mechanism, not guessed: `bootstrap.
-  git_branch.commit_bootstrap_output` already commits `cosmo init`'s
-  scaffolding onto whatever branch the target repo is checked out on at
-  the end of `init`, so the whole feature reduces to making sure the repo
-  ends up on the new branch by then -- no changes needed to asset sync,
-  symlinks, or the commit step itself. Uncommitted changes on the real base
-  branch at fork time get `git stash push -u`'d and left stashed (not
-  auto-popped anywhere), reported back with the exact recovery command.
-  Mode/branch-name are meant to persist per-project (a new `projects` table
-  migration), not in global config, since `git.base_branch` being
-  global-only today is a known pre-existing limitation this shouldn't
-  repeat. Three explicit non-goals for v1: no auto-sync of an existing
-  `cosmo` branch with upstream base-branch commits, no command to change an
-  already-registered project's mode after the fact, and no changes to
-  `direct` mode's existing behavior. If this gets picked up: read the v14
-  doc in full first, in the section order it's written in (config surface,
-  then `bootstrap/git_branch.py`, then `bootstrap/init.py`, then the
-  wizard, then tests).
+  the default): `cosmo init --base-branch-mode cosmo_branch` (or the `-i`
+  wizard) forks a new branch off the real configured base branch and
+  treats the fork as the effective base branch for everything from then on
+  (worktrees, diff gate, merges, via `cli.main._resolve_base_branch`), so
+  template/harness scaffolding never lands on the developer's real
+  `develop`/`main`. Mode/branch-name persist per-project on a new
+  `projects` migration (11), not global config. Uncommitted changes on the
+  real base branch at fork time get `git stash push -u`'d and left
+  stashed (not auto-popped), reported back with the exact recovery
+  command. Two real gaps the design doc didn't anticipate, both around an
+  unborn HEAD (`git stash` and `git checkout -b <new> <unborn-base>` both
+  refuse outright on a repo with zero commits) — both handled, see
+  deviation 88. Three non-goals from the design stayed non-goals in v1: no
+  auto-sync of an existing `cosmo` branch with upstream base-branch
+  commits, no command to change an already-registered project's mode after
+  the fact, no changes to `direct` mode's existing behavior (confirmed
+  unchanged — its own test matrix is untouched and still green). Nothing
+  left open on this feature.
 - **v0.1.1 is a patch release**: v0.1.0 got its first real usage (a real
   `cosmo run` against a real target repo, not this repo's own test suite)
   and surfaced three real bugs, all fixed and covered by a regression test
@@ -249,7 +242,7 @@ not a record of how we got here.
 | [v11-cline-harness-info.md](v11-cline-harness-info.md) | Research findings on Cline's CLI as a possible new harness adapter (via OpenRouter) | **Findings only, not a plan or a `HarnessCapabilities` proposal.** Nothing implemented. Read before starting real adapter work for Cline — especially the gating section, which found a real but currently-broken mechanism, not an absent one |
 | [v12-ori-opencode-harness-info.md](v12-ori-opencode-harness-info.md) | Research findings on Ori Harness (`ori claude`, real Claude Code through OpenRouter) and OpenCode as possible new harness adapters | **Findings only, not a plan or a `HarnessCapabilities` proposal.** Nothing implemented. Both have real, confirmed-working headless gating, unlike Cline — read this before choosing which harness to build next |
 | [v13-ori-cc-harness-template-plan.md](v13-ori-cc-harness-template-plan.md) | The build plan for `ori-claude` as a second harness adapter and template, alongside native `claude` | **Done — Phases 1-6 all complete**, including Phase 6's real-invocation validations (V2, the gating one, confirmed passing) and the public-docs commit. See this handoff's own bullet above and [v8-validations-for-later.md](v8-validations-for-later.md). Nothing left open. Its four design decisions were chosen by the user, not derived — don't relitigate them if extending it (e.g. a third adapter) |
-| [v14-cosmo-branch-isolation-plan.md](v14-cosmo-branch-isolation-plan.md) | Optional `cosmo_branch` base-branch mode: `cosmo init` forks an isolated branch off the real base branch so templates/harness scaffolding never lands on `develop`/`main` | **Not started — design record only.** Three open forks were resolved with the user (per-project persistence on the `projects` table via a new migration, not global config; stash-and-leave-stashed for uncommitted changes, not auto-pop; no auto-sync of an existing `cosmo` branch with upstream commits in v1) — don't relitigate them if picked up |
+| [v14-cosmo-branch-isolation-plan.md](v14-cosmo-branch-isolation-plan.md) | Optional `cosmo_branch` base-branch mode: `cosmo init` forks an isolated branch off the real base branch so templates/harness scaffolding never lands on `develop`/`main` | **Done — implemented and tested**, see `v3-implementation-state.md` deviation 88 for the full account (including two real unborn-HEAD gaps this design doc didn't anticipate, and two of its `cli/main.py` assumptions that didn't match the real code). Nothing left open |
 
 Internal `vN` documents above are **not** the user-facing ones. Public docs
 live in `README.md`, `user-docs/`, and the four root docs — written for a

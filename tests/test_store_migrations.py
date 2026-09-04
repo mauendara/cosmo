@@ -449,3 +449,115 @@ def test_migration_10_rejects_a_stop_reason_outside_the_known_values(tmp_path: P
             "UPDATE run_state SET stop_reason = 'not_a_real_reason' WHERE run_id = 'run-1'"
         )
     conn.close()
+
+
+def test_migration_11_new_project_defaults_to_direct_mode(tmp_path: Path) -> None:
+    """v14: a project registered after migration 11 gets `direct` mode
+    (today's only behavior) unless a caller explicitly opts into
+    `cosmo_branch`."""
+    conn = connect_writer(tmp_path / "cosmo.db")
+    migrate(conn)
+    conn.execute(
+        """
+        INSERT INTO projects (project_id, target_path, harness, initialized_at)
+        VALUES ('p1', '/tmp/repo', 'claude', 't0')
+        """
+    )
+    conn.commit()
+    row = conn.execute(
+        "SELECT base_branch_mode, real_base_branch, cosmo_branch_name "
+        "FROM projects WHERE project_id = 'p1'"
+    ).fetchone()
+    assert row[0] == "direct"
+    assert row[1] is None
+    assert row[2] is None
+    conn.close()
+
+
+def test_migration_11_accepts_cosmo_branch_mode(tmp_path: Path) -> None:
+    conn = connect_writer(tmp_path / "cosmo.db")
+    migrate(conn)
+    conn.execute(
+        """
+        INSERT INTO projects (
+            project_id, target_path, harness, initialized_at,
+            base_branch_mode, real_base_branch, cosmo_branch_name
+        ) VALUES ('p1', '/tmp/repo', 'claude', 't0', 'cosmo_branch', 'develop', 'cosmo')
+        """
+    )
+    conn.commit()
+    row = conn.execute(
+        "SELECT base_branch_mode, real_base_branch, cosmo_branch_name "
+        "FROM projects WHERE project_id = 'p1'"
+    ).fetchone()
+    assert row[0] == "cosmo_branch"
+    assert row[1] == "develop"
+    assert row[2] == "cosmo"
+    conn.close()
+
+
+def test_migration_11_rejects_a_base_branch_mode_outside_the_two_allowed_values(
+    tmp_path: Path,
+) -> None:
+    conn = connect_writer(tmp_path / "cosmo.db")
+    migrate(conn)
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            """
+            INSERT INTO projects (
+                project_id, target_path, harness, initialized_at, base_branch_mode
+            )
+            VALUES ('p1', '/tmp/repo', 'claude', 't0', 'not_a_real_mode')
+            """
+        )
+    conn.close()
+
+
+def test_migration_11_backward_compat_existing_project_row_reads_back_as_direct(
+    tmp_path: Path,
+) -> None:
+    """A project registered before this feature existed (migrations 1-10
+    only) must read back as `direct` mode with `real_base_branch is None`
+    once migration 11 applies -- `_resolve_base_branch` (cli.main) then
+    falls back to `cfg.git.base_branch` for it, identical to pre-v14
+    behavior for every already-registered project."""
+    db_path = tmp_path / "cosmo.db"
+    conn = connect_writer(db_path)
+    pre_v14 = [m for m in MIGRATIONS if m.version <= 10]
+    script = "BEGIN;\n"
+    for m in pre_v14:
+        script += m.sql + "\n"
+    script += (
+        "CREATE TABLE IF NOT EXISTS schema_migrations ("
+        "    version INTEGER PRIMARY KEY,"
+        "    description TEXT NOT NULL,"
+        "    applied_at TEXT NOT NULL"
+        ");\n"
+    )
+    for m in pre_v14:
+        script += (
+            f"INSERT INTO schema_migrations(version, description, applied_at) "
+            f"VALUES ({m.version}, '{m.description}', 't0');\n"
+        )
+    script += "COMMIT;"
+    conn.executescript(script)
+    conn.execute(
+        """
+        INSERT INTO projects (project_id, target_path, harness, initialized_at)
+        VALUES ('p1', '/tmp/repo', 'claude', 't0')
+        """
+    )
+    conn.commit()
+    assert current_version(conn) == 10
+
+    applied = migrate(conn)
+
+    assert applied == [11]
+    row = conn.execute(
+        "SELECT base_branch_mode, real_base_branch, cosmo_branch_name "
+        "FROM projects WHERE project_id = 'p1'"
+    ).fetchone()
+    assert row[0] == "direct"
+    assert row[1] is None
+    assert row[2] is None
+    conn.close()

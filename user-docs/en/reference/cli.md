@@ -72,8 +72,36 @@ registration.
 | `--force` / `--no-force` | `--no-force` | Overwrite `docs/` files already present. Prompts for confirmation. |
 | `--git-author-name <str>` | — | Git identity to configure locally in the target repo. Paired with `--git-author-email`; given together, skips the interactive prompt. |
 | `--git-author-email <str>` | — | See `--git-author-name`. |
+| `--base-branch-mode <str>` | `direct` | `direct`: operate on the configured base branch itself. `cosmo_branch`: fork an isolated branch off it at init time (see `--cosmo-branch-name`) so templates/harness scaffolding never lands there. Persisted per-project; see "Base-branch isolation" below. |
+| `--cosmo-branch-name <str>` | `cosmo` | Branch name for `--base-branch-mode cosmo_branch`. |
 | `--config`, `-c <path>` | — | Config file. |
-| `-i`, `--interactive` | off | Wizard mode: prompts for target path, harness, project template, base branch, docs-overwrite, and (optionally) per-harness model overrides -- for whichever of those weren't already given as a flag. Model overrides, if entered, are written to the *global* user config file (`[harness.overrides.<harness>]`), not scoped to this project. Never triggers on its own; scripted/CI invocations are unaffected unless they pass `-i` themselves. |
+| `-i`, `--interactive` | off | Wizard mode: prompts for target path, harness, project template, base branch, base-branch strategy, docs-overwrite, and (optionally) per-harness model overrides -- for whichever of those weren't already given as a flag. Model overrides, if entered, are written to the *global* user config file (`[harness.overrides.<harness>]`), not scoped to this project. Never triggers on its own; scripted/CI invocations are unaffected unless they pass `-i` themselves. |
+
+### Base-branch isolation (`--base-branch-mode`)
+
+By default (`direct`), every command that touches the target repo operates
+directly on the configured base branch (`git.base_branch`, or `--base-branch`
+per invocation) -- the same behavior as before this option existed.
+
+`--base-branch-mode cosmo_branch` instead forks a new branch (named by
+`--cosmo-branch-name`, default `cosmo`) off the real base branch at `cosmo
+init` time, and treats *that* branch as the effective base branch for
+everything from then on: worktree creation, the diff gate's diff, and where
+task merges land. The real base branch is never touched again after the
+fork -- no scaffolding commits, no task merges. This choice is stored on the
+project's own registration (not in `config.toml`), so every later `cosmo run`
+/ `cosmo validate` / `cosmo spec` invocation against this project picks it up
+automatically; `--base-branch` still overrides it at any single call site.
+
+If the target repo has uncommitted changes on the real base branch at fork
+time, they're stashed (`git stash push -u`) rather than blocking init the way
+`direct` mode does -- the stash is left in the stash list, and `cosmo init`
+prints the exact recovery command (`git checkout <base-branch> && git stash
+pop`).
+
+Not supported yet: syncing an existing `cosmo` branch with upstream base-branch
+commits (do it yourself with `git merge`/`git rebase`), and changing an
+already-registered project's mode after the fact.
 
 ## `cosmo validate WORKTREE`
 

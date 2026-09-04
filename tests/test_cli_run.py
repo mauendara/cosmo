@@ -66,6 +66,53 @@ def _repo_on_develop(tmp_path: Path) -> Path:
     return repo
 
 
+def _repo_on_cosmo_branch(tmp_path: Path) -> Path:
+    """v14: a `cosmo_branch`-mode project, as `cosmo init` would leave it --
+    checked out on the forked `cosmo` branch, `develop` untouched behind
+    it."""
+    repo = tmp_path / "target-repo"
+    repo.mkdir()
+    _git(repo, "-c", "user.name=t", "-c", "user.email=t@example.com", "init", "-q")
+    (repo / "README.md").write_text("hello\n")
+    _git(repo, "add", "README.md")
+    _git(repo, "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "base")
+    _git(repo, "branch", "-M", "develop")
+    _git(repo, "checkout", "-b", "cosmo", "develop")
+    writer = StoreWriter(load_config().paths.db_path)
+    try:
+        writer.register_project(
+            target_path=str(repo.resolve()),
+            harness="claude",
+            base_branch_mode="cosmo_branch",
+            real_base_branch="develop",
+            cosmo_branch_name="cosmo",
+        )
+    finally:
+        writer.close()
+    return repo
+
+
+def test_run_task_resolves_base_branch_to_the_cosmo_branch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _repo_on_cosmo_branch(tmp_path)
+    runner.invoke(app, ["queue", "add", "openspec/changes/add-foo", "--task-id", "add-foo"])
+
+    captured: dict[str, Any] = {}
+
+    def _fake_run_task(*, ctx: TaskContext, **kwargs: Any) -> TaskStatus:
+        captured["ctx"] = ctx
+        return TaskStatus.DONE
+
+    monkeypatch.setattr(cli_main, "run_task", _fake_run_task)
+
+    result = runner.invoke(app, ["run", "--task", "add-foo", "--repo", str(repo)])
+
+    assert result.exit_code == 0, result.output
+    ctx = captured["ctx"]
+    assert ctx.base_branch == "cosmo"
+
+
 def test_run_rejects_an_unknown_task(tmp_path: Path) -> None:
     repo = _repo_on_develop(tmp_path)
 

@@ -28,6 +28,8 @@ class WizardChoices:
     harness: str
     project_template: str
     base_branch: str
+    base_branch_mode: str
+    cosmo_branch_name: str | None
     force_docs: bool
     model_overrides: dict[str, str] = field(default_factory=dict)
     """Only the fields the user actually entered a value for -- keys are a
@@ -74,6 +76,21 @@ def collect(
 
     base_branch = typer.prompt("Base branch", default=cfg.git.base_branch)
 
+    console.print(
+        "\n[dim]Base branch strategy:[/dim]\n"
+        f"[dim]  direct       - operate on {base_branch!r} itself[/dim]\n"
+        "[dim]  cosmo_branch - create an isolated branch from "
+        f"{base_branch!r} so templates/harness files never touch it[/dim]"
+    )
+    base_branch_mode = _prompt_from_list(
+        console, "Base branch strategy", ["direct", "cosmo_branch"], "direct"
+    )
+    cosmo_branch_name = (
+        typer.prompt("Cosmo branch name", default="cosmo")
+        if base_branch_mode == "cosmo_branch"
+        else None
+    )
+
     force_docs = force_flag or typer.confirm(
         "Overwrite any docs/ file the chosen template also provides, if already present?",
         default=False,
@@ -86,6 +103,8 @@ def collect(
         harness=harness,
         project_template=project_template,
         base_branch=base_branch,
+        base_branch_mode=base_branch_mode,
+        cosmo_branch_name=cosmo_branch_name,
         force_docs=force_docs,
         model_overrides=model_overrides,
     )

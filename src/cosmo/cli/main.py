@@ -74,6 +74,7 @@ from cosmo.store.clock import format_local
 from cosmo.store.enums import BlockedReason, RunStatus, StopReason, TaskStatus
 from cosmo.store.failure_signature import detect_repeat_block
 from cosmo.store.reader import (
+    ProjectRow,
     find_project_by_path,
     get_progress,
     get_run,
@@ -222,7 +223,7 @@ def _load(config_path: Path | None) -> CosmoConfig:
         raise typer.Exit(code=2) from None
 
 
-def _resolve_project_repo(repo: Path | None, cfg: CosmoConfig) -> tuple[Path, str | None]:
+def _resolve_project_repo(repo: Path | None, cfg: CosmoConfig) -> tuple[Path, ProjectRow]:
     """Shared by every command that operates against a target repo (`run`,
     `spec add`, `spec queue`): `repo` defaults to the current working
     directory when omitted -- the common case of running `cosmo` from
@@ -233,12 +234,11 @@ def _resolve_project_repo(repo: Path | None, cfg: CosmoConfig) -> tuple[Path, st
     unregistered path is almost always a typo'd `--repo` or a forgotten
     `cosmo init`, not something to guess through.
 
-    Returns the resolved path and the project's own registered harness
-    (`None` if genuinely unregistered, though that path never returns here
-    -- see below) so callers can feed it into `resolve_harness_name`'s
-    project tier, the same resolution order `cosmo doctor --project-path`
-    already honors (spec 2: "--harness flag > project registration > config
-    default")."""
+    Returns the resolved path and the project's own row so callers can feed
+    `project.harness` into `resolve_harness_name`'s project tier (the same
+    resolution order `cosmo doctor --project-path` already honors -- spec 2:
+    "--harness flag > project registration > config default") and thread
+    `project` into `_resolve_base_branch`."""
     resolved = (repo if repo is not None else Path.cwd()).resolve()
     project = find_project_by_path(cfg.paths.db_path, str(resolved))
     if project is None:
@@ -247,7 +247,24 @@ def _resolve_project_repo(repo: Path | None, cfg: CosmoConfig) -> tuple[Path, st
             f"run `cosmo init {resolved}` first"
         )
         raise typer.Exit(code=1)
-    return resolved, project.harness
+    return resolved, project
+
+
+def _resolve_base_branch(
+    project: ProjectRow, base_branch_flag: str | None, cfg: CosmoConfig
+) -> str:
+    """`--base-branch` stays a full escape hatch at every call site,
+    unchanged in precedence. Absent that, a `cosmo_branch`-mode project
+    resolves to its own isolated branch instead of the real upstream one
+    (v14) -- `real_base_branch` is `None` for a project row that predates
+    this feature, which falls back to `cfg.git.base_branch` exactly as
+    every project did before v14 existed."""
+    if base_branch_flag is not None:
+        return base_branch_flag
+    if project.base_branch_mode == "cosmo_branch":
+        assert project.cosmo_branch_name is not None
+        return project.cosmo_branch_name
+    return project.real_base_branch or cfg.git.base_branch
 
 
 def _render_checks(title: str, results: list[CheckResult]) -> None:
@@ -520,14 +537,14 @@ def run_cmd(
     if typer_ctx.invoked_subcommand is not None:
         return
     cfg = _load(config)
-    resolved_repo, project_harness = _resolve_project_repo(repo, cfg)
+    resolved_repo, project = _resolve_project_repo(repo, cfg)
 
     if task_id is None:
         _run_queue_cmd(
             repo=resolved_repo,
             base_branch=base_branch,
             harness=harness,
-            project_harness=project_harness,
+            project=project,
             dry_run=dry_run,
             cfg=cfg,
         )
@@ -580,8 +597,8 @@ def run_cmd(
                 err_console.print(f"[red]task {task_id!r} is {task.status!r}, not queued[/red]")
                 raise typer.Exit(code=1)
 
-            resolved_base = base_branch if base_branch is not None else cfg.git.base_branch
-            name, source = resolve_harness_name(harness, project_harness, cfg.harness.name)
+            resolved_base = _resolve_base_branch(project, base_branch, cfg)
+            name, source = resolve_harness_name(harness, project.harness, cfg.harness.name)
             console.print(f"harness: [bold]{name}[/bold] (from {source})")
             try:
                 adapter = get_adapter(name)(cfg)
@@ -663,12 +680,12 @@ def _run_queue_cmd(
     repo: Path,
     base_branch: str | None,
     harness: str | None,
-    project_harness: str | None,
+    project: ProjectRow,
     dry_run: bool,
     cfg: CosmoConfig,
 ) -> None:
-    resolved_base = base_branch if base_branch is not None else cfg.git.base_branch
-    name, source = resolve_harness_name(harness, project_harness, cfg.harness.name)
+    resolved_base = _resolve_base_branch(project, base_branch, cfg)
+    name, source = resolve_harness_name(harness, project.harness, cfg.harness.name)
     console.print(f"harness: [bold]{name}[/bold] (from {source})")
 
     if dry_run:
@@ -765,7 +782,7 @@ def run_resume(
     reconciliation sweep, and the process lock all apply exactly as they do
     to a fresh `cosmo run`."""
     cfg = _load(config)
-    resolved_repo, project_harness = _resolve_project_repo(repo, cfg)
+    resolved_repo, project = _resolve_project_repo(repo, cfg)
 
     target_run_id = run_id if run_id is not None else latest_paused_run_id(cfg.paths.db_path)
     if target_run_id is None:
@@ -785,7 +802,7 @@ def run_resume(
     if not yes and not typer.confirm("\nResume this run?"):
         raise typer.Exit(code=0)
 
-    name, source = resolve_harness_name(harness, project_harness, cfg.harness.name)
+    name, source = resolve_harness_name(harness, project.harness, cfg.harness.name)
     console.print(f"harness: [bold]{name}[/bold] (from {source})")
     try:
         adapter = get_adapter(name)(cfg)
@@ -909,6 +926,22 @@ def init(
     git_author_email: Annotated[
         str | None, typer.Option("--git-author-email", help="See --git-author-name.")
     ] = None,
+    base_branch_mode: Annotated[
+        str | None,
+        typer.Option(
+            "--base-branch-mode",
+            help="'direct' (default): operate on the configured base branch itself. "
+            "'cosmo_branch': fork an isolated branch off it at init time (see "
+            "--cosmo-branch-name) so templates/harness scaffolding never lands there.",
+        ),
+    ] = None,
+    cosmo_branch_name: Annotated[
+        str | None,
+        typer.Option(
+            "--cosmo-branch-name",
+            help="Branch name for --base-branch-mode=cosmo_branch. Defaults to 'cosmo'.",
+        ),
+    ] = None,
     config: ConfigOption = None,
     interactive: Annotated[
         bool,
@@ -916,9 +949,9 @@ def init(
             "-i",
             "--interactive",
             help="Wizard mode: prompt for target path/harness/project template/base branch/"
-            "docs-overwrite/model overrides, for whichever of those weren't already given as "
-            "a flag. Never triggers on its own -- scripted/CI invocations are unaffected "
-            "unless they pass -i themselves.",
+            "base-branch strategy/docs-overwrite/model overrides, for whichever of those "
+            "weren't already given as a flag. Never triggers on its own -- scripted/CI "
+            "invocations are unaffected unless they pass -i themselves.",
         ),
     ] = False,
 ) -> None:
@@ -942,6 +975,8 @@ def init(
         harness = choices.harness
         project_template = choices.project_template
         base_branch = choices.base_branch
+        base_branch_mode = choices.base_branch_mode
+        cosmo_branch_name = choices.cosmo_branch_name
         force = choices.force_docs
         model_overrides = choices.model_overrides
     elif target_path is None:
@@ -952,6 +987,15 @@ def init(
         raise typer.Exit(code=2)
     else:
         base_branch = cfg.git.base_branch
+        base_branch_mode = base_branch_mode or "direct"
+        if base_branch_mode not in ("direct", "cosmo_branch"):
+            err_console.print(
+                f"[red]--base-branch-mode must be 'direct' or 'cosmo_branch', "
+                f"got {base_branch_mode!r}[/red]"
+            )
+            raise typer.Exit(code=2)
+        if base_branch_mode == "cosmo_branch" and cosmo_branch_name is None:
+            cosmo_branch_name = "cosmo"
 
     resolved_harness, source = resolve_harness_name(harness, None, cfg.harness.name)
     if interactive:
@@ -978,6 +1022,7 @@ def init(
             console.print("[yellow]aborted[/yellow]")
             raise typer.Exit(code=1)
 
+    assert base_branch_mode in ("direct", "cosmo_branch")
     writer = StoreWriter(cfg.paths.db_path)
     try:
         result = run_init(
@@ -988,6 +1033,8 @@ def init(
             force_docs=force,
             writer=writer,
             db_path=cfg.paths.db_path,
+            base_branch_mode=base_branch_mode,  # type: ignore[arg-type]
+            cosmo_branch_name=cosmo_branch_name,
         )
     except (TemplatesRootNotFoundError, OpenSpecInitError) as exc:
         err_console.print(f"[red]{exc}[/red]")
@@ -1008,8 +1055,23 @@ def init(
             f"changes -- commit or stash first, then create it yourself "
             f"(`git checkout -b {base_branch}`)[/yellow]"
         ),
+        GitBranchOutcome.COSMO_BRANCH_REPO_INITIALIZED_AND_CREATED: (
+            f"[green]git init[/green], then forked {cosmo_branch_name!r} off {base_branch!r} "
+            f"and checked it out"
+        ),
+        GitBranchOutcome.COSMO_BRANCH_CREATED: (
+            f"[green]forked and checked out[/green] {cosmo_branch_name!r} off {base_branch!r}"
+        ),
+        GitBranchOutcome.ALREADY_ON_COSMO_BRANCH: (
+            f"already has {cosmo_branch_name!r} (forked off {base_branch!r}) -- checked out"
+        ),
     }
     console.print(f"git branch: {_GIT_BRANCH_MESSAGES[result.git_branch]}")
+    if result.stashed:
+        console.print(
+            f"[yellow]stashed[/yellow] uncommitted changes that were on {base_branch!r} -- "
+            f"recover them with: `git checkout {base_branch} && git stash pop`"
+        )
     console.print(
         "[green]openspec/[/green] created" if result.openspec.ran else "openspec/ already present"
     )
@@ -1339,7 +1401,7 @@ def spec_add(
     hand-edit before `cosmo spec queue` inserts them (spec 5's own preview-
     first precedent, `cosmo run --dry-run`)."""
     cfg = _load(config)
-    resolved_repo, project_harness = _resolve_project_repo(repo, cfg)
+    resolved_repo, project = _resolve_project_repo(repo, cfg)
     spec_path = resolved_repo / "docs" / "specs" / f"{name}-spec.md"
     if not spec_path.is_file():
         # `docs/specs/` is deliberately not part of any project template
@@ -1381,7 +1443,7 @@ def spec_add(
             )
             return
 
-    resolved_name, source = resolve_harness_name(harness, project_harness, cfg.harness.name)
+    resolved_name, source = resolve_harness_name(harness, project.harness, cfg.harness.name)
     console.print(f"harness: [bold]{resolved_name}[/bold] (from {source})")
     adapter = get_adapter(resolved_name)(cfg, cwd=resolved_repo)
 
@@ -1453,7 +1515,7 @@ def spec_queue(
     `cosmo spec add` and this command *is* the preview's confirmation step
     -- there is no separate approval UI."""
     cfg = _load(config)
-    resolved_repo, _project_harness = _resolve_project_repo(repo, cfg)
+    resolved_repo, _project = _resolve_project_repo(repo, cfg)
     tasks_dir = _spec_tasks_dir(resolved_repo, name)
     try:
         task_files = list_task_files(tasks_dir)
@@ -1726,7 +1788,7 @@ def queue_retry(
                     if worktree_path.is_dir()
                     else None
                 )
-                resolved_repo, project_harness = _resolve_project_repo(repo, cfg)
+                resolved_repo, project = _resolve_project_repo(repo, cfg)
                 if propose_commit is not None:
                     reset_worktree_to_commit(worktree_path, propose_commit)
                     clear_worktree = False
@@ -1744,7 +1806,7 @@ def queue_retry(
                     # actually applies to the retried attempt, not just to the
                     # next brand-new worktree.
                     harness_name, _source = resolve_harness_name(
-                        None, project_harness, cfg.harness.name
+                        None, project.harness, cfg.harness.name
                     )
                     sync_harness_assets(worktree_path, harness_name, emitter=EventEmitter(writer))
                 else:

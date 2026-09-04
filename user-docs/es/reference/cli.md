@@ -75,8 +75,38 @@ proyecto.
 | `--force` / `--no-force` | `--no-force` | Sobrescribe archivos de `docs/` ya presentes. Pide confirmación. |
 | `--git-author-name <str>` | — | Identidad de Git a configurar localmente en el repositorio objetivo. Se combina con `--git-author-email`; si se dan ambas juntas, se salta el prompt interactivo. |
 | `--git-author-email <str>` | — | Ver `--git-author-name`. |
+| `--base-branch-mode <str>` | `direct` | `direct`: opera directamente sobre la rama base configurada. `cosmo_branch`: bifurca una rama aislada a partir de ella en el momento del init (ver `--cosmo-branch-name`) para que el scaffolding de plantillas/harness nunca la toque. Se persiste por proyecto; ver "Aislamiento de rama base" más abajo. |
+| `--cosmo-branch-name <str>` | `cosmo` | Nombre de rama para `--base-branch-mode cosmo_branch`. |
 | `--config`, `-c <path>` | — | Archivo de configuración. |
-| `-i`, `--interactive` | desactivado | Modo asistente: pide por prompt la ruta objetivo, el harness, la plantilla de proyecto, la rama base, la sobrescritura de docs y (opcionalmente) overrides de modelos por harness -- para lo que no se haya dado ya como flag. Los overrides de modelos, si se ingresan, se escriben en el archivo de configuración *global* del usuario (`[harness.overrides.<harness>]`), no quedan limitados a este proyecto. Nunca se activa solo; las invocaciones con scripts/CI no se ven afectadas a menos que pasen `-i` ellas mismas. |
+| `-i`, `--interactive` | desactivado | Modo asistente: pide por prompt la ruta objetivo, el harness, la plantilla de proyecto, la rama base, la estrategia de rama base, la sobrescritura de docs y (opcionalmente) overrides de modelos por harness -- para lo que no se haya dado ya como flag. Los overrides de modelos, si se ingresan, se escriben en el archivo de configuración *global* del usuario (`[harness.overrides.<harness>]`), no quedan limitados a este proyecto. Nunca se activa solo; las invocaciones con scripts/CI no se ven afectadas a menos que pasen `-i` ellas mismas. |
+
+### Aislamiento de rama base (`--base-branch-mode`)
+
+Por defecto (`direct`), todo comando que toca el repositorio objetivo opera
+directamente sobre la rama base configurada (`git.base_branch`, o
+`--base-branch` por invocación) -- el mismo comportamiento que existía antes
+de esta opción.
+
+`--base-branch-mode cosmo_branch` en cambio bifurca una rama nueva (nombrada
+por `--cosmo-branch-name`, por defecto `cosmo`) a partir de la rama base real
+en el momento de `cosmo init`, y desde entonces trata *esa* rama como la rama
+base efectiva para todo: creación de worktrees, el diff del gate, y dónde
+aterrizan los merges de las tareas. La rama base real nunca vuelve a tocarse
+después de la bifurcación -- ningún commit de scaffolding, ningún merge de
+tareas. Esta elección se guarda en el registro del propio proyecto (no en
+`config.toml`), así que cada invocación posterior de `cosmo run` / `cosmo
+validate` / `cosmo spec` contra este proyecto la toma automáticamente;
+`--base-branch` sigue teniendo prioridad en cualquier invocación puntual.
+
+Si el repositorio objetivo tiene cambios sin confirmar en la rama base real
+al momento de la bifurcación, se guardan con `git stash push -u` en lugar de
+bloquear el init como hace el modo `direct` -- el stash queda en la lista de
+stashes, y `cosmo init` imprime el comando exacto de recuperación
+(`git checkout <base-branch> && git stash pop`).
+
+Todavía no soportado: sincronizar una rama `cosmo` existente con los commits
+posteriores de la rama base (hacerlo manualmente con `git merge`/`git
+rebase`), y cambiar el modo de un proyecto ya registrado después del hecho.
 
 ## `cosmo validate WORKTREE`
 

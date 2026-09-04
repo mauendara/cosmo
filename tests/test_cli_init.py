@@ -12,6 +12,7 @@ from typer.testing import CliRunner
 from cosmo.bootstrap.git_identity import GitIdentity, read_configured_identity
 from cosmo.cli.main import app
 from cosmo.config import load_config
+from cosmo.store.reader import find_project_by_path
 
 runner = CliRunner()
 
@@ -123,6 +124,136 @@ def test_init_commits_its_own_bootstrap_output(tmp_path: Path) -> None:
         check=True,
     )
     assert "init bootstrap" in log.stdout
+
+
+@pytest.mark.skipif(
+    subprocess.run(["which", "openspec"], capture_output=True, check=False).returncode != 0,
+    reason="real openspec CLI not on PATH",
+)
+def test_init_cosmo_branch_mode_flag_forks_and_commits_on_the_cosmo_branch(
+    tmp_path: Path,
+) -> None:
+    """v14: `--base-branch-mode cosmo_branch` forks `cosmo` (default name)
+    off `develop` and leaves the target checked out there -- the real
+    `develop` gets no scaffolding commit at all."""
+    target = _git_repo(tmp_path)
+
+    result = runner.invoke(
+        app, ["init", str(target), "--base-branch-mode", "cosmo_branch"], input="\n"
+    )
+
+    assert result.exit_code == 0, result.stdout
+    assert "committed" in result.stdout
+    current_branch = subprocess.run(
+        ["git", "-C", str(target), "branch", "--show-current"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert current_branch == "cosmo"
+
+    project = find_project_by_path(_db_path(), str(target.resolve()))
+    assert project is not None
+    assert project.base_branch_mode == "cosmo_branch"
+    assert project.real_base_branch == "develop"
+    assert project.cosmo_branch_name == "cosmo"
+
+
+@pytest.mark.skipif(
+    subprocess.run(["which", "openspec"], capture_output=True, check=False).returncode != 0,
+    reason="real openspec CLI not on PATH",
+)
+def test_init_cosmo_branch_mode_stashes_dirty_work_and_reports_recovery(
+    tmp_path: Path,
+) -> None:
+    """Unlike `direct` mode's `SKIPPED_DIRTY` bailout, `cosmo_branch` mode
+    never gives up on a dirty tree -- it stashes it and reports the exact
+    recovery command instead. `develop` needs a real commit first --
+    `git stash` refuses on an unborn HEAD (no commit to diff against yet),
+    a separate no-op case `test_bootstrap_git_branch.py` covers directly."""
+    target = tmp_path / "dirty-repo"
+    target.mkdir()
+    subprocess.run(
+        ["git", "-c", "user.name=t", "-c", "user.email=t@example.com", "init", "-q"],
+        cwd=target,
+        check=True,
+    )
+    (target / "README.md").write_text("hello\n")
+    subprocess.run(["git", "add", "README.md"], cwd=target, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@example.com",
+            "commit",
+            "-q",
+            "-m",
+            "base",
+        ],
+        cwd=target,
+        check=True,
+    )
+    subprocess.run(["git", "branch", "-M", "develop"], cwd=target, check=True)
+    develop_tip_before = subprocess.run(
+        ["git", "-C", str(target), "rev-parse", "develop"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    (target / "untracked.txt").write_text("someone's own work in progress\n")
+
+    result = runner.invoke(
+        app,
+        ["init", str(target), "--base-branch-mode", "cosmo_branch", "--cosmo-branch-name", "iso"],
+        input="\n",
+    )
+
+    assert result.exit_code == 0, result.stdout
+    assert "stashed" in result.stdout
+    # Console wraps long lines, so check the recovery command's pieces
+    # rather than one exact contiguous substring.
+    assert "checkout develop" in result.stdout
+    assert "git stash pop" in result.stdout
+    current_branch = subprocess.run(
+        ["git", "-C", str(target), "branch", "--show-current"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert current_branch == "iso"
+    assert (
+        "untracked.txt"
+        not in subprocess.run(
+            ["git", "-C", str(target), "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+    )
+
+    # `develop`'s own tip is completely unchanged -- the scaffolding commit
+    # landed on `iso`, not there.
+    develop_tip_after = subprocess.run(
+        ["git", "-C", str(target), "rev-parse", "develop"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert develop_tip_after == develop_tip_before
+    iso_log = subprocess.run(
+        ["git", "-C", str(target), "log", "iso", "--format=%s"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert "init bootstrap" in iso_log
+
+    # ...and the stash recovery command actually works.
+    subprocess.run(["git", "-C", str(target), "checkout", "develop"], check=True)
+    subprocess.run(["git", "-C", str(target), "stash", "pop"], check=True)
+    assert (target / "untracked.txt").is_file()
 
 
 @pytest.mark.skipif(
@@ -278,10 +409,10 @@ def test_init_without_target_path_or_interactive_fails_clean() -> None:
 )
 def test_init_interactive_wizard_accepts_every_default(tmp_path: Path) -> None:
     target = _git_repo(tmp_path)
-    # harness / template / base branch / force-docs confirm / model-overrides
-    # confirm / git-identity confirm -- one blank line per prompt, each
-    # falling back to its own default.
-    result = runner.invoke(app, ["init", str(target), "-i"], input="\n\n\n\n\n\n")
+    # harness / template / base branch / base-branch-strategy / force-docs
+    # confirm / model-overrides confirm / git-identity confirm -- one blank
+    # line per prompt, each falling back to its own default.
+    result = runner.invoke(app, ["init", str(target), "-i"], input="\n\n\n\n\n\n\n")
 
     assert result.exit_code == 0, result.stdout
     assert "claude" in result.stdout and "-i wizard" in result.stdout
@@ -309,8 +440,9 @@ def test_init_interactive_skips_prompts_for_values_already_given_as_flags(
             "--project-template",
             "java-spring-react",
         ],
-        # base branch / force-docs confirm / model-overrides confirm / git-identity confirm
-        input="\n\n\n\n",
+        # base branch / base-branch-strategy / force-docs confirm /
+        # model-overrides confirm / git-identity confirm
+        input="\n\n\n\n\n",
     )
 
     assert result.exit_code == 0, result.stdout
@@ -330,7 +462,7 @@ def test_init_interactive_reprompts_on_an_unknown_harness_name(tmp_path: Path) -
     result = runner.invoke(
         app,
         ["init", str(target), "-i"],
-        input="bogus-harness\nclaude\n\n\n\n\n\n",
+        input="bogus-harness\nclaude\n\n\n\n\n\n\n",
     )
 
     assert result.exit_code == 0, result.stdout
@@ -346,12 +478,13 @@ def test_init_interactive_model_overrides_only_write_the_fields_entered(
     tmp_path: Path,
 ) -> None:
     target = _git_repo(tmp_path)
-    # harness/template/base_branch defaults, force-docs declined, model
-    # overrides accepted, only propose_model filled in, git identity default.
+    # harness/template/base_branch/base-branch-strategy defaults, force-docs
+    # declined, model overrides accepted, only propose_model filled in, git
+    # identity default.
     result = runner.invoke(
         app,
         ["init", str(target), "-i"],
-        input="\n\n\nn\ny\n\ncustom-propose-model\n\n\n\n",
+        input="\n\n\n\nn\ny\n\ncustom-propose-model\n\n\n\n",
     )
 
     assert result.exit_code == 0, result.stdout
@@ -363,3 +496,34 @@ def test_init_interactive_model_overrides_only_write_the_fields_entered(
     assert override.model is None
     assert override.implement_model is None
     assert override.review_model is None
+
+
+@pytest.mark.skipif(
+    subprocess.run(["which", "openspec"], capture_output=True, check=False).returncode != 0,
+    reason="real openspec CLI not on PATH",
+)
+def test_init_interactive_choosing_cosmo_branch_prompts_for_a_branch_name(
+    tmp_path: Path,
+) -> None:
+    target = _git_repo(tmp_path)
+    # harness/template/base_branch defaults, base-branch-strategy=cosmo_branch,
+    # branch name default, force-docs/model-overrides/git-identity defaults.
+    result = runner.invoke(
+        app,
+        ["init", str(target), "-i"],
+        input="\n\n\ncosmo_branch\n\n\n\n\n",
+    )
+
+    assert result.exit_code == 0, result.stdout
+    current_branch = subprocess.run(
+        ["git", "-C", str(target), "branch", "--show-current"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert current_branch == "cosmo"
+
+    project = find_project_by_path(_db_path(), str(target.resolve()))
+    assert project is not None
+    assert project.base_branch_mode == "cosmo_branch"
+    assert project.cosmo_branch_name == "cosmo"

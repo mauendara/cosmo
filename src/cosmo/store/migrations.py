@@ -496,6 +496,29 @@ DROP TABLE run_state;
 ALTER TABLE run_state_v4 RENAME TO run_state;
 """
 
+# ============================================================================
+# Migration 11 -- v14: `projects` gains base-branch isolation mode fields.
+#
+# `git.base_branch` is global-only config today, which is already a known
+# pre-existing limitation (one value for every project Cosmo manages). This
+# follows the existing per-project precedent `harness`/`project_template`
+# already set on this same table, rather than repeating that mistake:
+# `base_branch_mode`/`real_base_branch`/`cosmo_branch_name` land on the
+# `projects` row, not in `config.toml`. Plain nullable/defaulted columns, no
+# existing row's data can violate either CHECK, so `ALTER TABLE ADD COLUMN`
+# is enough -- no recreate-copy-swap needed (same reasoning as migrations
+# 6/8/9). `real_base_branch` is NULL for every row migrated forward from
+# before this feature existed; `_resolve_base_branch` (cli.main) treats NULL
+# as "fall back to `cfg.git.base_branch`", matching current behavior exactly
+# for already-registered projects. See docs/v14-cosmo-branch-isolation-plan.md.
+# ============================================================================
+_SCHEMA_V11 = """
+ALTER TABLE projects ADD COLUMN base_branch_mode TEXT NOT NULL DEFAULT 'direct'
+    CHECK (base_branch_mode IN ('direct', 'cosmo_branch'));
+ALTER TABLE projects ADD COLUMN real_base_branch TEXT;
+ALTER TABLE projects ADD COLUMN cosmo_branch_name TEXT;
+"""
+
 MIGRATIONS: list[Migration] = [
     Migration(1, "initial schema: events, queue, progress, run state, cost, history", _SCHEMA_V1),
     Migration(2, "task_failures.failure_stage gains secrets (gate gitleaks backstop)", _SCHEMA_V2),
@@ -528,6 +551,11 @@ MIGRATIONS: list[Migration] = [
         10,
         "run_state.stop_reason gains blocked_remaining (v7, queue_empty-vs-blocked gap)",
         _SCHEMA_V10,
+    ),
+    Migration(
+        11,
+        "projects gains base_branch_mode, real_base_branch, cosmo_branch_name (v14)",
+        _SCHEMA_V11,
     ),
 ]
 

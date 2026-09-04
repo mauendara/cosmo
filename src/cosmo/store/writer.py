@@ -564,6 +564,9 @@ class StoreWriter:
         target_path: str,
         harness: str,
         project_template: str | None = None,
+        base_branch_mode: str = "direct",
+        real_base_branch: str | None = None,
+        cosmo_branch_name: str | None = None,
     ) -> str:
         project_id = f"{Path(target_path).name}-{_short_id()}"
         now = utcnow_iso()
@@ -571,10 +574,20 @@ class StoreWriter:
             self._conn.execute(
                 """
                 INSERT INTO projects (
-                    project_id, target_path, harness, project_template, initialized_at
-                ) VALUES (?, ?, ?, ?, ?)
+                    project_id, target_path, harness, project_template, initialized_at,
+                    base_branch_mode, real_base_branch, cosmo_branch_name
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (project_id, target_path, harness, project_template, now),
+                (
+                    project_id,
+                    target_path,
+                    harness,
+                    project_template,
+                    now,
+                    base_branch_mode,
+                    real_base_branch,
+                    cosmo_branch_name,
+                ),
             )
         return project_id
 

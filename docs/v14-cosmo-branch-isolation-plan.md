@@ -1,10 +1,22 @@
 # v14: base-branch isolation mode ("cosmo branch")
 
-## Status: design, not started
+## Status: implemented and tested (Post-v0.1.1, deviation 88)
 
-Nothing in this doc is implemented yet. Follows directly from `v13`
-(ori-claude harness, done) as the next requested feature. Grounded by
-reading the real current code, not assumed:
+Everything in this doc is implemented -- migration 11, `bootstrap.git_branch`/
+`bootstrap.init` (`run_init`, `GitBranchOutcome`), `cli.main`'s
+`--base-branch-mode`/`--cosmo-branch-name` and `_resolve_base_branch`, and
+the `-i` wizard prompt. See `docs/v3-implementation-state.md`'s deviation 88
+for the full account, including two real gaps found during implementation
+that this design doc didn't anticipate (both around an unborn HEAD --
+`git stash` and `git checkout -b <new> <unborn-base>` both refuse outright)
+and two of this doc's own assumptions about `cli/main.py` that didn't match
+the real code (`spec add`/`spec queue` don't use `base_branch` at all;
+`validate` deliberately resolves no `ProjectRow`). The rest of this doc is
+left as written below -- it's still an accurate design record, just not the
+place to look for what actually shipped.
+
+Follows directly from `v13` (ori-claude harness, done). Grounded by reading
+the real current code, not assumed:
 
 - `git.base_branch` is a single **global** config value (`GitConfig.
   base_branch`, `config/defaults.toml`), overridable per-invocation with
@@ -103,7 +115,9 @@ for "project registration is one resolution tier" (it already does this
 for harness). Add a sibling:
 
 ```python
-def _resolve_base_branch(project: ProjectRow, base_branch_flag: str | None, cfg: CosmoConfig) -> str:
+def _resolve_base_branch(
+    project: ProjectRow, base_branch_flag: str | None, cfg: CosmoConfig
+) -> str:
     if base_branch_flag is not None:
         return base_branch_flag
     if project.base_branch_mode == "cosmo_branch":

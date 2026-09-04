@@ -76,6 +76,65 @@ def create_and_checkout_branch(target: Path, branch: str) -> None:
     )
 
 
+def checkout_branch(target: Path, branch: str) -> None:
+    """Plain `git checkout <branch>` (no `-b`) -- for `cosmo_branch` mode's
+    idempotent re-run, where the branch already exists as a ref and just
+    needs to become HEAD."""
+    subprocess.run(
+        ["git", "-C", str(target), "checkout", branch],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=_TIMEOUT,
+    )
+
+
+def has_commits(target: Path) -> bool:
+    """Whether HEAD is born (at least one commit exists anywhere in
+    history) -- `git stash` refuses outright ("You do not have the initial
+    commit yet") on an unborn HEAD, since it has no commit to diff against
+    or attach a stash entry to."""
+    result = subprocess.run(
+        ["git", "-C", str(target), "rev-parse", "--verify", "-q", "HEAD"],
+        capture_output=True,
+        text=True,
+        timeout=_TIMEOUT,
+        check=False,
+    )
+    return result.returncode == 0
+
+
+def stash_all(target: Path, message: str) -> bool:
+    """`git stash push -u` if the working tree is dirty, so `cosmo_branch`
+    mode never needs `direct` mode's `SKIPPED_DIRTY` bailout -- dirtiness is
+    always resolved this way before the fork, not surfaced as a blocker.
+    Returns whether anything was actually stashed -- `False` (a no-op) on an
+    already-clean tree, and also on an unborn HEAD (see `has_commits`):
+    there is nothing to protect there either, since whatever the working
+    tree holds becomes part of `cosmo_branch` mode's own first real commit
+    regardless of which branch it lands on."""
+    if working_tree_is_clean(target) or not has_commits(target):
+        return False
+    subprocess.run(
+        ["git", "-C", str(target), "stash", "push", "-u", "-m", message],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=_TIMEOUT,
+    )
+    return True
+
+
+def create_branch_from(target: Path, new_branch: str, from_branch: str) -> None:
+    subprocess.run(
+        ["git", "-C", str(target), "checkout", "-b", new_branch, from_branch],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=_TIMEOUT,
+    )
+
+
 def commit_bootstrap_output(target: Path) -> bool:
     """Commits whatever `run_init`'s own steps (`openspec/`, `docs/`,
     `.agent/<harness>/`, root symlinks) just wrote or changed in `target`'s
