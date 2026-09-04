@@ -155,8 +155,24 @@ def run_task(
     `environment_error` never gets an in-run retry at all (`_do_committing`/
     `_do_merging` below always `will_retry=False`) -- unlike every earlier
     stage, there is no "the code needs to change" judgment bundled into that
-    failure, so nothing before it needs to be redone either. `cli.main.
-    queue_retry` is the only real caller of anything but the default."""
+    failure, so nothing before it needs to be redone either.
+
+    `VALIDATING` (v19) is a different kind of resume: it skips only
+    `IMPLEMENTING`, and only for the resumed attempt's first loop iteration
+    (one-shot, exactly like `skip_to_committing` below) -- for when a real
+    fix was already applied to the worktree by something other than a full
+    harness `IMPLEMENTING` session (e.g. a human patched a small, well-
+    understood bug directly) and the goal is to hand it back to Cosmo's own
+    `VALIDATING`/`REVIEWING`/`COMMITTING`/`MERGING` judgment without paying
+    for a fresh `IMPLEMENTING` call to rediscover work that's already done.
+    Unlike `COMMITTING`/`MERGING`, `VALIDATING` can still genuinely fail --
+    if it does, this behaves exactly like any other in-run retry and runs a
+    real `IMPLEMENTING` attempt on the next loop iteration; the skip never
+    applies twice.
+
+    `cli.main.queue_retry` is the only real caller of the `COMMITTING`/
+    `MERGING` resume; `VALIDATING` has no CLI flag yet and is set by hand
+    via `store.writer.queue_resume_at` (see docs/handoff.md's v19 entry)."""
     task_id = ctx.task_id
 
     if resume_at is TaskStatus.IMPLEMENTING:
@@ -186,88 +202,94 @@ def run_task(
 
     if resume_at is not TaskStatus.MERGING:
         skip_to_committing = resume_at is TaskStatus.COMMITTING
+        skip_to_validating = resume_at is TaskStatus.VALIDATING
         while True:
             if not skip_to_committing:
-                if check_run_guard is not None:
-                    guard_action = check_run_guard()
-                    if guard_action is RunGuardAction.REQUEUE:
-                        return _requeue(
-                            writer=writer, emitter=emitter, task_id=task_id, run_id=run_id
-                        )
-                    if guard_action is RunGuardAction.BLOCK_COST:
-                        return _block(
-                            writer=writer,
-                            emitter=emitter,
-                            task_id=task_id,
-                            run_id=run_id,
-                            reason=BlockedReason.COST,
-                            note="task cost ceiling reached (spec 7.3)",
-                        )
-
-                # -- IMPLEMENTING -----------------------------------------------
-                emit_state_changed(
-                    emitter,
-                    writer.queue_transition(task_id, TaskStatus.IMPLEMENTING, run_id=run_id),
-                )
-                implemented = _do_implementing(
-                    ctx=ctx,
-                    config=config,
-                    writer=writer,
-                    emitter=emitter,
-                    adapter=adapter,
-                    run_id=run_id,
-                    on_harness_result=on_harness_result,
-                    on_activity=on_activity,
-                )
-
-                if not implemented.success:
-                    assert implemented.classification is not None
-                    if implemented.timed_out:
-                        will_retry = attempt_count < ctx.max_attempts
-                        attempt_count = writer.queue_begin_attempt(task_id)
-                        _record_failure(
-                            writer,
-                            task_id,
-                            run_id,
-                            attempt_count,
-                            implemented.classification,
-                            will_retry,
-                        )
-                        if not will_retry:
+                if not skip_to_validating:
+                    if check_run_guard is not None:
+                        guard_action = check_run_guard()
+                        if guard_action is RunGuardAction.REQUEUE:
+                            return _requeue(
+                                writer=writer, emitter=emitter, task_id=task_id, run_id=run_id
+                            )
+                        if guard_action is RunGuardAction.BLOCK_COST:
                             return _block(
                                 writer=writer,
                                 emitter=emitter,
                                 task_id=task_id,
                                 run_id=run_id,
-                                reason=BlockedReason.TIMEOUT,
-                                note=implemented.classification.error_summary,
+                                reason=BlockedReason.COST,
+                                note="task cost ceiling reached (spec 7.3)",
                             )
-                    else:
-                        validating_env_retries += 1
-                        blocking = validating_env_retries > config.retries.max_attempts
-                        _record_failure(
-                            writer,
-                            task_id,
-                            run_id,
-                            attempt_count,
-                            implemented.classification,
-                            will_retry=not blocking,
-                        )
-                        if blocking:
-                            return _block(
-                                writer=writer,
-                                emitter=emitter,
-                                task_id=task_id,
-                                run_id=run_id,
-                                reason=BlockedReason.ENVIRONMENT,
-                                note=implemented.classification.error_summary,
-                            )
+
+                    # -- IMPLEMENTING -------------------------------------------
                     emit_state_changed(
                         emitter,
-                        writer.queue_transition(task_id, TaskStatus.FAILED_RETRY, run_id=run_id),
+                        writer.queue_transition(task_id, TaskStatus.IMPLEMENTING, run_id=run_id),
                     )
-                    _retry_delay(config)
-                    continue
+                    implemented = _do_implementing(
+                        ctx=ctx,
+                        config=config,
+                        writer=writer,
+                        emitter=emitter,
+                        adapter=adapter,
+                        run_id=run_id,
+                        on_harness_result=on_harness_result,
+                        on_activity=on_activity,
+                    )
+
+                    if not implemented.success:
+                        assert implemented.classification is not None
+                        if implemented.timed_out:
+                            will_retry = attempt_count < ctx.max_attempts
+                            attempt_count = writer.queue_begin_attempt(task_id)
+                            _record_failure(
+                                writer,
+                                task_id,
+                                run_id,
+                                attempt_count,
+                                implemented.classification,
+                                will_retry,
+                            )
+                            if not will_retry:
+                                return _block(
+                                    writer=writer,
+                                    emitter=emitter,
+                                    task_id=task_id,
+                                    run_id=run_id,
+                                    reason=BlockedReason.TIMEOUT,
+                                    note=implemented.classification.error_summary,
+                                )
+                        else:
+                            validating_env_retries += 1
+                            blocking = validating_env_retries > config.retries.max_attempts
+                            _record_failure(
+                                writer,
+                                task_id,
+                                run_id,
+                                attempt_count,
+                                implemented.classification,
+                                will_retry=not blocking,
+                            )
+                            if blocking:
+                                return _block(
+                                    writer=writer,
+                                    emitter=emitter,
+                                    task_id=task_id,
+                                    run_id=run_id,
+                                    reason=BlockedReason.ENVIRONMENT,
+                                    note=implemented.classification.error_summary,
+                                )
+                        emit_state_changed(
+                            emitter,
+                            writer.queue_transition(
+                                task_id, TaskStatus.FAILED_RETRY, run_id=run_id
+                            ),
+                        )
+                        _retry_delay(config)
+                        continue
+
+                skip_to_validating = False
 
                 # -- VALIDATING ---------------------------------------------------
                 emit_state_changed(

@@ -575,6 +575,58 @@ DROP TABLE task_queue;
 ALTER TABLE task_queue_v3 RENAME TO task_queue;
 """
 
+# ============================================================================
+# Migration 13 -- v19: `task_queue.resume_at_stage` gains 'validating'.
+#
+# Found by hand against a real blocked task (`wa-chat-chat-shell`): the code
+# had already been fixed directly in the worktree by something other than a
+# full harness `IMPLEMENTING` session (a human patched a small, well-
+# understood bug), and there was no way to hand that straight to Cosmo's own
+# `VALIDATING`/`REVIEWING`/`COMMITTING`/`MERGING` judgment without paying for
+# a fresh `IMPLEMENTING` call to rediscover work that already existed --
+# `COMMITTING`/`MERGING` already covered "everything up to here already
+# succeeded," but nothing covered "IMPLEMENTING succeeded by some other
+# means, judge it for real from here." `task.machine.run_task`'s own
+# `resume_at` handling treats this one-shot, unlike `COMMITTING`/`MERGING`
+# (see its docstring) -- a genuine `VALIDATING` failure here falls through to
+# a real `IMPLEMENTING` retry rather than being treated as unretryable.
+# Same recreate-copy-swap recipe as migrations 4/12 -- SQLite has no
+# `ALTER TABLE ... DROP CONSTRAINT` to widen the existing `CHECK` in place.
+# ============================================================================
+_SCHEMA_V13 = """
+CREATE TABLE task_queue_v4 (
+    task_id          TEXT PRIMARY KEY,
+    spec_path        TEXT NOT NULL,
+    depends_on       TEXT NOT NULL DEFAULT '[]',
+    priority         INTEGER NOT NULL DEFAULT 0,
+    status           TEXT NOT NULL CHECK (status IN (
+                         'queued', 'proposing', 'proposed', 'implementing',
+                         'validating', 'reviewing', 'committing', 'merging',
+                         'finishing', 'done', 'failed_retry', 'blocked'
+                     )),
+    attempt_count    INTEGER NOT NULL DEFAULT 0,
+    max_attempts     INTEGER NOT NULL,
+    last_error       TEXT,
+    blocked_reason   TEXT CHECK (blocked_reason IN (
+                         'code_failure', 'cost', 'merge_conflict', 'environment',
+                         'timeout', 'flaky_unresolved'
+                     )),
+    allow_test_edits INTEGER NOT NULL DEFAULT 0 CHECK (allow_test_edits IN (0, 1)),
+    worktree_path    TEXT,
+    session_id       TEXT,
+    created_at       TEXT NOT NULL,
+    updated_at       TEXT NOT NULL,
+    spec_batch_id    TEXT,
+    resume_at_stage  TEXT
+                     CHECK (resume_at_stage IS NULL OR resume_at_stage IN (
+                         'proposed', 'validating', 'committing', 'merging'
+                     ))
+);
+INSERT INTO task_queue_v4 SELECT * FROM task_queue;
+DROP TABLE task_queue;
+ALTER TABLE task_queue_v4 RENAME TO task_queue;
+"""
+
 MIGRATIONS: list[Migration] = [
     Migration(1, "initial schema: events, queue, progress, run state, cost, history", _SCHEMA_V1),
     Migration(2, "task_failures.failure_stage gains secrets (gate gitleaks backstop)", _SCHEMA_V2),
@@ -617,6 +669,11 @@ MIGRATIONS: list[Migration] = [
         12,
         "task_queue.resume_at_stage gains proposed (v15, resume IMPLEMENTING in place)",
         _SCHEMA_V12,
+    ),
+    Migration(
+        13,
+        "task_queue.resume_at_stage gains validating (v19, resume VALIDATING in place)",
+        _SCHEMA_V13,
     ),
 ]
 

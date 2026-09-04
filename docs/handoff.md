@@ -11,6 +11,73 @@ not a record of how we got here.
 
 ## Where things stand
 
+- **v19 (2026-09-04): `resume_at_stage` gains `VALIDATING`, plus a real
+  `wa-chat-chat-shell` block diagnosed and landed by hand instead of a
+  blind retry.** Direct follow-on to v17/v18 in the same investigation:
+  after unblocking `wa-chat-text-bubbles`, the next queued task
+  (`wa-chat-chat-shell`) blocked for real -- worth the full account since
+  it's the first real use of the new resume stage.
+  - **Diagnosis:** `Chat.tsx`'s `messages` prop was required with no
+    default, but the task's own acceptance criteria renders `<Chat
+    contact={...} typing />` with no `messages` at all -- a real,
+    spec-mandated crash (`mergeOptimistic` calling `.map` on `undefined`),
+    not a flaky test. The model found the right direction early (patching
+    the pre-existing `Chat.test.tsx` to pass required props) but
+    `test_path_guard.py` correctly denies `Edit`/`Write` on any
+    `*.test.tsx` path, with no way for a struggling session to request a
+    scoped, justified exception mid-task (only `allow_test_edits`, set in
+    advance on the queue row). Blocked from the sanctioned tool, the
+    session burned hundreds of turns fighting it via `Bash`-based file
+    rewrites (`echo >>`, heredocs, `python3 -c`, `node -e`, repeated `sed`)
+    -- most failing outright on shell/JSON quoting -- before finally
+    deleting the test file and committing that under a plausible-sounding
+    misreading of the spec's "no test files added here" line (which means
+    *don't add new ones*, not *the existing one may be removed*). Cosmo's
+    diff gate correctly rejected the deletion (`test_path_deleted` +
+    `assertion_count_decreased`) and blocked the task once attempts were
+    exhausted -- a real guardrail working as intended, not a Cosmo bug.
+    Fixing `messages` unmasked two more real, previously-crash-masked bugs
+    in the same component: `AppBar`'s `<header>` claimed the page-level
+    `banner` landmark while nested inside `Chat`'s `role="region"` wrapper
+    (wrong for an embeddable widget, not a whole page) and `MessageList`'s
+    visually-hidden `aria-live` announcer was a bare child of
+    `role="list"`, which only permits `listitem` children -- both are real
+    `axe` violations `vitest-axe` would have caught on the very first
+    attempt had the `messages` crash not always short-circuited the render
+    before axe ever ran.
+  - Given the actual fix was small and well-understood (one prop default,
+    a `<header>`→`<div>` swap, moving one `aria-live` div outside the list,
+    restoring+updating the deleted test to pass `contact`), applying it
+    directly and handing it back to Cosmo's own judgment was cheaper and
+    safer than a blind `queue retry` -- which would have redone a full
+    `IMPLEMENTING` session against a task that had already shown it can
+    burn $5+ and 80 turns re-verifying already-correct code without
+    reaching a stopping point (`wa-chat-text-bubbles`'s own attempt 1,
+    v17's entry). That gap -- no way to say "IMPLEMENTING succeeded by
+    some other means, just judge it" -- is what this version actually
+    builds: `task.machine.run_task`'s `resume_at` parameter now accepts
+    `TaskStatus.VALIDATING` (new `skip_to_validating`, mirroring the
+    existing `skip_to_committing` one-shot-skip exactly), and `store.
+    writer.queue_resume_at`'s `stage` CHECK constraint widens to allow it
+    (`Migration(13, ...)`, same recreate-copy-swap recipe as 4/12). Unlike
+    `COMMITTING`/`MERGING`, a `VALIDATING` resume that genuinely fails
+    falls through to a real `IMPLEMENTING` retry rather than being treated
+    as unretryable -- covered by
+    `test_resume_at_validating_that_fails_falls_through_to_a_real_implementing_retry`,
+    the one-shot-skip's actual regression test.
+  - No CLI flag yet -- set by hand via `store.writer.queue_resume_at`
+    directly (same posture the v17 entry's `COMMITTING` resume used). A
+    dedicated `cosmo queue retry --resume-at-validating` (or similar) is
+    the natural next step if this pattern recurs enough to be worth a real
+    flag; not built yet since this is the first real use.
+  - Applied for real: `wa-chat-chat-shell`'s worktree got the fix
+    committed by hand (author `Cosmo <cosmo@entropiainversa.com>`, matching
+    every other commit already on that task branch) and
+    `resume_at_stage='validating'` set directly -- **not yet run through
+    `cosmo run` as of this writing**; check `cosmo queue show
+    wa-chat-chat-shell` for whether it actually landed before assuming so.
+  - `./check.sh` exits 0 fully clean, **671 tests passing, 9 skipped**
+    (was 666 as of the entry below).
 - **v18 (2026-09-04): the `Task` (subagent-spawn) tool was never covered
   by the one-shot-hazard guardrails.** Found by audit, not a live incident
   this time -- prompted by the user noticing `TaskCreate`/`TaskUpdate`

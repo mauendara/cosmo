@@ -322,6 +322,133 @@ def test_resume_at_committing_skips_straight_there_calling_neither_harness_nor_g
         writer.close()
 
 
+def test_resume_at_validating_skips_implementing_but_still_runs_the_gate(
+    tmp_path: Path,
+) -> None:
+    """v19: for a task whose code was fixed some other way than a full
+    harness `IMPLEMENTING` session (e.g. a human patched a small,
+    understood bug directly in the worktree), `resume_at=TaskStatus.
+    VALIDATING` must skip `IMPLEMENTING` -- no `propose`/`implement` call --
+    while still running the real gate, so Cosmo's own judgment (not the
+    human's say-so) is what lands the fix."""
+    cfg, repo, writer, emitter, ctx = _setup(tmp_path)
+    (ctx.worktree_path / "feature.txt").write_text("done\n", encoding="utf-8")
+    _git(ctx.worktree_path, "add", "feature.txt")
+    _git(
+        ctx.worktree_path,
+        "-c",
+        "user.name=t",
+        "-c",
+        "user.email=t@example.com",
+        "commit",
+        "-q",
+        "-m",
+        "Implement add-foo",
+    )
+    adapter = FakeHarnessAdapter(
+        cfg, cwd=ctx.worktree_path, script=ScriptedCall(FakeOutcome.SUCCESS)
+    )
+    gate = FakeGate(ScriptedGateResult(passed=True))
+
+    try:
+        status = run_task(
+            ctx=ctx,
+            config=cfg,
+            writer=writer,
+            emitter=emitter,
+            adapter=adapter,
+            repo_path=repo,
+            gate_runner=_gate_runner(gate),
+            resume_at=TaskStatus.VALIDATING,
+        )
+
+        assert status is TaskStatus.DONE
+        assert adapter.calls == []
+        assert gate.calls == [ctx.task_id]
+        transitions = [
+            e.payload["to_state"]
+            for e in reversed(list_events(cfg.paths.db_path, task_id=ctx.task_id, limit=200))
+            if e.event_type == "task.state_changed"
+        ]
+        assert transitions == ["validating", "committing", "merging", "done", "finishing", "done"]
+    finally:
+        writer.close()
+
+
+def test_resume_at_validating_that_fails_falls_through_to_a_real_implementing_retry(
+    tmp_path: Path,
+) -> None:
+    """The one-shot half of the same feature: if the resumed `VALIDATING`
+    genuinely fails (the human's fix wasn't actually right), this must
+    behave like any other in-run retry -- a real `IMPLEMENTING` attempt on
+    the next loop iteration -- rather than skipping `IMPLEMENTING` forever
+    or treating the resume specially a second time."""
+    cfg, repo, writer, emitter, ctx = _setup(tmp_path)
+    (ctx.worktree_path / "feature.txt").write_text("done\n", encoding="utf-8")
+    _git(ctx.worktree_path, "add", "feature.txt")
+    _git(
+        ctx.worktree_path,
+        "-c",
+        "user.name=t",
+        "-c",
+        "user.email=t@example.com",
+        "commit",
+        "-q",
+        "-m",
+        "Implement add-foo",
+    )
+    adapter = FakeHarnessAdapter(
+        cfg, cwd=ctx.worktree_path, script=ScriptedCall(FakeOutcome.SUCCESS)
+    )
+    gate = FakeGate(
+        [
+            ScriptedGateResult(
+                passed=False,
+                failure_type=FailureType.CODE_ERROR,
+                failure_stage=FailureStage.UNIT_TESTS,
+                error_summary="still broken",
+            ),
+            ScriptedGateResult(passed=True),
+        ]
+    )
+
+    try:
+        status = run_task(
+            ctx=ctx,
+            config=cfg,
+            writer=writer,
+            emitter=emitter,
+            adapter=adapter,
+            repo_path=repo,
+            gate_runner=_gate_runner(gate),
+            resume_at=TaskStatus.VALIDATING,
+        )
+
+        assert status is TaskStatus.DONE
+        # Skipped once (the resumed attempt), ran for real once (the retry).
+        assert len(adapter.calls) == 1
+        assert adapter.calls[0][0] == "implement"
+        assert gate.calls == [ctx.task_id, ctx.task_id]
+        transitions = [
+            e.payload["to_state"]
+            for e in reversed(list_events(cfg.paths.db_path, task_id=ctx.task_id, limit=200))
+            if e.event_type == "task.state_changed"
+        ]
+        assert transitions == [
+            "validating",
+            "failed_retry",
+            "implementing",
+            "validating",
+            "committing",
+            "merging",
+            "done",
+            "finishing",
+            "done",
+        ]
+    finally:
+        writer.close()
+
+
 def test_proposing_is_skipped_when_the_worktree_already_has_a_complete_change(
     tmp_path: Path,
 ) -> None:

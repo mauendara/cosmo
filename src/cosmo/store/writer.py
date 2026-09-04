@@ -224,7 +224,8 @@ class StoreWriter:
     def queue_resume_at(
         self, task_id: str, stage: TaskStatus, *, run_id: str | None = None
     ) -> TransitionResult:
-        """`stage` is `COMMITTING`, `MERGING`, or (v15) `PROPOSED`.
+        """`stage` is `COMMITTING`, `MERGING`, (v15) `PROPOSED`, or (v19)
+        `VALIDATING`.
 
         `COMMITTING`/`MERGING`: both callers (`cli.main.queue_retry`)
         already checked this task's most recent terminal block was an
@@ -243,6 +244,17 @@ class StoreWriter:
         retry already takes -- this is not a new kind of resumption, just
         this function's existing mechanism reused for it.
 
+        `VALIDATING` (v19): the worktree's code was already fixed by
+        something other than a full harness `IMPLEMENTING` session -- found
+        by hand on a real blocked task where a human patched a small,
+        well-understood bug directly rather than paying for a fresh
+        `IMPLEMENTING` call to rediscover it. Unlike every other value here,
+        this one has no CLI caller yet (set by hand); `task.machine.
+        run_task` skips `IMPLEMENTING` only for the resumed attempt's first
+        loop iteration and, if `VALIDATING` genuinely fails, falls through
+        to a real `IMPLEMENTING` retry rather than treating the failure as
+        unretryable the way `COMMITTING`/`MERGING` do.
+
         Unlike `queue_retry`, this deliberately does **not** touch
         `attempt_count` or `worktree_path`: for `COMMITTING`/`MERGING`,
         neither was consumed or invalidated by an `environment_error` there
@@ -250,12 +262,16 @@ class StoreWriter:
         `task.machine`'s own module docstring); for a crash-interrupted
         `PROPOSED` resume, `run.recovery` already recorded the interruption
         as its own `environment_error` failure, which by the same rule
-        never touches `attempt_count` either. The worktree stays exactly as
-        it was left -- resuming here means *not* discarding that work,
-        which is the entire point. `run_id` is `None` for `cli.main.queue_
-        retry`'s standalone CLI call (no run to attribute to, matching
-        every other CLI-only transition in this module) and the new run's
-        own id for `run.recovery`'s startup call."""
+        never touches `attempt_count` either; for a hand-set `VALIDATING`
+        resume, the attempt this fix will be judged under is whatever the
+        task's `attempt_count` already was -- if it fails, the task blocks
+        or retries exactly as that count already dictated, no free attempt
+        granted. The worktree stays exactly as it was left -- resuming here
+        means *not* discarding that work, which is the entire point.
+        `run_id` is `None` for `cli.main.queue_retry`'s standalone CLI call
+        (no run to attribute to, matching every other CLI-only transition
+        in this module) and the new run's own id for `run.recovery`'s
+        startup call."""
         now = utcnow_iso()
         with self._conn:
             from_state = self._current_status(task_id)
