@@ -1,0 +1,5 @@
+{"type":"thread.started","thread_id":"01900000-0000-7000-8000-000000000004"}
+{"type":"item.completed","item":{"id":"item_0","type":"error","message":"Model metadata for the requested model was not found. Defaulting to fallback metadata."}}
+{"type":"turn.started"}
+{"type":"error","message":"The requested model is not supported for this account."}
+{"type":"turn.failed","error":{"message":"The requested model is not supported for this account."}}
