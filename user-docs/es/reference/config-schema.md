@@ -37,7 +37,7 @@ El único lugar en el núcleo de Cosmo que nombra un harness específico.
 | Clave | Tipo | Por defecto | Descripción |
 | --- | --- | --- | --- |
 | `name` | string | `"claude"` | Qué adaptador usar. Orden de resolución: flag `--harness` → registro del proyecto → esta clave. |
-| `permission_mode` | string | `"dontAsk"` | Postura de permisos pasada al harness. El adaptador de Claude acepta `dontAsk` o `auto`, y rechaza `bypassPermissions` de plano. |
+| `permission_mode` | string | `"dontAsk"` | Postura de permisos pasada al harness. Claude acepta `dontAsk` o `auto`; Codex solo acepta `dontAsk`. Los modos bypass inseguros se rechazan. |
 | `max_turns` | int > 0 | `80` | Tope de turnos por llamada al harness. |
 | `model` | string | `"claude-sonnet-5"` | Fijado para que el modelo de una ejecución no varíe según lo que la CLI del host tenga por defecto en cada momento. También es el valor de respaldo para las tres claves siguientes cuando no están definidas. |
 | `propose_model` | string o sin definir | sin definir (usa `model`) | Modelo para la llamada `propose()` de `PROPOSING` y para la llamada de enriquecimiento/descomposición de `cosmo spec add` -- ambas son trabajo de planificación, y comparten una sola clave de override. |
@@ -94,6 +94,18 @@ propose_model = "openai/gpt-5"
 implement_model = "qwen/qwen3-coder"
 review_model = "google/gemini-2.5-pro"
 ```
+
+**Codex también necesita su propio id de modelo.** El valor Claude incluido no
+es un modelo Codex. Configura uno disponible en tu cuenta y verifícalo con un
+probe; el ejemplo validado fue:
+
+```toml
+[harness.overrides.codex]
+model = "gpt-5.6-sol"
+```
+
+Consulta [Usar el harness de Codex](../how-to/use-codex-harness.md) para las
+restricciones de autenticación, facturación y sandbox.
 
 ## `[timeouts]`
 

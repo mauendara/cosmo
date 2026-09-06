@@ -892,6 +892,7 @@ def doctor(
 _SYMLINK_STYLE = {
     "created": "green",
     "refreshed": "green",
+    "removed_legacy": "yellow",
     "skipped_conflict": "red",
     "skipped_missing_target": "yellow",
 }

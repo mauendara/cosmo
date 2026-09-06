@@ -77,6 +77,7 @@ def test_harness_list_shows_registered_adapters() -> None:
     result = runner.invoke(app, ["harness", "list"])
     assert result.exit_code == 0
     assert "claude" in result.stdout
+    assert "codex" in result.stdout
 
 
 def test_harness_probe_wires_live_activity_output_to_the_probe_call(

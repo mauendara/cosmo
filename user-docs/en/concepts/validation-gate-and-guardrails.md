@@ -130,6 +130,15 @@ Hooks are prevention-layer defense in depth, not the only layer. They use
 regex matching, not shell-aware parsing, and adversarial evasion is out of
 scope for something budgeted at under two seconds.
 
+The Codex hook set understands Codex's `apply_patch` and command payloads.
+Real adversarial testing on 0.153.0 confirmed that it denies protected-test
+changes, forbidden annotations, destructive Git and push commands, detached
+work, review source writes, and known secret reads. Codex's workspace sandbox
+also rejected an out-of-worktree write, so this profile reports
+`supports_gating: true`. Hooks still remain defense in depth: do not enable
+additional hosted tools or an unrestricted sandbox bypass without revalidating
+the complete mutation surface.
+
 ## Layer 2: detection — the diff gate
 
 Not every harness can gate a tool call before it executes

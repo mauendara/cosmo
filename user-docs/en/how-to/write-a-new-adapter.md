@@ -468,6 +468,23 @@ cosmo harness probe --harness mytool --prompt "reply with the word ok"
 cosmo run --repo /tmp/test-project --harness mytool --task some-task
 ```
 
+Run that lifecycle in a linked worktree, not only a standalone fixture repo.
+Two integration details are easy to miss:
+
+- The task runner reassigns `adapter.cwd` for each worktree. If your adapter
+  composes a separate invoker object, synchronize its working directory at
+  call time; copying `cwd` only in `__init__` launches later calls in the wrong
+  checkout.
+- Some harness sandboxes allow source writes but protect the linked worktree's
+  Git metadata. Do not grant unrestricted filesystem access to compensate.
+  Either prove that the normal harness commit works or arrange a
+  harness-agnostic, path-bounded core commit after a successful call, as the
+  Codex integration does.
+
+A capability such as `supports_gating` must remain false until a real hostile
+run has exercised every enabled write path and an out-of-worktree write. Unit
+tests establish intent; the real CLI establishes the enforcement boundary.
+
 ## Checklist
 
 - [ ] `templates/harness/mytool/` written, modeled on `templates/harness/claude/`
@@ -484,3 +501,5 @@ cosmo run --repo /tmp/test-project --harness mytool --task some-task
 - [ ] A raw log is written and its path returned
 - [ ] Registered in `registry.py`
 - [ ] Boundary test passes: nothing outside your module names your binary
+- [ ] Full linked-worktree lifecycle and hostile gating cases pass with the
+      real CLI

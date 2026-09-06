@@ -50,12 +50,14 @@ section (summarized at each relevant point below, not repeated in full):
   a background thread without stopping the Docker containers it started --
   a timeout that doesn't free what it claims to bound is worse than no
   timeout, so this is recorded as a deferred item instead of a fake one.
-- `COMMITTING` never calls the harness -- `templates/harness/claude/
-  CLAUDE.md` already instructs the agent to append knowledge notes and
-  commit its own work as the last step of `IMPLEMENTING`. `COMMITTING` here
-  only enforces the line cap on whatever `docs/**/*.md` files the task's
-  own commits touched (`cosmo.knowledge`) and appends one Cosmo-authored,
-  structured `decisions-log.md` entry. A knowledge-cap violation loops back
+- `COMMITTING` never calls the harness. Harnesses normally commit their own
+  work as the last step of `IMPLEMENTING`; after any successful call Cosmo
+  also captures pending implementation output in a bounded commit. This is
+  a no-op for an already-clean harness and supports sandboxes that protect a
+  linked worktree's Git metadata. `COMMITTING` here only enforces the line
+  cap on whatever `docs/**/*.md` files the task's implementation commits
+  touched (`cosmo.knowledge`) and appends one Cosmo-authored, structured
+  `decisions-log.md` entry. A knowledge-cap violation loops back
   to `IMPLEMENTING` (an informed retry, since it's a real, fixable defect in
   what the harness wrote) using the `attempt_count` already consumed by the
   `VALIDATING` pass that got it here -- it does not consume a second one on
@@ -654,6 +656,19 @@ def _do_implementing(
         on_harness_result(timeout_result.value)
 
     if timeout_result.value is not None and timeout_result.value.success:
+        try:
+            _git_commit_pending_implementation(ctx.worktree_path, task_id, config)
+        except GitCommandError as exc:
+            return _ImplementOutcome(
+                success=False,
+                timed_out=False,
+                classification=FailureClassification(
+                    failure_type=FailureType.ENVIRONMENT_ERROR,
+                    failure_stage=FailureStage.IMPLEMENT,
+                    error_summary=str(exc),
+                    error_detail=None,
+                ),
+            )
         return _ImplementOutcome(success=True, timed_out=False, classification=None)
 
     classification = classify_harness_failure(
@@ -924,6 +939,76 @@ def _git_commit_decisions_log(worktree_path: Path, config: CosmoConfig) -> None:
         )
     except (OSError, subprocess.TimeoutExpired, subprocess.CalledProcessError) as exc:
         raise GitCommandError(f"could not commit decisions-log.md: {exc}") from exc
+
+
+def _git_commit_pending_implementation(
+    worktree_path: Path, task_id: str, config: CosmoConfig
+) -> None:
+    """Commit successful harness output when the harness could not do so.
+
+    Codex's real workspace-write sandbox deliberately protects the linked
+    worktree's Git metadata, so `git add`/`git commit` fail even though source
+    writes are allowed. Existing harnesses normally arrive here clean because
+    they commit their own work; the cached-diff check makes this a no-op for
+    them. Cosmo-managed assets and review evidence are never task output.
+    """
+    identity_flags: list[str] = []
+    if not config.git.unified_identity:
+        identity_flags = [
+            "-c",
+            f"user.name={config.git.commit_author_name}",
+            "-c",
+            f"user.email={config.git.commit_author_email}",
+        ]
+    try:
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(worktree_path),
+                "add",
+                "-A",
+                "--",
+                ".",
+                ":(exclude).agent/**",
+                ":(exclude).agents/**",
+                ":(exclude).cosmo/**",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=60.0,
+        )
+        pending = subprocess.run(
+            ["git", "-C", str(worktree_path), "diff", "--cached", "--quiet", "--exit-code"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=60.0,
+        )
+        if pending.returncode == 0:
+            return
+        if pending.returncode != 1:
+            raise subprocess.CalledProcessError(
+                pending.returncode, pending.args, output=pending.stdout, stderr=pending.stderr
+            )
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(worktree_path),
+                *identity_flags,
+                "commit",
+                "-m",
+                f"cosmo: capture {task_id} implementation",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=60.0,
+        )
+    except (OSError, subprocess.TimeoutExpired, subprocess.CalledProcessError) as exc:
+        raise GitCommandError(f"could not commit implementation output: {exc}") from exc
 
 
 # -- MERGING ----------------------------------------------------------------

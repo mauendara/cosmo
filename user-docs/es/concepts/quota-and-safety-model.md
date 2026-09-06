@@ -105,6 +105,12 @@ a los detectores secundario y terciario de abajo; este es el mecanismo de
 respaldo documentado en la spec 7.2 para un harness sin señal primaria, no
 un vacío específico de este adaptador.
 
+Codex usa la misma postura de respaldo por una razón distinta. Su JSONL
+validado expone tokens, pero no ventana de cuota, reinicio ni coste USD
+autoritativos. El adaptador no informa cuota ni coste nativos. Los límites de
+suscripción se administran en la cuenta Codex y los topes USD de Cosmo no
+pueden detener una ejecución Codex usando gasto nativo.
+
 **2. Secundaria — el subtipo de error del resultado final**, comparado
 contra `quota.result_error_subtypes` (por defecto `["error_rate_limit"]`).
 También se trata como confirmada. Este valor por defecto todavía no tiene

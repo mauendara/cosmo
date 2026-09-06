@@ -23,10 +23,14 @@ Cosmo invoca herramientas reales (shells out). Todas estas deben estar en `PATH`
 | **Docker** | el gate de validación ejecuta cada build y test en contenedores |
 | **CLI de [OpenSpec](https://github.com/Fission-AI/OpenSpec)** (`openspec`) | el flujo propose/apply/archive que Cosmo dirige |
 | **[gitleaks](https://github.com/gitleaks/gitleaks)** | el escaneo de secretos en el pre-commit, y el escaneo de respaldo del propio gate |
-| **Un CLI de harness** — hoy [Claude Code](https://claude.com/claude-code) (`claude`) | el agente que realmente escribe el código |
+| **Una CLI de harness** — por ejemplo [Claude Code](https://claude.com/claude-code) (`claude`) o Codex (`codex`) | el agente que realmente escribe el código |
 
 En Windows, ejecuta todo dentro de WSL2 y mantén el repositorio en el sistema de
 archivos de WSL2, no en `/mnt/c` — consulta [setup-wsl2](how-to/setup-wsl2.md).
+
+Este tutorial usa el harness `claude` por defecto. Para Codex, completa la
+[configuración del harness Codex](how-to/use-codex-harness.md) y añade
+`--harness codex` a los comandos de bootstrap y ejecución.
 
 ## 1. Instalar Cosmo
 

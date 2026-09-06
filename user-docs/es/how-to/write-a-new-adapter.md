@@ -501,6 +501,23 @@ cosmo harness probe --harness mytool --prompt "reply with the word ok"
 cosmo run --repo /tmp/test-project --harness mytool --task some-task
 ```
 
+Ejecuta ese ciclo en un worktree enlazado, no solo en un repositorio fixture.
+Hay dos detalles de integración fáciles de omitir:
+
+- El runner cambia `adapter.cwd` para cada worktree. Si el adaptador compone un
+  objeto invocador separado, sincroniza su directorio al llamar; copiar `cwd`
+  solo en `__init__` hace que las llamadas posteriores se ejecuten en el
+  checkout equivocado.
+- Algunos sandboxes permiten escribir código pero protegen los metadatos Git
+  del worktree enlazado. No concedas acceso irrestricto para compensarlo.
+  Demuestra que el commit normal funciona o usa un commit central,
+  independiente del harness y limitado por rutas, tras una llamada exitosa,
+  como hace la integración Codex.
+
+Una capacidad como `supports_gating` debe permanecer falsa hasta que una
+ejecución hostil real pruebe cada ruta de escritura habilitada y una escritura
+fuera del worktree. Los tests fijan la intención; la CLI real fija la frontera.
+
 ## Lista de verificación
 
 - [ ] `templates/harness/mytool/` escrito, tomando como modelo
@@ -519,3 +536,4 @@ cosmo run --repo /tmp/test-project --harness mytool --task some-task
 - [ ] Se escribe un log en crudo y se devuelve su ruta
 - [ ] Registrado en `registry.py`
 - [ ] La prueba de límite pasa: nada fuera de tu módulo nombra tu binario
+- [ ] El ciclo completo en worktree y los casos hostiles pasan con la CLI real

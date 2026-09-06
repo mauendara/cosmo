@@ -21,10 +21,14 @@ Cosmo shells out to real tools. All of these must be on `PATH`:
 | **Docker** | the validation gate runs every build and test in containers |
 | **[OpenSpec](https://github.com/Fission-AI/OpenSpec) CLI** (`openspec`) | the propose/apply/archive flow Cosmo drives |
 | **[gitleaks](https://github.com/gitleaks/gitleaks)** | the pre-commit secret scan, and the gate's own backstop scan |
-| **A harness CLI** — today [Claude Code](https://claude.com/claude-code) (`claude`) | the agent that actually writes code |
+| **A harness CLI** — for example [Claude Code](https://claude.com/claude-code) (`claude`) or Codex (`codex`) | the agent that actually writes code |
 
 On Windows, run everything inside WSL2 and keep the repo on the WSL2
 filesystem, not `/mnt/c` — see [setup-wsl2](how-to/setup-wsl2.md).
+
+This walkthrough uses the default `claude` harness. To use Codex, complete
+[the Codex harness setup](how-to/use-codex-harness.md) and add `--harness
+codex` to bootstrap and run commands.
 
 ## 1. Install Cosmo
 

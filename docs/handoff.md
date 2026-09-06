@@ -5,11 +5,24 @@ session-by-session narrative (what changed, what was found, how it was
 fixed) has been cut. That history isn't lost — it's in `git log` (every
 commit message explains its own *why*) and in
 [v3-implementation-state.md](v3-implementation-state.md)'s cumulative
-deviations table (the complete bug/fix log, entries 1-89). This file now
+deviations table (the complete bug/fix log, entries 1-90). This file now
 only carries what a session needs to *orient itself* before doing new work,
 not a record of how we got here.
 
 ## Where things stand
+
+- **Codex adapter (2026-09-06): complete through real Phase 5/6 validation.**
+  `codex` is a first-class harness with structured JSONL, explicit audited
+  hooks, isolated personal configuration, saved-login authentication,
+  process-tree cancellation, bilingual docs, and `supports_gating=True` after
+  hostile real-CLI validation. A disposable lifecycle completed propose
+  through merge/archive. Important corrections from the real run: never create
+  `.codex -> .agent/codex` (0.153.0 rejects it as a sandbox mount), rebind a
+  composed invoker's `cwd` per task worktree, and let Cosmo capture successful
+  pending implementation output because Codex cannot write linked-worktree Git
+  metadata. Codex exposes tokens but no authoritative USD/quota signal. See
+  [codex-handoff.md](codex-handoff.md),
+  [codex-phase0-findings.md](codex-phase0-findings.md), and deviation 90.
 
 - **v19 (2026-09-04): `resume_at_stage` gains `VALIDATING`, plus a real
   `wa-chat-chat-shell` block diagnosed and landed by hand instead of a

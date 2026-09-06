@@ -1,6 +1,6 @@
 # Codex adapter Phase 0 findings
 
-Status: in progress; gating remains unsupported
+Status: complete; clean-host Phase 5 closed the gating questions
 Observed CLI: `codex-cli 0.153.0`
 Observed: 2026-09-05 in a disposable Git repository under `/tmp`
 
@@ -62,6 +62,54 @@ were not emitted verbatim by the CLI.
   and the validation gate must remain authoritative.
 - Add a clean-host validation for successful command and patch events and for
   the effective sandbox under the hook-trust flag before revisiting gating.
+
+These were the intentionally conservative Phase 1 decisions. The later
+clean-host results below supersede the temporary `supports_gating = False`
+posture.
+
+## Clean-host closure (2026-09-06)
+
+Phase 5 repeated the contract through the production adapter on Codex 0.153.0:
+
+- A normal call emitted real `command_execution` and successful `file_change`
+  lifecycles, a thread id, terminal usage, and exit 0.
+- The proposed root `.codex -> .agent/codex` link itself caused a sandbox mount
+  rejection. Bootstrap now installs only `.agents/skills` and removes only the
+  exact legacy Cosmo-owned `.codex` link. Explicit hook injection remains the
+  source of policy enforcement.
+- A hostile call produced real hook denials for protected patch and shell
+  edits, forbidden annotations, Git push/reset, detached background work, and
+  a known secret-file read. Codex's workspace sandbox separately rejected a
+  write outside the worktree; the target sentinel never existed.
+- An isolated `CODEX_HOME` containing a deliberately invalid model and unknown
+  strict key still succeeded under `--ignore-user-config` while using the
+  saved-login authentication link. No credential content was read or copied.
+- Cancellation during a command with a SIGTERM-resistant child returned after
+  the configured grace period; a delayed survival marker remained absent.
+- A fresh review left tracked source unchanged and wrote only
+  `.cosmo/review-result.json` with `{"verdict":"approved"}`.
+- A disposable single-task Cosmo run completed proposing, implementing,
+  validating, reviewing, committing, merging, and finishing. `HELLO.md` was
+  merged onto `develop`, the target was clean, and the OpenSpec change was
+  archived and promoted.
+
+The lifecycle found two integration constraints beyond the initial spike.
+Task orchestration changes `adapter.cwd`, so a composed invoker must synchronize
+its own `cwd` at call time. Also, the workspace-write sandbox protects a linked
+worktree's Git metadata even while source files remain writable. Codex is now
+instructed to leave changes unstaged, and harness-agnostic orchestration creates
+a bounded implementation commit after any successful harness call with pending
+output; existing self-committing harnesses take the clean no-op path.
+
+The adversarial gate is therefore closed and the production capability is
+`supports_gating = True`. Hooks remain defense in depth and the validated
+hosted/specialized tool surface stays disabled.
+
+Across 24 completed diagnostic/decisive calls (26 sessions including killed
+calls), the CLI reported 2,006,282 input tokens, 1,572,224 cached input tokens,
+38,004 output tokens, and 9,985 reasoning tokens. It still emitted no
+authoritative USD cost, quota window, or reset event, so native cost reporting
+and primary quota detection remain unsupported rather than estimated.
 
 Official references used for the spike: [Hooks](https://learn.chatgpt.com/docs/hooks),
 [Non-interactive mode](https://learn.chatgpt.com/docs/non-interactive-mode), and

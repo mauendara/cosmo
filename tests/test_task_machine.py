@@ -23,7 +23,12 @@ from cosmo.harness.fake import FakeHarnessAdapter, FakeOutcome, ScriptedCall
 from cosmo.store import StoreWriter
 from cosmo.store.enums import FailureStage, FailureType, TaskStatus
 from cosmo.store.reader import get_task, list_events
-from cosmo.task.machine import _git_commit_decisions_log, _git_commit_uncommitted_specs, run_task
+from cosmo.task.machine import (
+    _git_commit_decisions_log,
+    _git_commit_pending_implementation,
+    _git_commit_uncommitted_specs,
+    run_task,
+)
 from cosmo.task.types import TaskContext
 
 NO_USER_CONFIG = Path("/nonexistent/config.toml")
@@ -629,6 +634,42 @@ def _decisions_log_commit_author(repo: Path) -> str:
         check=True,
     )
     return log.stdout.strip()
+
+
+def test_commit_pending_implementation_captures_output_but_not_managed_assets(
+    tmp_path: Path,
+) -> None:
+    repo = _repo_on_develop(tmp_path)
+    (repo / ".agent" / "codex").mkdir(parents=True)
+    (repo / ".agent" / "codex" / "CODEX.md").write_text("managed\n")
+    (repo / ".agents").mkdir()
+    (repo / ".agents" / "skills").symlink_to("../.agent/codex/skills")
+    (repo / ".cosmo").mkdir()
+    (repo / ".cosmo" / "review-result.json").write_text('{"verdict":"approved"}\n')
+    (repo / "HELLO.md").write_text("Hello\n")
+    cfg = _fast_config(tmp_path)
+
+    _git_commit_pending_implementation(repo, "add-hello", cfg)
+
+    assert _git(repo, "show", "--format=", "--name-only", "HEAD").stdout.strip() == "HELLO.md"
+    assert _git(repo, "log", "-1", "--format=%s").stdout.strip() == (
+        "cosmo: capture add-hello implementation"
+    )
+    status = _git(repo, "status", "--short").stdout
+    assert "?? .agent/" in status
+    assert "?? .agents/" in status
+    assert "?? .cosmo/" in status
+
+
+def test_commit_pending_implementation_is_noop_when_harness_already_committed(
+    tmp_path: Path,
+) -> None:
+    repo = _repo_on_develop(tmp_path)
+    before = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    _git_commit_pending_implementation(repo, "already-done", _fast_config(tmp_path))
+
+    assert _git(repo, "rev-parse", "HEAD").stdout.strip() == before
 
 
 def test_git_commit_decisions_log_uses_cosmo_identity_by_default(tmp_path: Path) -> None:

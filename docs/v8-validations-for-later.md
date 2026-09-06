@@ -65,6 +65,23 @@ pointer from `docs/handoff.md` once nothing here is still open.
   5-hour quota exhaustion window to test against — real spend, real
   waiting, not something to force casually.
 
+- **Codex harness Phase 5 validations — RESOLVED on 2026-09-06.** The exact
+  production adapter captured successful command/file-change events and a
+  session id; hostile calls denied protected patch/shell edits, forbidden
+  annotations, Git push/reset, background work, review source writes, and a
+  known secret read. The workspace sandbox independently denied an
+  out-of-worktree sentinel write. `--ignore-user-config` ignored a malicious
+  personal config while preserving saved login, cancellation reaped a
+  SIGTERM-resistant descendant, and fresh review wrote only an approved
+  canonical verdict. A disposable single-task run completed propose through
+  merge/archive and left the target clean. Corrections from the real run:
+  remove the sandbox-incompatible `.codex` symlink, rebind a composed invoker's
+  `cwd`, parse read-only `sed` options precisely, and let core capture pending
+  implementation output because Codex cannot write linked-worktree Git
+  metadata. `supports_gating=True`; native USD cost and quota signals remain
+  unsupported. Full evidence: [Codex Phase 0 findings](codex-phase0-findings.md)
+  and [Codex handoff](codex-handoff.md).
+
 - **`ori-claude` harness Phase 6 validations (V1-V6) — RESOLVED, all run for
   real 2026-09-02**, from
   [v13-ori-cc-harness-template-plan.md](v13-ori-cc-harness-template-plan.md).

@@ -96,6 +96,12 @@ invocation: OpenRouter emits no Anthropic-shaped rate-limit event.
 detectors below; this is spec 7.2's documented fallback for a harness with
 no primary signal, not a gap specific to this adapter.
 
+Codex has the same fallback posture for a different reason. Its validated
+JSONL stream exposes token usage but no authoritative quota window, reset
+time, or USD cost. The Codex adapter therefore reports neither native quota
+nor native cost. Subscription limits must be managed in the Codex account,
+and Cosmo's USD ceilings cannot stop a Codex run from native spend data.
+
 **2. Secondary — the terminal result's error subtype**, matched against
 `quota.result_error_subtypes` (default `["error_rate_limit"]`). Also treated
 as confirmed. This default has no verified capture behind it yet — it is

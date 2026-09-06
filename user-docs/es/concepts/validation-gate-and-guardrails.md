@@ -147,6 +147,15 @@ capa. Usan coincidencia de expresiones regulares, no un análisis consciente
 de shell, y la evasión adversarial queda fuera de alcance para algo
 presupuestado en menos de dos segundos.
 
+Los hooks de Codex entienden los payloads de `apply_patch` y comandos de
+Codex. Pruebas adversariales reales con 0.153.0 confirmaron el bloqueo de
+cambios en tests protegidos, anotaciones prohibidas, Git destructivo y push,
+trabajo desprendido, escrituras de código durante review y lecturas de
+secretos conocidos. El sandbox también rechazó una escritura fuera del
+worktree, por lo que este perfil declara `supports_gating: true`. Los hooks
+siguen siendo defensa en profundidad: no habilites herramientas alojadas ni
+un bypass irrestricto sin revalidar toda la superficie de mutación.
+
 ## Capa 2: detección — el diff gate
 
 No todo harness puede bloquear una llamada a herramienta antes de que se

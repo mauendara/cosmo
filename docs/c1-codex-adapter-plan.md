@@ -1,6 +1,6 @@
 # C1 — Codex harness adapter and template plan
 
-Status: Phase 0 in progress; see `docs/codex-phase0-findings.md`
+Status: Complete — Phases 0-6 validated on 2026-09-06
 Target branch: `codex-adapter`
 Target worktree: `/home/dev/delta/codex-adapter`
 
@@ -152,12 +152,15 @@ templates/harness/codex/
 ```
 
 Bootstrap should synchronize this directory to `.agent/codex`. It should then
-expose the parts Codex discovers through safe symlinks:
+expose Codex-discoverable skills through a safe symlink:
 
 ```text
-.codex         -> .agent/codex
 .agents/skills -> ../.agent/codex/skills
 ```
+
+The proposed `.codex -> .agent/codex` link was removed after a real 0.153.0
+workspace-write invocation rejected it as an unsafe sandbox mount. Explicit
+hook injection already exposes the audited hooks, so the link is unnecessary.
 
 Nested parent creation must be handled explicitly. Existing real files,
 directories, or non-Cosmo symlinks must never be overwritten.
@@ -264,35 +267,51 @@ Do not proceed with a claimed gating capability until these are resolved.
 
 ### Phase 1 — Parser and invoker
 
-- Add recorded JSONL fixtures and parser tests first.
-- Implement incremental classification and activity descriptions.
-- Build deterministic argv and environment construction.
-- Integrate `ManagedProcess`, raw logs, cancellation, and result mapping.
-- Add a fake Codex executable for success, failure, malformed output, hangs,
+- [x] Add recorded JSONL fixtures and parser tests first.
+- [x] Implement incremental classification and activity descriptions.
+- [x] Build deterministic argv and environment construction.
+- [x] Integrate `ManagedProcess`, separate stdout/stderr raw logs, cancellation,
+  and result mapping.
+- [x] Add a fake Codex executable for success, failure, malformed output, hangs,
   and grandchildren.
+
+Completed 2026-09-05. `./check.sh` passed with 701 tests passing and 9 skipped.
+No authenticated model turn was used; the installed 0.153.0 CLI accepted the
+inline config/hook shape through a no-model-call config parse.
 
 ### Phase 2 — Adapter and registry
 
-- Implement propose, implement, review, preflight, progress, and cancel.
-- Add exact role prompt construction and retry-context tests.
-- Register `codex` and extend boundary allowlists only where required.
-- Keep preflight cheap and side-effect-free: binary presence, supported config,
+- [x] Implement propose, implement, review, preflight, progress, and cancel.
+- [x] Add exact role prompt construction and retry-context tests.
+- [x] Register `codex` and extend boundary allowlists only where required.
+- [x] Keep preflight cheap and side-effect-free: binary presence, supported config,
   and unsafe billing-variable checks only. Authentication belongs in probe.
+
+Completed 2026-09-05. `./check.sh` passed outside the nested sandbox with 714
+tests passing and 9 skipped. The same run inside the sandbox passed lint,
+format, mypy, and 708 tests but could not run six pre-existing socket tests
+because socket creation is prohibited there.
 
 ### Phase 3 — Template and bootstrap
 
-- Add `CODEX.md`, hooks, and Codex-discoverable skills.
-- Add safe `.codex` and `.agents/skills` symlink support.
-- Add bootstrap, resynchronization, collision, and idempotency tests.
-- Verify every hook/config reference resolves inside `.agent/codex`.
+- [x] Add `CODEX.md`, hooks, and Codex-discoverable skills.
+- [x] Add safe `.agents/skills` symlink support and remove an incompatible
+  legacy Cosmo-owned `.codex` link on re-bootstrap.
+- [x] Add bootstrap, resynchronization, collision, and idempotency tests.
+- [x] Verify every hook/config reference resolves inside `.agent/codex`.
+
+Completed 2026-09-05. The nested `.agents/skills` link uses a real `.agents`
+parent and refuses to traverse a user-owned symlink; root discovery links are
+relative, idempotent, and refresh only when their existing target is exactly
+the one Cosmo owns.
 
 ### Phase 4 — Guardrail and integration tests
 
-Add at least:
+Added:
 
 - `tests/test_harness_codex_stream.py`
 - `tests/test_harness_codex_adapter.py`
-- `tests/test_hooks_codex_*.py`
+- `tests/test_hooks_codex.py`
 - `tests/fixtures/fake_codex.sh`
 
 Also extend registry, CLI listing/wizard, bootstrap, symlink, boundary, and
@@ -309,6 +328,15 @@ template tests. Cover:
 - Review mutations outside the verdict file.
 - Cancellation with no surviving descendants.
 - Raw stdout/stderr preservation.
+
+Completed 2026-09-05. Codex-specific hooks parse every `apply_patch` file
+header and added line, inspect shell mutations, deny destructive Git and
+background operations, protect secret paths, and enforce review-only verdict
+writes. `supports_gating` remained `False` until the Phase 5 clean-host
+adversarial validation passed.
+
+`./check.sh` passed: Ruff check and formatting clean, mypy clean across 178
+source files, and 741 tests passed with 9 skipped.
 
 ### Phase 5 — Mandatory real validation
 
@@ -328,6 +356,21 @@ Verify afterward that no real queue, repository, credential file, or unrelated
 worktree was changed. Only then decide whether `supports_gating` can become
 `True`.
 
+Completed 2026-09-06. Exact adapter calls captured real command and file-change
+events, isolated malicious personal configuration while retaining saved auth,
+reaped a SIGTERM-resistant descendant, produced a fresh canonical review
+verdict without changing source, and denied every listed hostile operation.
+The workspace sandbox rejected an out-of-worktree write. A full disposable
+single-task lifecycle reached `DONE`, merged `HELLO.md`, and archived/promoted
+the OpenSpec change. The runs also found and corrected the incompatible
+`.codex` link, stale composed-invoker `cwd`, an overbroad read-only `sed`
+classifier, and linked-worktree Git metadata protection. Cosmo now creates a
+bounded implementation commit after a successful call when the harness leaves
+pending source changes. `supports_gating` is `True` for the validated profile.
+Across all diagnostic and decisive calls, Codex reported 2,006,282 input tokens
+(1,572,224 cached), 38,004 output tokens, and 9,985 reasoning tokens, with no
+authoritative USD cost or quota event.
+
 ### Phase 6 — Documentation and release evidence
 
 Update the English and Spanish user documentation for:
@@ -343,6 +386,13 @@ Update the English and Spanish user documentation for:
 Record the implementation in `docs/v3-implementation-state.md` using the next
 available deviation number, and update validation tracking documents in place.
 Run `./check.sh` and record the exact test result before declaring completion.
+
+Completed 2026-09-06. English and Spanish documentation now covers every item
+above. Release evidence is recorded in the Codex handoff, Phase 0 findings,
+deviation 90, and the deferred-validation tracker. Final verification:
+`./check.sh` exited 0 on 2026-09-06; Ruff and formatting passed, mypy found no
+issues in 178 source files, and pytest reported 755 passed and 9 skipped in
+90.66 seconds.
 
 ## Acceptance criteria
 

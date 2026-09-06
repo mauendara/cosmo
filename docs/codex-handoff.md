@@ -1,7 +1,7 @@
 # Codex adapter worktree handoff
 
-Last updated: 2026-09-05
-Status: Phase 0 contract spike in progress; production implementation has not started
+Last updated: 2026-09-06
+Status: Complete — Phases 0-6 and real lifecycle validation passed
 
 ## Mandatory operating directives
 
@@ -39,12 +39,15 @@ to the original checkout.
 - Base commit when the worktree was created: `2933ea1`
 - The original `/home/dev/delta/cosmo` checkout was on branch `private` and is
   reserved for another agent.
-- No production Codex adapter implementation has been made.
+- The production parser, invocation mechanics, adapter, template, bootstrap,
+  guardrails, public documentation, and release evidence are complete;
+  `codex` is registered and visible through the existing harness-agnostic CLI
+  surfaces.
 - The implementation plan is `docs/c1-codex-adapter-plan.md`.
 - Phase 0 findings are recorded in `docs/codex-phase0-findings.md`.
 - Sanitized and deliberately derived JSONL fixtures are under
   `tests/fixtures/codex_jsonl/`.
-- The Phase 0 work was checked with `./check.sh`: 671 passed and 9 skipped.
+- The Phase 2 work was checked with `./check.sh`: 714 passed and 9 skipped.
 - Never push, including after tests pass or commits are created.
 
 Read the repository's main `docs/handoff.md` as historical context, but treat
@@ -106,8 +109,8 @@ Important findings:
   exists.
 - Start with `supports_gating=False`; enable it only after real adversarial
   validation proves the bounded tool surface and hooks.
-- Install the template at `.agent/codex` and expose `.codex` plus
-  `.agents/skills` through collision-safe symlinks.
+- Install the template at `.agent/codex` and expose `.agents/skills` through a
+  collision-safe symlink. Do not recreate the incompatible `.codex` symlink.
 - Never overwrite the user's root `AGENTS.md`. Inject a short developer
   instruction that points Codex at `.agent/codex/CODEX.md`.
 - Adapt hooks to Codex's `apply_patch` and Bash payloads rather than copying the
@@ -143,29 +146,100 @@ The disposable repositories and temporary authentication symlink were removed.
 No Cosmo command, queue, database, credential file, target repository, or
 unrelated worktree was modified.
 
-## Next implementation task
+## Phase 1 completed
 
-Finish the two Phase 0 observations this host could not prove, then begin Phase
-1 parser tests and implementation:
+- `stream.py` incrementally parses arbitrary byte chunks, tolerates malformed
+  and truncated records, captures the thread and terminal state, deduplicates
+  tool item lifecycles by item id, and describes activity only from structured
+  command/path fields.
+- `CodexInvoker` constructs a deterministic `codex exec --json` invocation
+  with workspace-write sandboxing, non-interactive approvals, personal-config
+  isolation, disabled hosted/agent features, explicit audited hook injection,
+  and the unrestricted approval-and-sandbox bypass structurally absent.
+- The child environment preserves `CODEX_HOME`, scrubs `CODEX_API_KEY`, and
+  supplies the task, database, and role variables hooks need.
+- `ManagedProcess` now optionally preserves stderr in a separate sidecar. Codex
+  stdout stays at the `HarnessResult.raw_log_path` (`*.ndjson`) and hook/error
+  stderr is retained beside it as `*.stderr`; existing callers retain their
+  prior combined-log behavior when they do not request a sidecar.
+- The fake Codex executable covers success, nonzero exits, malformed output,
+  stderr retention, hangs, and a SIGTERM-ignoring descendant. No real Codex
+  model call was made during Phase 1.
+- The installed `codex-cli 0.153.0` accepted the selected feature toggles and
+  inline `hooks.PreToolUse` TOML in a no-model-call config parse.
 
-1. On a clean host that is not already inside a Codex sandbox, capture a
-   successful command event and a successful `apply_patch` event under the
-   exact workspace-write policy.
-2. Adversarially verify that `--dangerously-bypass-hook-trust` plus explicit
-   audited hook injection does not weaken the effective execution sandbox,
-   despite the observed hook payload value.
-3. Add parser tests around `tests/fixtures/codex_jsonl/`, including arbitrary
-   byte chunking, malformed lines, and a truncated final line.
-4. Implement deterministic argv/environment construction using
-   `--ignore-user-config` and explicit audited hook injection. Do not rely on
-   project hook discovery.
-5. Keep `supports_gating=False` until the clean-host adversarial gate passes.
+## Phase 2 completed
 
-The current session itself is nested inside a Codex sandbox. Its bubblewrap
-registry is mounted read-only, and the deprecated Landlock fallback also
-failed writes. Do not work around this with the forbidden unrestricted
-approval-and-sandbox bypass. See `docs/codex-phase0-findings.md` for commands,
-event shapes, spend accounting, and the exact limitation.
+- `CodexAdapter` declares the conservative initial capability set, including
+  `supports_gating=False` and `reports_native_cost=False`.
+- Cheap preflight checks only the executable, rejects `CODEX_API_KEY`, and
+  fails closed for permission modes other than the explicitly mapped
+  non-interactive `dontAsk` mode. It performs no authentication or model call.
+- Probe, propose, implement, and review resolve the correct role models and
+  delegate to one fresh invoker call with an explicit role environment value.
+- Propose pins the exact OpenSpec change id; implement always inspects existing
+  worktree state and appends retry evidence; the review prompt authorizes only
+  the canonical absolute verdict path and never resumes an implementation
+  session. Phase 3 supplies the enforcement hook behind that instruction.
+- Progress uses the existing core `tasks.md` fallback and cancellation delegates
+  to the invoker's process-group lifecycle implementation.
+- Registry, CLI listing, and architectural boundary tests cover `codex` without
+  adding harness-specific branches to core orchestration.
+- `./check.sh` passed outside the nested sandbox: ruff and formatting clean,
+  mypy clean across 177 source files, and 714 tests passed with 9 skipped. The
+  sandboxed run passed 708 tests but its six pre-existing socket-dependent tests
+  could not create sockets; the unrestricted-socket rerun passed all of them.
+
+## Phases 3 and 4 completed
+
+- `templates/harness/codex/` contains `CODEX.md`, a documented hook set, six
+  audited hook scripts plus their shared library, and Codex-discoverable
+  OpenSpec/spec-enrichment skills.
+- Bootstrap exposes `.agents/skills -> ../.agent/codex/skills` with a relative
+  link. It creates a real nested `.agents` parent, preserves real-path
+  collisions, does not replace non-Cosmo symlinks, and never traverses a
+  symlinked parent. Phase 5 removed the earlier `.codex` link after the real
+  sandbox rejected it.
+- Codex hooks parse all affected `apply_patch` headers, examine only added
+  patch lines for forbidden annotations, and cover shell mutations of protected
+  tests, destructive Git operations, detached work, review writes, and secret
+  reads.
+- Review mode permits repository reads and only the canonical root verdict
+  write. Guardrails remain defense in depth; Phase 5's clean-host adversarial
+  validation subsequently justified `supports_gating=True`.
+- `./check.sh` passed outside the nested sandbox: Ruff and formatting clean,
+  mypy clean across 178 source files, and 741 tests passed with 9 skipped.
+
+## Phases 5 and 6 completed
+
+Real validation on 2026-09-06 exercised the exact adapter, successful command
+and patch events, every hostile guardrail, malicious personal configuration,
+process-tree cancellation, fresh review isolation, and one complete disposable
+Cosmo lifecycle. The hostile run proved both hook denials and independent
+workspace-write containment, so `supports_gating=True` is now honest for the
+validated tool profile.
+
+The real runs corrected four assumptions: `.codex -> .agent/codex` is rejected
+by the 0.153.0 sandbox and is no longer bootstrapped; a composed invoker must
+rebind its `cwd` when orchestration changes the adapter's worktree; read-only
+`sed` parsing must inspect option tokens rather than match arbitrary letters;
+and Codex cannot write linked-worktree Git metadata. After a successful
+implementation, Cosmo now commits pending source output itself while excluding
+managed `.agent`, `.agents`, and `.cosmo` paths. This remains a no-op for
+self-committing harnesses.
+
+The decisive lifecycle reached every state through `DONE`, merged the exact
+`Hello from Codex.` file, left `develop` clean, and archived/promoted the
+OpenSpec change. English and Spanish user docs cover selection, saved-login
+authentication, per-harness model configuration, the unsupported API-billed
+mode, token-only accounting, quota degradation, guardrails, and authoring
+lessons. Detailed evidence is in `docs/codex-phase0-findings.md` and
+`docs/v8-validations-for-later.md`.
+
+No implementation task remains. Run `./check.sh` after any further change and
+never push this branch. Final verification on 2026-09-06: `./check.sh` exited
+0; Ruff and formatting passed, mypy found no issues in 178 source files, and
+pytest reported 755 passed and 9 skipped in 90.66 seconds.
 
 ## Expected implementation areas
 
@@ -198,6 +272,12 @@ propose-to-finish Cosmo lifecycle in a disposable repository.
 
 At completion, run `./check.sh` and record its exact result in the appropriate
 state document. Do not push the branch.
+
+Phase 1 verification: `./check.sh` exited 0 on 2026-09-05. Ruff check and
+format check passed, mypy found no issues in 175 source files, and pytest
+reported 701 passed and 9 skipped in 80.77 seconds. The sandboxed attempt could
+not bind sockets used by unrelated existing tests; the approved full test run
+outside that socket restriction passed.
 
 ## Repository context at planning time
 
