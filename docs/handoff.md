@@ -5,7 +5,7 @@ session-by-session narrative (what changed, what was found, how it was
 fixed) has been cut. That history isn't lost — it's in `git log` (every
 commit message explains its own *why*) and in
 [v3-implementation-state.md](v3-implementation-state.md)'s cumulative
-deviations table (the complete bug/fix log, entries 1-90). This file now
+deviations table (the complete bug/fix log, entries 1-89). This file now
 only carries what a session needs to *orient itself* before doing new work,
 not a record of how we got here.
 
@@ -24,6 +24,118 @@ not a record of how we got here.
   [codex-handoff.md](codex-handoff.md),
   [codex-phase0-findings.md](codex-phase0-findings.md), and deviation 90.
 
+- **v21 (2026-09-06): full audit of every real Cosmo run against
+  `wa-chat-component`'s 24-task DAG, plus a decided plan for the nine gaps it
+  surfaced -- no Cosmo source changed this session.** Queried the real store
+  directly (`task_queue`/`task_failures`/`task_transitions`/`task_cost` in
+  `~/.local/share/cosmo/cosmo.db`) rather than relying on this file's own
+  narrative alone, cross-checked against the v16-v20 entries below. Real
+  numbers: 71 failure/block records across the 24 tasks (all eventually
+  `done`) and 27 run sessions, $231.40 total metered spend, 17 terminal
+  blocks on 8 of the 24 tasks, and `error_max_turns` alone accounting for 25
+  of the 71 failures (35% -- the single largest cause). 3 tasks
+  (`wa-chat-text-bubbles`, `wa-chat-chat-shell`, `wa-chat-storybook-vr`) only
+  reached `done` via 7 hand-run `resume_at_stage` store-surgery
+  interventions total, confirming those aren't one-off incidents but a
+  recurring pattern worth a real CLI surface (see G6 below). Findings were
+  published as a postmortem report (incident log + per-task ledger + charts,
+  not committed to this repo -- an Artifact, shared with the user directly)
+  and then turned into nine concrete gaps (G1-G9), four of which (G1
+  adaptive turn/time budgets, G2 diff-only review by default with a longer
+  budget only for tasks needing live/visual verification, G4 a structural
+  allow-list for test-file edits instead of a human-approval queue, G7
+  flagging a same-task repeat review rejection without trying to
+  signature-match *why* it repeated) had a real design decision made
+  directly by the user rather than assumed. G9 (the review-verdict cwd-drift
+  bug) was already fixed in v17, kept only for numbering completeness. Full
+  writeup, with file:line evidence gathered from the real code for every
+  item, is [v15-fixes-after-wa-chat-run.md](v15-fixes-after-wa-chat-run.md)
+  -- **plan only, nothing implemented yet**. `./check.sh` untouched, still
+  **671 tests passing, 9 skipped**, since no source changed.
+- **v20 (2026-09-05/06): `wa-chat-storybook-vr` and `wa-chat-publish-pipeline`
+  landed for real, closing out the `wa-chat-component` DAG (all 24 tasks
+  `done`) -- but getting there surfaced two real, unfixed Cosmo gaps and one
+  real host-hygiene issue, none of which are code-fixed yet.**
+  - **Gap 1 (unfixed): the gitleaks backstop scans gitignored/untracked build
+    artifacts and false-flags minified vendor JS.** `git/secrets.py`'s
+    `run_gitleaks_scan` deliberately scans the worktree's raw filesystem
+    contents (`--no-git`, by its own docstring's design: "does the final
+    state of this task's work contain a secret," not just the diff) --
+    reasonable in principle, but it doesn't exclude `.gitignore`d paths.
+    `wa-chat-storybook-vr` left a leftover `frontend/storybook-static/`
+    (gitignored per its own task spec 1.4, never committed, regenerable)
+    sitting in the worktree from an earlier `IMPLEMENTING` session's own
+    manual verification; gitleaks' `generic-api-key` rule matched pure noise
+    in Storybook's bundled React internals (`o=e.childrens`, no actual
+    secret) and blocked a fully-correct, fully-tested task on nothing. Real
+    fix: filter gitignored paths (or at minimum known build-output dirs)
+    out of the scan before invoking gitleaks -- confirmed by hand (`rm -rf`
+    the artifact, re-ran `VALIDATING`, gitleaks came back clean).
+  - **Gap 2 (unfixed): `REVIEWING`/`adversarial_review` can time out on a
+    verification-heavy task without ever producing a verdict, forcing a
+    wasteful `IMPLEMENTING` retry on already-correct code.** Same failure
+    *shape* as deviation area v17 (a real, well-done implementation loses
+    its verdict and pays for a needless re-`IMPLEMENTING`), different root
+    cause: v17 was a stray-file-path bug; this is a genuine timeout. Twice
+    on `wa-chat-storybook-vr`, the review session chose to manually spin up
+    a preview/Storybook server and replay the *entire* Playwright VR suite
+    itself (screenshot-by-screenshot) rather than just reading the diff --
+    legitimate due diligence, but slow enough that the call ran out of time
+    before writing `.cosmo/review-result.json` at all. `task.machine`
+    correctly treats a review timeout as retryable, but the retry lands back
+    at `IMPLEMENTING`, which then burned ~20 more minutes re-running
+    build/lint/test on code that had nothing wrong with it. No code fix
+    attempted this session -- worth a real fix (e.g. a shorter, diff-only
+    review mode for tasks whose spec doesn't require live-server
+    verification, or a separate, longer time budget specifically for
+    `adversarial_review`) before this recurs on the next VR/visual-harness
+    task.
+  - **Host-hygiene issue (not a Cosmo bug, but a real gap in when Cosmo's
+    own cleanup machinery fires): orphaned host-level dev-servers survive
+    past their session.** Found 12 stray `node .../vite preview`/
+    `http-server` processes accumulated across several past tasks (some from
+    `wa-chat-reply-quote-link-preview`/`wa-chat-playground-app`/
+    `wa-chat-e2e-suite`, already `done` days earlier), all started via a
+    harness session's own backgrounded `Bash` calls (`npm run preview -- &`,
+    `npx http-server & `) and never reaped -- contributing to a real load
+    average of ~17-18 that plausibly caused the flaky vitest timeouts behind
+    Gap 2's first occurrence (a cascading "Axe is already running" failure
+    across `Chat.test.tsx`, plus an unrelated `events.webhook.test.ts`
+    timeout). Cosmo already has the right machinery for this --
+    `proc/reap.py`'s `cancel_and_reap()` ties `ManagedProcess.cancel()`
+    (`killpg` on the session's whole process group) to `proc/orphans.py`'s
+    `sweep()`/`find_worktree_holders()` (a backstop for anything that
+    escaped the group but still holds the worktree path open via its cwd --
+    exactly what a `vite preview` process does) -- but it appears only wired
+    to genuine forced-cancellation paths (an operator cancel, the cost guard
+    tripping), not to ordinary-but-unsuccessful endings like
+    `error_max_turns`/`timeout`, which is what actually happened here twice.
+    Killed all 12 by hand (confirmed each one's cwd pointed at a stale/
+    finished task's worktree first); load dropped from 6.33 to 1.42
+    immediately after. Worth confirming whether `cancel_and_reap` really is
+    scoped to forced-cancellation only, and if so, calling it (or at least
+    the `sweep()` half) unconditionally whenever a harness session ends.
+  - **How the two tasks actually landed, despite both gaps**: manual
+    `resume_at_stage` intervention, the same mechanism v19 built --
+    `wa-chat-storybook-vr` needed three hand-set resumes this time
+    (`VALIDATING` after cleaning the stray gitignored artifact still hit
+    Gap 2's review timeout once more; the eventual unblock was a human
+    judgment call to `resume_at_stage='committing'`, skipping automated
+    `REVIEWING` entirely after independently re-verifying everything a
+    review would check -- diff read, `npm test`/`build`/`build-storybook`
+    run by hand, checklist cross-referenced 31/31 -- since the review had
+    twice explored thoroughly without ever finding an actual defect, only
+    running out of time). `wa-chat-publish-pipeline` then ran clean end to
+    end on its own once queued behind it: one real, legitimate `REVIEWING`
+    rejection along the way (missing bundled font/icon license files in
+    `dist/`), fixed in the retry, approved on the second pass, merged.
+    Total for the final unblocking run: 2 completed, 0 blocked, $6.79,
+    47.8 min.
+  - No cosmo source changed this session -- everything above is either
+    hand-run store surgery (`writer.queue_resume_at`, no CLI flag yet for
+    `VALIDATING`/`COMMITTING` beyond what `queue_retry` already auto-picks)
+    or host cleanup, not a code deviation. `./check.sh` still exits 0,
+    **671 tests passing, 9 skipped** -- unchanged from v19.
 - **v19 (2026-09-04): `resume_at_stage` gains `VALIDATING`, plus a real
   `wa-chat-chat-shell` block diagnosed and landed by hand instead of a
   blind retry.** Direct follow-on to v17/v18 in the same investigation:
@@ -535,6 +647,7 @@ not a record of how we got here.
 | [v12-ori-opencode-harness-info.md](v12-ori-opencode-harness-info.md) | Research findings on Ori Harness (`ori claude`, real Claude Code through OpenRouter) and OpenCode as possible new harness adapters | **Findings only, not a plan or a `HarnessCapabilities` proposal.** Nothing implemented. Both have real, confirmed-working headless gating, unlike Cline — read this before choosing which harness to build next |
 | [v13-ori-cc-harness-template-plan.md](v13-ori-cc-harness-template-plan.md) | The build plan for `ori-claude` as a second harness adapter and template, alongside native `claude` | **Done — Phases 1-6 all complete**, including Phase 6's real-invocation validations (V2, the gating one, confirmed passing) and the public-docs commit. See this handoff's own bullet above and [v8-validations-for-later.md](v8-validations-for-later.md). Nothing left open. Its four design decisions were chosen by the user, not derived — don't relitigate them if extending it (e.g. a third adapter) |
 | [v14-cosmo-branch-isolation-plan.md](v14-cosmo-branch-isolation-plan.md) | Optional `cosmo_branch` base-branch mode: `cosmo init` forks an isolated branch off the real base branch so templates/harness scaffolding never lands on `develop`/`main` | **Done — implemented and tested**, see `v3-implementation-state.md` deviation 88 for the full account (including two real unborn-HEAD gaps this design doc didn't anticipate, and two of its `cli/main.py` assumptions that didn't match the real code). Nothing left open |
+| [v15-fixes-after-wa-chat-run.md](v15-fixes-after-wa-chat-run.md) | Nine gaps (G1-G9) found auditing the real `wa-chat-component` run history: adaptive turn/time budgets, diff-only review by default, orphaned-process reaping, a structural allow-list for test-file edits, gitleaks scanning gitignored paths, missing resume-stage CLI flags, repeat-review-rejection detection, and hard provider-budget errors retried like transient blips | **Plan only — nothing implemented.** G1/G2/G4/G7 already carry a user-made design decision in their own section; G3/G5/G6/G8 have no open question and are ready to build; G9 is already fixed (v17), kept only for numbering completeness |
 
 Internal `vN` documents above are **not** the user-facing ones. Public docs
 live in `README.md`, `user-docs/`, and the four root docs — written for a
