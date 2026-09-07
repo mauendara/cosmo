@@ -51,6 +51,10 @@ validating_stall = 600
 # v4 workflow changes: REVIEWING's own wall clock -- one bounded fresh-session
 # harness call, anchored to the same rough order of magnitude as proposing_wall.
 reviewing_wall = 900
+# G2: applied instead of reviewing_wall only when review.live_verification_keywords
+# matches the task's own spec content -- a review expected to replay a visual/e2e
+# suite live needs more than the diff-only default.
+reviewing_wall_live = 2700
 committing_wall = 300
 merging_wall = 300
 run_wall = 36000
@@ -66,6 +70,11 @@ delay_max = 60
 # terminal block matches this many *prior* terminal blocks for the same
 # reason -- see RetryConfig.repeat_block_threshold's own comment.
 repeat_block_threshold = 2
+# G1: adaptive IMPLEMENTING turn/wall-clock budget on repeated
+# max_turns_exhausted for the same task -- see RetryConfig's own comments.
+# Starting points to observe and retune, not conclusions reached from data.
+turn_budget_growth_factor = 1.5
+turn_budget_max_multiplier = 3.0
 
 [circuit_breaker]
 # Spec 6.5. merge_conflict and flaky are excluded from the tally.
@@ -131,6 +140,10 @@ max_file_lines = 400
 # and COMMITTING. A project can turn this off; the retry budget it uses is
 # retries.max_attempts, not a separate ceiling.
 enabled = true
+# G2: a case-insensitive substring match against the task's own spec/tasks.md
+# content selects timeouts.reviewing_wall_live over the diff-only default and
+# tells the reviewer a live check is expected for this task.
+live_verification_keywords = ["storybook", "visual regression", "playwright"]
 
 [progress]
 # Spec 4: "polling fallback at 5-10s". Also used as the native-progress poll

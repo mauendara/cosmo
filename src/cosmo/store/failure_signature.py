@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
     from cosmo.store.reader import TaskFailureRow
 
@@ -56,6 +56,26 @@ _SIGNATURES: tuple[tuple[str, tuple[str, ...]], ...] = (
     # that attempt) -- the real fix is pinning an exact version in the
     # target repo's own docs, not chasing this from Cosmo's config.
     ("playwright_image_version_mismatch", ("Please update docker image as well",)),
+    # G8 (docs/v15-fixes-after-wa-chat-run.md): a hard, un-retriable
+    # provider budget/key ceiling -- structurally identical to a transient
+    # environment_error otherwise, except retrying cannot fix it. Two real
+    # verbatim phrasings seen in the same run's own `task_failures` history:
+    # OpenRouter's `403 Key limit exceeded (total limit)`
+    # (`wa-chat-interactive-buttons-cta` attempt 3) and native Claude's own
+    # monthly-spend-limit message (`wa-chat-template-resolver`). Two entries
+    # rather than one -- `classify_failure_signature` ANDs every needle in a
+    # single tuple together, and these are alternative phrasings, not
+    # co-occurring substrings of the same message.
+    ("provider_budget_exceeded", ("Key limit exceeded",)),
+    ("provider_budget_exceeded", ("You've hit your monthly spend limit",)),
+    # G1 (docs/v15-fixes-after-wa-chat-run.md): the Claude CLI's own
+    # terminal-result `subtype` when a session exhausts its turn budget with
+    # no `result` text to report instead (`_summarize` in
+    # `harness.claude.invoker` falls back to the bare subtype in that
+    # case) -- verbatim, not a Cosmo-invented label. `task.machine.
+    # _do_implementing` counts consecutive occurrences of this signature to
+    # drive G1's adaptive turn/wall-clock budget.
+    ("max_turns_exhausted", ("error_max_turns",)),
 )
 
 
@@ -99,13 +119,18 @@ class RepeatBlock:
 
 
 def detect_repeat_block(
-    failures: Sequence[TaskFailureRow], *, threshold: int
+    failures: Sequence[TaskFailureRow],
+    *,
+    threshold: int,
+    require_block: bool = True,
+    key_fn: Callable[[TaskFailureRow], str] | None = None,
 ) -> RepeatBlock | None:
-    """Has this task's most recent terminal block (`next_action == "block"`)
-    already happened, for the same underlying reason, at least `threshold`
-    times before across this task's *entire* history -- not just the
-    current run's own retry budget, which `queue retry` resets to 0 every
-    time regardless of why the task blocked.
+    """Has this task's most recent failure -- a terminal block
+    (`next_action == "block"`) by default, or any failure at all when
+    `require_block=False` -- already happened, for the same underlying
+    reason, at least `threshold` times before across this task's *entire*
+    history -- not just the current run's own retry budget, which `queue
+    retry` resets to 0 every time regardless of why the task blocked.
 
     `failures` should be every `task_failures` row for one task, across
     every run it has ever been part of (`store.reader.list_task_failures`
@@ -114,18 +139,29 @@ def detect_repeat_block(
     separate overnight runs, and will happily hand it 3 more attempts to
     fail the 4th time the same way.
 
-    Returns `None` when there's no block history yet, or when the most
-    recent block's class key hasn't recurred `threshold` times among prior
-    blocks (i.e. this would still be at or under the budget of repeats
-    considered normal retry noise)."""
-    blocks = [f for f in failures if f.next_action == "block"]
-    if not blocks:
+    `require_block=False` is the shared building block G1/G7/G8 (see
+    `docs/v15-fixes-after-wa-chat-run.md`) each reuse with their own
+    `key_fn` and `threshold` -- e.g. G7 flags any 2nd+ consecutive
+    `adversarial_review` rejection regardless of `next_action`, which never
+    reaches `next_action == "block"` at all since it retries automatically.
+    `key_fn` defaults to the same signature-or-(stage,summary) key
+    `require_block=True` callers already relied on.
+
+    Returns `None` when there's no matching history yet, or when the most
+    recent failure's class key hasn't recurred `threshold` times among
+    prior candidates (i.e. this would still be at or under the budget of
+    repeats considered normal retry noise)."""
+    key = key_fn or _block_class_key
+    candidates = [f for f in failures if not require_block or f.next_action == "block"]
+    if not candidates:
         return None
-    latest = blocks[-1]
-    key = _block_class_key(latest)
-    matches = tuple(f for f in blocks if _block_class_key(f) == key)
+    latest = candidates[-1]
+    latest_key = key(latest)
+    matches = tuple(f for f in candidates if key(f) == latest_key)
     if len(matches) <= threshold:
         return None
     return RepeatBlock(
-        class_key=key, is_deterministic=latest.failure_signature is not None, occurrences=matches
+        class_key=latest_key,
+        is_deterministic=latest.failure_signature is not None,
+        occurrences=matches,
     )

@@ -22,7 +22,7 @@ from cosmo.git.worktree import create_worktree
 from cosmo.harness.fake import FakeHarnessAdapter, FakeOutcome, ScriptedCall
 from cosmo.store import StoreWriter
 from cosmo.store.enums import FailureStage, FailureType, TaskStatus
-from cosmo.store.reader import get_task, list_events
+from cosmo.store.reader import get_task, list_events, list_task_failures
 from cosmo.task.machine import (
     _git_commit_decisions_log,
     _git_commit_pending_implementation,
@@ -537,6 +537,101 @@ def test_retry_exhaustion_blocks_with_code_failure(tmp_path: Path) -> None:
         writer.close()
 
 
+def test_implementing_provider_budget_exceeded_blocks_immediately(tmp_path: Path) -> None:
+    """G8 (docs/v15-fixes-after-wa-chat-run.md): a hard provider budget/key
+    ceiling must block on its very first occurrence, not spend the task's
+    ordinary environment_error retry budget (default `retries.max_attempts
+    = 2`, meaning an ordinary environment_error only blocks on its 3rd
+    occurrence -- see `test_validating_environment_error_does_not_consume_
+    an_attempt` below) against a condition retrying cannot fix."""
+    cfg, repo, writer, emitter, ctx = _setup(tmp_path)
+    adapter = FakeHarnessAdapter(
+        cfg,
+        cwd=ctx.worktree_path,
+        script=[
+            ScriptedCall(FakeOutcome.SUCCESS),  # propose
+            ScriptedCall(
+                FakeOutcome.ENVIRONMENT_FAILURE,
+                output_summary="403 Key limit exceeded (total limit)",
+            ),
+        ],
+    )
+    gate = FakeGate(ScriptedGateResult(passed=True))
+
+    try:
+        status = run_task(
+            ctx=ctx,
+            config=cfg,
+            writer=writer,
+            emitter=emitter,
+            adapter=adapter,
+            repo_path=repo,
+            gate_runner=_gate_runner(gate),
+        )
+
+        assert status is TaskStatus.BLOCKED
+        task = get_task(cfg.paths.db_path, ctx.task_id)
+        assert task is not None
+        assert task.blocked_reason == "environment"
+        assert "raise the relevant" in (task.last_error or "")
+
+        blocked_events = [
+            e
+            for e in list_events(cfg.paths.db_path, task_id=ctx.task_id, limit=200)
+            if e.event_type == "task.blocked"
+        ]
+        assert len(blocked_events) == 1
+    finally:
+        writer.close()
+
+
+def test_implementing_turn_budget_grows_after_repeated_max_turns_exhaustion(
+    tmp_path: Path,
+) -> None:
+    """G1 (docs/v15-fixes-after-wa-chat-run.md): the real
+    `wa-chat-storybook-vr` shape -- repeated `error_max_turns` on the same
+    task should widen the next attempt's turn budget rather than handing it
+    the same fixed 80 every time. The first attempt gets the unscaled
+    default; each retry after an `error_max_turns` failure grows by
+    `turn_budget_growth_factor` (default 1.5), capped at
+    `turn_budget_max_multiplier` (default 3.0)."""
+    cfg, repo, writer, emitter, ctx = _setup(tmp_path)
+    adapter = FakeHarnessAdapter(
+        cfg,
+        cwd=ctx.worktree_path,
+        script=[
+            ScriptedCall(FakeOutcome.SUCCESS),  # propose
+            ScriptedCall(FakeOutcome.ENVIRONMENT_FAILURE, output_summary="error_max_turns"),
+            ScriptedCall(FakeOutcome.ENVIRONMENT_FAILURE, output_summary="error_max_turns"),
+            ScriptedCall(FakeOutcome.SUCCESS),  # implement attempt 3 -- finally succeeds
+        ],
+    )
+    gate = FakeGate(ScriptedGateResult(passed=True))
+
+    try:
+        status = run_task(
+            ctx=ctx,
+            config=cfg,
+            writer=writer,
+            emitter=emitter,
+            adapter=adapter,
+            repo_path=repo,
+            gate_runner=_gate_runner(gate),
+        )
+
+        assert status is TaskStatus.DONE
+        # default harness.max_turns=80: unscaled on attempt 1 (no prior
+        # error_max_turns yet), then 80*1.5=120 after the 1st, 80*1.5**2=180
+        # after the 2nd.
+        assert adapter.implement_max_turns == [80, 120, 180]
+
+        failures = list_task_failures(cfg.paths.db_path, ctx.task_id)
+        assert len(failures) == 2  # both error_max_turns failures recorded
+        assert all(f.failure_signature == "max_turns_exhausted" for f in failures)
+    finally:
+        writer.close()
+
+
 def test_implementing_environment_error_does_not_consume_an_attempt(tmp_path: Path) -> None:
     cfg, repo, writer, emitter, ctx = _setup(tmp_path)
     adapter = FakeHarnessAdapter(
@@ -568,6 +663,54 @@ def test_implementing_environment_error_does_not_consume_an_attempt(tmp_path: Pa
         # retry left attempt_count untouched.
         assert task.attempt_count == 1
     finally:
+        writer.close()
+
+
+def test_orphan_holding_the_worktree_is_detected_after_an_ordinary_failed_ending(
+    tmp_path: Path,
+) -> None:
+    """G3 (docs/v15-fixes-after-wa-chat-run.md): a stray process (e.g. a
+    backgrounded `npm run preview &` that escaped its process group) still
+    holding the worktree open must be detected even when the harness call
+    ends in an ordinary, non-cancelled failure -- `error_max_turns`'s real
+    shape -- not only after an explicit operator `cancel()`."""
+    cfg, repo, writer, emitter, ctx = _setup(tmp_path)
+    adapter = FakeHarnessAdapter(
+        cfg,
+        cwd=ctx.worktree_path,
+        script=[
+            ScriptedCall(FakeOutcome.SUCCESS),  # propose
+            ScriptedCall(FakeOutcome.ENVIRONMENT_FAILURE),  # implement, ordinary failure
+        ],
+    )
+    stray = subprocess.Popen(
+        ["sleep", "30"], cwd=ctx.worktree_path, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+    )
+    try:
+        run_task(
+            ctx=ctx,
+            config=cfg,
+            writer=writer,
+            emitter=emitter,
+            adapter=adapter,
+            repo_path=repo,
+            gate_runner=_gate_runner(FakeGate(ScriptedGateResult(passed=True))),
+        )
+
+        events = list_events(
+            cfg.paths.db_path, task_id=ctx.task_id, event_type="task.orphan_detected"
+        )
+        # Fires once per harness call this run makes (propose + every
+        # implement attempt/retry) -- the point is that it fires at all on
+        # an ordinary failed ending, not that it fires exactly once.
+        assert events
+        for e in events:
+            holder_pids = e.payload["worktree_holder_pids"]
+            assert isinstance(holder_pids, list)
+            assert stray.pid in holder_pids
+    finally:
+        stray.kill()
+        stray.wait()
         writer.close()
 
 

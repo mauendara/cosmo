@@ -20,10 +20,11 @@ import pytest
 
 HARNESS_TEMPLATES_ROOT = Path(__file__).resolve().parents[1] / "templates" / "harness"
 CLAUDE_HOOKS = HARNESS_TEMPLATES_ROOT / "claude" / "hooks"
+CLAUDE_AGENTS = HARNESS_TEMPLATES_ROOT / "claude" / "agents"
 NON_NATIVE_HARNESSES = ["ori-claude", "claude-openrouter"]
 
 
-def _hook_files(root: Path) -> dict[str, Path]:
+def _files(root: Path) -> dict[str, Path]:
     return {
         str(p.relative_to(root)): p
         for p in root.rglob("*")
@@ -33,16 +34,16 @@ def _hook_files(root: Path) -> dict[str, Path]:
 
 @pytest.mark.parametrize("harness", NON_NATIVE_HARNESSES)
 def test_hooks_directories_have_identical_file_lists(harness: str) -> None:
-    claude_files = set(_hook_files(CLAUDE_HOOKS))
-    other_files = set(_hook_files(HARNESS_TEMPLATES_ROOT / harness / "hooks"))
+    claude_files = set(_files(CLAUDE_HOOKS))
+    other_files = set(_files(HARNESS_TEMPLATES_ROOT / harness / "hooks"))
 
     assert claude_files == other_files
 
 
 @pytest.mark.parametrize("harness", NON_NATIVE_HARNESSES)
 def test_every_hook_file_is_byte_identical_between_harnesses(harness: str) -> None:
-    claude_files = _hook_files(CLAUDE_HOOKS)
-    other_files = _hook_files(HARNESS_TEMPLATES_ROOT / harness / "hooks")
+    claude_files = _files(CLAUDE_HOOKS)
+    other_files = _files(HARNESS_TEMPLATES_ROOT / harness / "hooks")
 
     mismatched = [
         rel
@@ -51,6 +52,34 @@ def test_every_hook_file_is_byte_identical_between_harnesses(harness: str) -> No
     ]
 
     assert mismatched == [], f"hook files drifted from templates/harness/claude/: {mismatched}"
+
+
+@pytest.mark.parametrize("harness", NON_NATIVE_HARNESSES)
+def test_agents_directories_have_identical_file_lists(harness: str) -> None:
+    """G2 (docs/v15-fixes-after-wa-chat-run.md): `agents/reviewer.md`'s
+    diff-only-by-default instruction must land on every harness that shares
+    `_ClaudeCodeInvoker.review()`, not just native `claude` -- same
+    byte-parity discipline `hooks/` already gets, for the same reason
+    (a self-contained directory per harness, drift caught by a test rather
+    than silently disabling the guardrail on two of the three routes)."""
+    claude_files = set(_files(CLAUDE_AGENTS))
+    other_files = set(_files(HARNESS_TEMPLATES_ROOT / harness / "agents"))
+
+    assert claude_files == other_files
+
+
+@pytest.mark.parametrize("harness", NON_NATIVE_HARNESSES)
+def test_every_agent_file_is_byte_identical_between_harnesses(harness: str) -> None:
+    claude_files = _files(CLAUDE_AGENTS)
+    other_files = _files(HARNESS_TEMPLATES_ROOT / harness / "agents")
+
+    mismatched = [
+        rel
+        for rel, other_path in other_files.items()
+        if rel in claude_files and other_path.read_bytes() != claude_files[rel].read_bytes()
+    ]
+
+    assert mismatched == [], f"agent files drifted from templates/harness/claude/: {mismatched}"
 
 
 @pytest.mark.parametrize("harness", NON_NATIVE_HARNESSES)

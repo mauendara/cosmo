@@ -122,7 +122,9 @@ class CodexAdapter(HarnessAdapter):
         retry_context: str | None = None,
         *,
         on_activity: Callable[[str], None] | None = None,
+        max_turns: int | None = None,
     ) -> HarnessResult:
+        del max_turns  # Codex has no turn-count concept of its own (G1's adaptive budget)
         prompt = (
             f"Implement the OpenSpec change at {spec_path} (task {task_id}). "
             "Before changing anything, inspect the current worktree with `git log`, "
@@ -149,7 +151,9 @@ class CodexAdapter(HarnessAdapter):
         base_branch: str,
         *,
         on_activity: Callable[[str], None] | None = None,
+        live_verification: bool = False,
     ) -> HarnessResult:
+        del live_verification  # G2's diff-only/live-verification prompt split is Claude-only so far
         verdict_path = self.cwd / REVIEW_RESULT_RELATIVE_PATH
         prompt = (
             f"Review this branch's implementation for task {task_id}. Run "

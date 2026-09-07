@@ -86,6 +86,15 @@ class FakeHarnessAdapter(HarnessAdapter):
         self._cancel_events: dict[str, threading.Event] = {}
         # Audit trail a test can assert against: (method, task_id, retry_context).
         self.calls: list[tuple[str, str, str | None]] = []
+        # G1 (docs/v15-fixes-after-wa-chat-run.md): every `max_turns` an
+        # `implement()` call was given, in call order -- `None` means the
+        # caller left it unset (the harness's own configured default
+        # applies). Kept separate from `calls` above rather than widening
+        # its tuple shape, which every existing test asserts against.
+        self.implement_max_turns: list[int | None] = []
+        # G2 (docs/v15-fixes-after-wa-chat-run.md): every `live_verification`
+        # a `review()` call was given, in call order.
+        self.review_live_verification: list[bool] = []
 
     def preflight(self) -> list[CheckResult]:
         return [ok("fake harness", "always ready")]
@@ -122,7 +131,9 @@ class FakeHarnessAdapter(HarnessAdapter):
         retry_context: str | None = None,
         *,
         on_activity: Callable[[str], None] | None = None,
+        max_turns: int | None = None,
     ) -> HarnessResult:
+        self.implement_max_turns.append(max_turns)
         return self._run("implement", task_id, retry_context)
 
     def review(
@@ -132,6 +143,7 @@ class FakeHarnessAdapter(HarnessAdapter):
         base_branch: str,
         *,
         on_activity: Callable[[str], None] | None = None,
+        live_verification: bool = False,
     ) -> HarnessResult:
         # The verdict itself is a file `task.review.read_review_verdict`
         # reads back from the worktree (`HarnessAdapter.review`'s own
@@ -139,6 +151,7 @@ class FakeHarnessAdapter(HarnessAdapter):
         # call *completed* (`FakeOutcome`'s usual environment-health
         # meaning), same as `propose`/`implement`. A test wanting a specific
         # verdict writes `task.review.review_result_path(worktree)` directly.
+        self.review_live_verification.append(live_verification)
         return self._run("review", task_id, None)
 
     def get_progress(self, task_id: str) -> tuple[int, int]:

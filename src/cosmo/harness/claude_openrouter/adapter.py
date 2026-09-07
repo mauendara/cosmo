@@ -143,13 +143,14 @@ class ClaudeOpenRouterAdapter(_ClaudeCodeInvoker):
 
     # -- invocation mechanics ------------------------------------------------
 
-    def _build_argv(self, prompt: str, model: str) -> list[str]:
+    def _build_argv(self, prompt: str, model: str, *, max_turns: int | None = None) -> list[str]:
         del model  # threaded through ANTHROPIC_MODEL in _build_env instead, not a CLI flag here
         argv = [
             self._binary,
             "-p",
             prompt,
-            *self._claude_flags(),  # includes --setting-sources project -- guardrails stay on
+            # includes --setting-sources project -- guardrails stay on
+            *self._claude_flags(max_turns=max_turns),
             "--settings",
             _APIKEY_HELPER_SETTINGS,
         ]

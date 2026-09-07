@@ -2,13 +2,11 @@
 
 ## Status
 
-**Plan only — nothing in this document is implemented yet.** Four of the nine
-items below (G1, G2, G4, G7) had a real design decision to make first; those
-decisions were made directly by the user in the planning conversation this
-doc comes from, and are recorded verbatim in each section. The other five
-(G3, G5, G6, G8, G9) have no open design question — G9 already shipped
-(2026-09-04, see `docs/handoff.md`'s v17 entry), and G3/G5/G6/G8 are scoped
-enough to go straight to implementation whenever this plan is picked up.
+**All nine implemented.** G1, G2, G3, G4, G5, G6, G7, G8 landed 2026-09-07
+(v22, deviations 91-93 in `v3-implementation-state.md`), plus the shared
+consecutive-failure-counting building block G1/G7/G8 all reuse; G9 shipped
+earlier (2026-09-04, see `docs/handoff.md`'s v17 entry). Nothing left open
+on this plan.
 
 ## Context: where this plan comes from
 
@@ -53,7 +51,7 @@ building a parallel function.
 
 ---
 
-## G1 — adaptive turn/time budget for `IMPLEMENTING`
+## G1 — adaptive turn/time budget for `IMPLEMENTING` *(implemented, 2026-09-07)*
 
 **Problem.** Every task gets the same fixed `harness.max_turns = 80` /
 `timeouts.implementing_wall = 5400s` (`config/defaults.toml:14,47`),
@@ -101,7 +99,7 @@ new turn-count cap invented to do the same job.
 
 ---
 
-## G2 — diff-only review by default, longer budget only for visual-verification tasks
+## G2 — diff-only review by default, longer budget only for visual-verification tasks *(implemented, 2026-09-07)*
 
 **Problem.** `reviewing_wall = 900s` (`config/defaults.toml:53`) is enough to
 read a diff, not enough for a review session that (reasonably) decides to
@@ -149,7 +147,7 @@ verification.
 
 ---
 
-## G3 — reap orphaned processes on every session end, not just forced cancellation
+## G3 — reap orphaned processes on every session end, not just forced cancellation *(implemented, 2026-09-07)*
 
 **Problem.** `cancel_and_reap` (`proc/reap.py`) ties process-group cleanup +
 the worktree-holder sweep (`proc/orphans.py`'s `sweep()`/
@@ -182,7 +180,7 @@ timeout — one gap silently causing others.
 
 ---
 
-## G4 — structural allow-list for test-file edits, checked in real time
+## G4 — structural allow-list for test-file edits, checked in real time *(implemented, 2026-09-07)*
 
 **Problem.** `templates/harness/*/hooks/test_path_guard.py` denies every
 `Edit`/`Write`/`NotebookEdit` on a protected test path unless
@@ -244,7 +242,7 @@ human-approval queue.
 
 ---
 
-## G5 — exclude gitignored paths from the gitleaks scan
+## G5 — exclude gitignored paths from the gitleaks scan *(implemented, 2026-09-07)*
 
 **Problem.** `run_gitleaks_scan` (`git/secrets.py:117-136`) deliberately
 scans the raw worktree filesystem (`--no-git`) rather than just the diff —
@@ -279,7 +277,7 @@ bundled React internals (`o=e.childrens`) and blocked a fully correct task.
 
 ---
 
-## G6 — CLI flags for the resume stages that keep getting hand-run
+## G6 — CLI flags for the resume stages that keep getting hand-run *(implemented, 2026-09-07)*
 
 **Problem.** Every manual unblock in the wa-chat-component run —
 `wa-chat-text-bubbles` (`resume_at_stage='committing'`), `wa-chat-chat-shell`
@@ -310,7 +308,7 @@ as a precedent for exposing a resume-stage choice safely at the CLI layer.
 
 ---
 
-## G7 — flag a repeat rejection on the same task as its own signal
+## G7 — flag a repeat rejection on the same task as its own signal *(implemented, 2026-09-07)*
 
 **Problem.** `wa-chat-interactive-buttons-cta`'s second adversarial-review
 rejection was the *same* `ButtonRow` geometry requirement its first
@@ -352,7 +350,7 @@ the one before it.
 
 ---
 
-## G8 — classify a hard provider budget/key ceiling as its own failure type
+## G8 — classify a hard provider budget/key ceiling as its own failure type *(implemented, 2026-09-07)*
 
 **Problem.** `classify_harness_failure` (`task/classify.py:26-49`) collapses
 every non-timeout harness failure into a single

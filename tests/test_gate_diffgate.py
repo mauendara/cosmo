@@ -197,6 +197,53 @@ def test_allow_test_edits_bypasses_the_gate(tmp_path: Path) -> None:
     assert result.passed
 
 
+def test_allow_test_edits_does_not_bypass_a_weakened_surviving_test(tmp_path: Path) -> None:
+    """G4 (docs/v15-fixes-after-wa-chat-run.md): before this fix,
+    `allow_test_edits=True` skipped `run_diff_gate` outright -- a task
+    could weaken assertions or introduce a skip annotation in a test file
+    that *survives* and the gate would never notice. Only the blanket
+    "modified or deleted" rule is what `allow_test_edits` should bypass;
+    a genuinely weakened-but-still-present test must still be caught."""
+    repo = _repo_on_develop(tmp_path)
+    _git(repo, "checkout", "-q", "-b", "task/spec-7b")
+    test_file = repo / "src" / "test" / "FooTest.java"
+    weakened = test_file.read_text().replace("  void c() { assertThat(3).isEqualTo(3); }\n", "")
+    test_file.write_text(weakened)
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-q", "-m", "weaken a test, allow_test_edits set")
+
+    result = run_diff_gate(
+        worktree_path=repo,
+        base_branch="develop",
+        task_branch="task/spec-7b",
+        gate=_gate_config(),
+        allow_test_edits=True,
+    )
+    assert not result.passed
+    assert any(v.kind == "assertion_count_decreased" for v in result.violations)
+    assert not any(v.kind == "test_path_modified" for v in result.violations)
+
+
+def test_allow_test_edits_does_not_bypass_a_skip_annotation(tmp_path: Path) -> None:
+    """G4: same fix, for the skip-annotation check."""
+    repo = _repo_on_develop(tmp_path)
+    _git(repo, "checkout", "-q", "-b", "task/spec-7c")
+    test_file = repo / "src" / "test" / "FooTest.java"
+    test_file.write_text(test_file.read_text() + "  @Disabled\n  void e() {}\n")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-q", "-m", "disable something, allow_test_edits set")
+
+    result = run_diff_gate(
+        worktree_path=repo,
+        base_branch="develop",
+        task_branch="task/spec-7c",
+        gate=_gate_config(),
+        allow_test_edits=True,
+    )
+    assert not result.passed
+    assert any(v.kind == "skip_annotation_introduced" for v in result.violations)
+
+
 def test_diff_gate_does_not_flag_a_newly_added_test_file(tmp_path: Path) -> None:
     """Spec 6.1 layer 2 says "modified or deleted" -- a brand-new test file
     is exactly what a well-behaved agent is expected to add for new work.

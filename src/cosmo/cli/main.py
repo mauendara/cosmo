@@ -1734,6 +1734,26 @@ def queue_retry(
             "it rather than redoing it from scratch. attempt_count still resets to 0.",
         ),
     ] = False,
+    resume_at_validating: Annotated[
+        bool,
+        typer.Option(
+            "--resume-at-validating",
+            help="Skip straight to VALIDATING -- for when a real fix was already applied "
+            "to the worktree by something other than a full IMPLEMENTING session (e.g. a "
+            "human patched a small, well-understood bug directly) and the goal is to hand "
+            "it back to Cosmo's own judgment without paying for a fresh IMPLEMENTING call. "
+            "A genuine VALIDATING failure falls through to a real IMPLEMENTING retry.",
+        ),
+    ] = False,
+    resume_at_committing: Annotated[
+        bool,
+        typer.Option(
+            "--resume-at-committing",
+            help="Skip straight to COMMITTING -- for when VALIDATING/REVIEWING have "
+            "already genuinely passed on this worktree by some other means and nothing "
+            "before COMMITTING needs redoing.",
+        ),
+    ] = False,
     config: ConfigOption = None,
 ) -> None:
     """Reset a `blocked` task back to `queued` for a genuine fresh start:
@@ -1765,8 +1785,23 @@ def queue_retry(
     own acceptance run) gets refused here instead of a silent 4th round of
     attempts. `--force` overrides -- use it once a human (or a different
     fix) has actually addressed the recurring reason, not to make the
-    message go away."""
+    message go away.
+
+    **`--resume-at-validating`/`--resume-at-committing`** (G6, `docs/v15-
+    fixes-after-wa-chat-run.md`): both stages already work end-to-end
+    (`resume_at=VALIDATING` since v19, `COMMITTING` since migration 9) --
+    this only adds a CLI surface for a choice that previously required
+    hand-running `store.writer.queue_resume_at` directly. Neither combines
+    with `--keep-implementation`: they resume at a later point than
+    `--keep-implementation`'s own `PROPOSED`, and combining them is almost
+    certainly a mistake, not an intentional choice."""
     cfg = _load(config)
+    if sum([keep_implementation, resume_at_validating, resume_at_committing]) > 1:
+        err_console.print(
+            "[red]--keep-implementation, --resume-at-validating, and "
+            "--resume-at-committing resume at different points -- pass only one[/red]"
+        )
+        raise typer.Exit(code=2)
     task = get_task(cfg.paths.db_path, task_id)
     if task is None:
         err_console.print(f"[red]no such task: {task_id!r}[/red]")
@@ -1792,34 +1827,44 @@ def queue_retry(
         )
         raise typer.Exit(code=1)
 
-    # v6: an `environment_error` at `COMMITTING`/`MERGING` is the only case
-    # where nothing before the failed stage needs discarding at all --
-    # `IMPLEMENTING`/`VALIDATING`/`REVIEWING` already succeeded on this
-    # exact worktree. Resuming there instead of the worktree-reset dance
-    # below is what `task.machine.run_task`'s own `resume_at` param exists
-    # for (see its docstring, and `store.writer.queue_resume_at`'s).
-    last_block = next((f for f in reversed(history) if f.next_action == "block"), None)
+    # G6: an explicit --resume-at-* flag wins outright -- no need to inspect
+    # the failure history when the human already knows where to resume.
     resume_stage: TaskStatus | None = None
-    if (
-        last_block is not None
-        and last_block.failure_type == "environment_error"
-        and last_block.failure_stage in ("commit", "merge")
-    ):
-        resume_stage = (
-            TaskStatus.COMMITTING if last_block.failure_stage == "commit" else TaskStatus.MERGING
-        )
+    if resume_at_validating:
+        resume_stage = TaskStatus.VALIDATING
+    elif resume_at_committing:
+        resume_stage = TaskStatus.COMMITTING
+    else:
+        # v6: an `environment_error` at `COMMITTING`/`MERGING` is the only case
+        # where nothing before the failed stage needs discarding at all --
+        # `IMPLEMENTING`/`VALIDATING`/`REVIEWING` already succeeded on this
+        # exact worktree. Resuming there instead of the worktree-reset dance
+        # below is what `task.machine.run_task`'s own `resume_at` param exists
+        # for (see its docstring, and `store.writer.queue_resume_at`'s).
+        last_block = next((f for f in reversed(history) if f.next_action == "block"), None)
+        if (
+            last_block is not None
+            and last_block.failure_type == "environment_error"
+            and last_block.failure_stage in ("commit", "merge")
+        ):
+            resume_stage = (
+                TaskStatus.COMMITTING
+                if last_block.failure_stage == "commit"
+                else TaskStatus.MERGING
+            )
 
     writer = StoreWriter(cfg.paths.db_path)
     try:
         if resume_stage is not None:
             result = writer.queue_resume_at(task_id, resume_stage)
             emit_state_changed(EventEmitter(writer), result)
-            console.print(
-                f"[dim]resuming directly at {resume_stage.value} -- the implementation "
-                "already passed validation"
-                + (" and review" if resume_stage is TaskStatus.MERGING else "")
-                + ", nothing to redo[/dim]"
-            )
+            if resume_stage is TaskStatus.VALIDATING:
+                note = "skipping IMPLEMENTING -- a fix was already applied to the worktree"
+            else:
+                note = "the implementation already passed validation" + (
+                    " and review" if resume_stage is TaskStatus.MERGING else ""
+                )
+            console.print(f"[dim]resuming directly at {resume_stage.value} -- {note}[/dim]")
         else:
             clear_worktree = True
             resume_at_stage: TaskStatus | None = None

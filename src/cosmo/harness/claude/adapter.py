@@ -80,12 +80,12 @@ class ClaudeCodeAdapter(_ClaudeCodeInvoker):
 
     # -- invocation mechanics ------------------------------------------------
 
-    def _build_argv(self, prompt: str, model: str) -> list[str]:
+    def _build_argv(self, prompt: str, model: str, *, max_turns: int | None = None) -> list[str]:
         argv = [
             self._binary,
             "-p",
             prompt,
-            *self._claude_flags(),
+            *self._claude_flags(max_turns=max_turns),
             "--model",
             model,
         ]

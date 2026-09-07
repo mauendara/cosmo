@@ -250,6 +250,16 @@ Si el bloqueo más reciente de la tarea fue un `environment_error` en
 directamente en esa etapa, ya que todo lo anterior ya pasó la validación (y
 la revisión, para `MERGING`).
 
+Pasa `--resume-at-validating`/`--resume-at-committing` para forzar
+directamente uno de esos mismos puntos de reanudación, sin importar cuál
+fue el bloqueo más reciente — para cuando ya se aplicó una corrección al
+worktree por algún medio distinto a una sesión completa del harness (un
+parche humano, o una verificación independiente) y el objetivo es
+devolverle el juicio a Cosmo sin pagar por una etapa que ya tuvo éxito por
+otro medio. Ninguna de las dos toca `attempt_count` ni el worktree, y
+ninguna se combina con `--keep-implementation` ni entre sí — cada una
+retoma en un punto distinto, así que pasa solo una.
+
 **Protección contra bloqueos repetidos**: una tarea cuyo bloqueo más
 reciente repite `retries.repeat_block_threshold` bloqueos previos por el
 mismo motivo es rechazada en lugar de concedérsele silenciosamente otro
@@ -260,6 +270,8 @@ presupuesto de intentos.
 | `--repo <path>` | directorio actual | Repositorio objetivo en el que vive el worktree. |
 | `--force` | desactivado | Continúa más allá de la protección contra bloqueos repetidos. |
 | `--keep-implementation` | desactivado | Conserva el código del intento fallido en lugar de descartarlo hasta el commit de `PROPOSING`. |
+| `--resume-at-validating` | desactivado | Salta directamente a `VALIDATING`, sin importar el bloqueo más reciente. Un fallo genuino ahí cae de nuevo a un reintento real de `IMPLEMENTING`. |
+| `--resume-at-committing` | desactivado | Salta directamente a `COMMITTING`, sin importar el bloqueo más reciente. |
 | `--config`, `-c <path>` | — | Archivo de configuración. |
 
 ### `cosmo queue block TASK_ID`

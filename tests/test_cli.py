@@ -312,6 +312,82 @@ def test_queue_retry_resumes_at_merging_instead_of_discarding_the_worktree(
     assert info.path.is_dir()
 
 
+def test_queue_retry_resume_at_validating_flag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """G6 (docs/v15-fixes-after-wa-chat-run.md): a CLI surface for the
+    `resume_at=VALIDATING` mechanism that previously required hand-running
+    `store.writer.queue_resume_at` directly -- no worktree/attempt_count
+    side effects, exactly like the existing auto-detected MERGING case."""
+    repo = _repo_on_develop(tmp_path)
+    monkeypatch.chdir(repo)
+    db_path = load_config().paths.db_path
+    writer = StoreWriter(db_path)
+    writer.register_project(target_path=str(repo.resolve()), harness="claude")
+    writer.queue_add(task_id="t1", spec_path="openspec/changes/t1", max_attempts=2)
+    writer.queue_begin_attempt("t1")
+    writer.queue_block("t1", BlockedReason.CODE_FAILURE)
+    writer.close()
+
+    result = runner.invoke(app, ["queue", "retry", "t1", "--resume-at-validating"])
+
+    assert result.exit_code == 0, result.stderr
+    assert "resuming directly at validating" in result.stdout
+    task = get_task(db_path, "t1")
+    assert task is not None
+    assert task.status == "queued"
+    assert task.resume_at_stage == "validating"
+    assert task.attempt_count == 1  # untouched
+
+
+def test_queue_retry_resume_at_committing_flag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """G6: same CLI surface for `resume_at=COMMITTING`."""
+    repo = _repo_on_develop(tmp_path)
+    monkeypatch.chdir(repo)
+    db_path = load_config().paths.db_path
+    writer = StoreWriter(db_path)
+    writer.register_project(target_path=str(repo.resolve()), harness="claude")
+    writer.queue_add(task_id="t1", spec_path="openspec/changes/t1", max_attempts=2)
+    writer.queue_begin_attempt("t1")
+    writer.queue_block("t1", BlockedReason.CODE_FAILURE)
+    writer.close()
+
+    result = runner.invoke(app, ["queue", "retry", "t1", "--resume-at-committing"])
+
+    assert result.exit_code == 0, result.stderr
+    assert "resuming directly at committing" in result.stdout
+    task = get_task(db_path, "t1")
+    assert task is not None
+    assert task.resume_at_stage == "committing"
+
+
+def test_queue_retry_refuses_combining_resume_flags(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """G6: combining --keep-implementation with either new flag (or the two
+    new flags with each other) is almost certainly a mistake -- they each
+    resume at a different point."""
+    repo = _repo_on_develop(tmp_path)
+    monkeypatch.chdir(repo)
+    db_path = load_config().paths.db_path
+    writer = StoreWriter(db_path)
+    writer.register_project(target_path=str(repo.resolve()), harness="claude")
+    writer.queue_add(task_id="t1", spec_path="openspec/changes/t1", max_attempts=2)
+    writer.queue_block("t1", BlockedReason.CODE_FAILURE)
+    writer.close()
+
+    result = runner.invoke(
+        app, ["queue", "retry", "t1", "--resume-at-validating", "--resume-at-committing"]
+    )
+
+    assert result.exit_code == 2
+    task = get_task(db_path, "t1")
+    assert task is not None
+    assert task.status == "blocked"  # refused before touching anything
+
+
 def _repo_on_develop(tmp_path: Path) -> Path:
     repo = tmp_path / "target-repo"
     repo.mkdir()

@@ -136,6 +136,38 @@ def test_detect_repeat_block_does_not_mix_different_reasons() -> None:
     assert detect_repeat_block(failures, threshold=2) is None
 
 
+def test_detect_repeat_block_require_block_false_counts_retries_too() -> None:
+    # G7's shape: consecutive adversarial_review rejections that always
+    # auto-retry (next_action="retry") and so never surface via the
+    # require_block=True default.
+    failures = [
+        _failure(id=1, next_action="retry", failure_stage="adversarial_review"),
+        _failure(id=2, next_action="retry", failure_stage="adversarial_review"),
+    ]
+    assert detect_repeat_block(failures, threshold=2, require_block=False) is None
+    failures.append(_failure(id=3, next_action="retry", failure_stage="adversarial_review"))
+    result = detect_repeat_block(failures, threshold=2, require_block=False)
+    assert result is not None
+    assert len(result.occurrences) == 3
+
+
+def test_detect_repeat_block_custom_key_fn() -> None:
+    failures = [
+        _failure(id=1, next_action="retry", failure_stage="adversarial_review", error_summary="a"),
+        _failure(id=2, next_action="retry", failure_stage="adversarial_review", error_summary="b"),
+        _failure(id=3, next_action="retry", failure_stage="adversarial_review", error_summary="c"),
+    ]
+    result = detect_repeat_block(
+        failures,
+        threshold=2,
+        require_block=False,
+        key_fn=lambda f: f.failure_stage,
+    )
+    assert result is not None
+    assert result.class_key == "adversarial_review"
+    assert len(result.occurrences) == 3
+
+
 def test_playwright_image_version_mismatch_shape() -> None:
     detail = (
         "Looks like Playwright Test or Playwright was just updated to 1.49.0.\n"

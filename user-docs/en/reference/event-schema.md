@@ -225,6 +225,36 @@ runs — so the block was cleared. Nothing failed here.
 | --- | --- |
 | `task_cost_usd` | float |
 
+### `task.orphan_detected` — `warning`
+
+A harness session for this task ended — success, failure, or timeout, not
+only a forced cancellation — and a process was still found holding the
+task's worktree open (e.g. a backgrounded dev server the session started
+that escaped its own process group). Detection only: there is no live
+process handle to kill at this point, only something for a human to look
+at. Can fire more than once per task, once per harness call that still had
+a holder afterward.
+
+| Field | Type |
+| --- | --- |
+| `worktree_holder_pids` | list of int |
+
+### `task.review_repeat_rejection` — `warning`
+
+This task's adversarial review has rejected its diff on 2 or more
+*consecutive* attempts. Ordinary review rejections auto-retry with no event
+of their own (`next_action=retry`, never `block`) — this fires so the
+pattern surfaces to a human via `notify.watch` while an unattended run is
+still going, rather than only being visible after the fact by reading
+`task_failures`. Fires on the 2nd rejection, not the 3rd. Deliberately
+doesn't try to tell whether rejection N+1 raises the same issue as
+rejection N — freeform review prose isn't a fixed format worth
+signature-matching.
+
+| Field | Type |
+| --- | --- |
+| `consecutive_rejections` | int |
+
 ### `task.finishing_failed` — `warning`
 
 `FINISHING`'s best-effort `openspec archive` step failed. Always a warning:

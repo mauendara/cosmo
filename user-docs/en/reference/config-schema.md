@@ -111,7 +111,8 @@ All values in seconds, all must be > 0.
 | `implementing_stall` | `1200` | No observed activity for this long during `IMPLEMENTING` kills the call. |
 | `validating_wall` | `2700` | Wall clock for `VALIDATING`. |
 | `validating_stall` | `600` | Stall timer for `VALIDATING`. |
-| `reviewing_wall` | `900` | Wall clock for the adversarial review call. One bounded call, so no stall variant. |
+| `reviewing_wall` | `900` | Wall clock for the adversarial review call. One bounded call, so no stall variant. Applies unless `review.live_verification_keywords` matches the task's own spec content. |
+| `reviewing_wall_live` | `2700` | Wall clock for the adversarial review call when the task's own spec content calls for live/visual verification (see `[review]` below). |
 | `committing_wall` | `300` | Wall clock for `COMMITTING`. |
 | `merging_wall` | `300` | Wall clock for `MERGING`. |
 | `run_wall` | `36000` | Whole-run wall clock (10 hours). Expiry stops the run with `max_time`. |
@@ -130,12 +131,21 @@ protection against a hung harness.
 | `delay_min` | int ≥ 0 | `30` | Lower bound of the randomized delay between retries, in seconds. |
 | `delay_max` | int ≥ 0 | `60` | Upper bound. |
 | `repeat_block_threshold` | int > 0 | `2` | `cosmo queue retry` refuses once the task's latest terminal block matches this many prior blocks for the same reason. `--force` overrides. |
+| `turn_budget_growth_factor` | float > 1.0 | `1.5` | Multiplier applied to `harness.max_turns` (and `timeouts.implementing_wall`/`implementing_stall`) for each prior consecutive turn-budget exhaustion on the same task. Never applied on a task's first `IMPLEMENTING` attempt. |
+| `turn_budget_max_multiplier` | float ≥ 1.0 | `3.0` | Hard cap on the multiplier above — e.g. an 80-turn default can grow to 240 turns but no further, regardless of how many times the task has exhausted its budget. |
 
 **Validated**: `delay_min` must not exceed `delay_max`.
 
 Only attempts that represent a genuine code-level judgment increment the
 counter — a gate verdict of `code_error` or `test_integrity`, or an
 `IMPLEMENTING` timeout. An `environment_error` never does.
+
+The turn-budget growth above is adaptive per task, not a static per-project
+setting — a task that repeatedly exhausts its turn budget gets more room on
+its next attempt; a task that succeeds or fails for a different reason never
+triggers it. `cost.max_cost_per_task_usd` is the real backstop against a
+stuck task consuming an ever-larger budget for nothing, not a separate
+turn-count ceiling.
 
 ## `[circuit_breaker]`
 
@@ -222,6 +232,15 @@ diff_gate_skip_annotations = [
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
 | `enabled` | bool | `true` | The fresh-session adversarial review between `VALIDATING` and `COMMITTING`. `false` skips `REVIEWING` entirely. A rejected review retries against `retries.max_attempts`, not a separate budget. |
+| `live_verification_keywords` | list of str | `["storybook", "visual regression", "playwright"]` | Case-insensitive substrings checked against the task's own spec/tasks.md content. A match selects `timeouts.reviewing_wall_live` over the diff-only default and tells the reviewer a live check is expected for this task. |
+
+By default, the reviewer is told to judge from the diff and the gate's
+already-passing build/test/lint output alone — not to start a preview
+server or re-run a test suite itself, since doing so can run out of the
+shorter default time budget and discard a real, defect-free review. A task
+whose own spec content matches one of `live_verification_keywords` gets both
+the longer `reviewing_wall_live` budget and an explicit note that a live
+check is expected for it.
 
 ## `[progress]`
 

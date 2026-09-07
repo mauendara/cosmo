@@ -5,12 +5,88 @@ session-by-session narrative (what changed, what was found, how it was
 fixed) has been cut. That history isn't lost — it's in `git log` (every
 commit message explains its own *why*) and in
 [v3-implementation-state.md](v3-implementation-state.md)'s cumulative
-deviations table (the complete bug/fix log, entries 1-89). This file now
+deviations table (the complete bug/fix log, entries 1-93). This file now
 only carries what a session needs to *orient itself* before doing new work,
 not a record of how we got here.
 
 ## Where things stand
 
+- **v22 (2026-09-06/07): all nine of v15's wa-chat-component audit gaps are
+  now implemented (G9 already shipped in v17).** See deviations 91-93 in
+  `v3-implementation-state.md` for the full file:line account; summary
+  here. Order was dependency-driven (shared helper first, then standalone/
+  cheap gaps, then the helper's other consumers, then the remaining
+  CLI-only/event-only items, then the two largest cross-cutting ones last),
+  confirmed with the user before starting, then continued straight through
+  G6/G7/G2/G4 across the same investigation.
+  - **Shared building block**: `store.failure_signature.detect_repeat_block`
+    grew `require_block`/`key_fn` params (the plan doc's own recommended
+    approach) rather than a parallel function, so G1/G7/G8 can each reuse it.
+  - **G3** (orphan reap only on forced cancellation, never an ordinary
+    ending): new `proc.reap.sweep_orphans_after_completion`, detection-only,
+    called unconditionally after every `propose`/`implement`/`review`
+    attempt regardless of outcome. New `task.orphan_detected` event.
+  - **G5** (gitleaks scanning gitignored build artifacts): `git.secrets.
+    run_gitleaks_scan` now generates a per-scan gitleaks config excluding
+    `git status --ignored` paths plus a static build-output-dir backstop.
+  - **G8** (a hard provider budget/key ceiling retried like a transient
+    blip): new `provider_budget_exceeded` signature and a
+    `FailureClassification.terminal` flag; `task.machine`'s three
+    environment_error retry points now block immediately on it with an
+    actionable message instead of spending the ordinary retry budget.
+  - **G1** (fixed `IMPLEMENTING` turn/wall-clock budget regardless of task
+    shape): new `retries.turn_budget_growth_factor`/`turn_budget_max_
+    multiplier` config; a new `max_turns_exhausted` signature (the Claude
+    CLI's own bare `error_max_turns` subtype) drives an adaptive multiplier
+    on `harness.max_turns`/`implementing_wall`/`implementing_stall`, never
+    on a task's first attempt. Required threading an optional `max_turns`
+    override through `HarnessAdapter.implement()` and every adapter's
+    `_build_argv`/`_claude_flags` (mirrors `probe`'s existing `model`
+    override pattern); Codex's adapter ignores it (no turn-count concept).
+  - **G6** (CLI flags for resume stages that previously required hand-
+    running `store.writer.queue_resume_at`): `cli.main.queue_retry` gains
+    `--resume-at-validating`/`--resume-at-committing`, pure CLI surface, no
+    state-machine change (both stages already worked end-to-end). Refuses
+    combining any two of `--keep-implementation`/`--resume-at-validating`/
+    `--resume-at-committing`.
+  - **G7** (a repeat adversarial-review rejection had no signal of its
+    own): new `task.review_repeat_rejection` event (`warning`), emitted the
+    moment the shared helper finds 2+ consecutive `adversarial_review`
+    failures for a task -- deliberately no signature-matching of the
+    rejection reason itself, per the user's own decision in the plan doc.
+  - **G2** (a fixed `reviewing_wall` regardless of whether the task needs
+    live/visual verification): new `timeouts.reviewing_wall_live` and
+    `review.live_verification_keywords` config; `task.machine.
+    _needs_live_verification` does a deterministic substring check against
+    the task's own `tasks.md` content and `_do_reviewing` selects the
+    matching wall clock. `HarnessAdapter.review()` gains a `live_
+    verification: bool` param (mirrors G1's `max_turns` pattern);
+    `_ClaudeCodeInvoker.review()` now builds a hard "diff-only, don't run
+    the app" instruction by default, or an explicit "live check expected,
+    longer budget granted" one when the keyword matches. All three
+    `agents/reviewer.md` templates gained the same static diff-only
+    section; `test_harness_template_parity.py` gained matching byte-parity
+    coverage for `agents/` (previously only `hooks/` had it).
+  - **G4** (the all-or-nothing `allow_test_edits` gate, set only in advance
+    on the queue row, with no way for a session to request a scoped
+    exception mid-task): new stdlib-only `gate.structural_checks` module
+    (`count_assertions`/`is_test_path`/`find_skip_annotation`) factored out
+    of `gate/diffgate.py`'s own logic, then copied byte-for-byte into every
+    harness template's `hooks/_structural_checks.py` -- confirmed by hand
+    first that the hook runs standalone with no `cosmo` package on the
+    path, ruling out a normal import. `test_path_guard.py` now runs a
+    pre-flight structural check on the specific `Edit`/`Write` call:
+    allowed when it doesn't decrease the assertion count, doesn't
+    introduce a skip annotation, and doesn't drop more than 20 lines;
+    `NotebookEdit` keeps no structural exception. Also fixed the related
+    gap found in the same code read: `gate.diffgate.run_diff_gate` used to
+    skip its assertion-count/skip-annotation checks entirely whenever
+    `allow_test_edits=True` -- now only the blanket "modified or deleted"
+    rule is what that flag bypasses.
+  - `config-schema.md`/`event-schema.md`/`cli.md`/`validation-gate-and-
+    guardrails.md` (EN+ES) updated for the new config keys, event types,
+    CLI flags, and guardrail behavior.
+  - `./check.sh` fully green, **794 tests passing, 9 skipped** (was 754).
 - **`cosmo init`'s git-identity step (2026-09-06): now mandatory, never
   suggests the "Cosmo" identity, and syncs into `[git]` config too.**
   Requested directly: the user didn't want commits authored by
@@ -671,7 +747,7 @@ not a record of how we got here.
 | [v12-ori-opencode-harness-info.md](v12-ori-opencode-harness-info.md) | Research findings on Ori Harness (`ori claude`, real Claude Code through OpenRouter) and OpenCode as possible new harness adapters | **Findings only, not a plan or a `HarnessCapabilities` proposal.** Nothing implemented. Both have real, confirmed-working headless gating, unlike Cline — read this before choosing which harness to build next |
 | [v13-ori-cc-harness-template-plan.md](v13-ori-cc-harness-template-plan.md) | The build plan for `ori-claude` as a second harness adapter and template, alongside native `claude` | **Done — Phases 1-6 all complete**, including Phase 6's real-invocation validations (V2, the gating one, confirmed passing) and the public-docs commit. See this handoff's own bullet above and [v8-validations-for-later.md](v8-validations-for-later.md). Nothing left open. Its four design decisions were chosen by the user, not derived — don't relitigate them if extending it (e.g. a third adapter) |
 | [v14-cosmo-branch-isolation-plan.md](v14-cosmo-branch-isolation-plan.md) | Optional `cosmo_branch` base-branch mode: `cosmo init` forks an isolated branch off the real base branch so templates/harness scaffolding never lands on `develop`/`main` | **Done — implemented and tested**, see `v3-implementation-state.md` deviation 88 for the full account (including two real unborn-HEAD gaps this design doc didn't anticipate, and two of its `cli/main.py` assumptions that didn't match the real code). Nothing left open |
-| [v15-fixes-after-wa-chat-run.md](v15-fixes-after-wa-chat-run.md) | Nine gaps (G1-G9) found auditing the real `wa-chat-component` run history: adaptive turn/time budgets, diff-only review by default, orphaned-process reaping, a structural allow-list for test-file edits, gitleaks scanning gitignored paths, missing resume-stage CLI flags, repeat-review-rejection detection, and hard provider-budget errors retried like transient blips | **Plan only — nothing implemented.** G1/G2/G4/G7 already carry a user-made design decision in their own section; G3/G5/G6/G8 have no open question and are ready to build; G9 is already fixed (v17), kept only for numbering completeness |
+| [v15-fixes-after-wa-chat-run.md](v15-fixes-after-wa-chat-run.md) | Nine gaps (G1-G9) found auditing the real `wa-chat-component` run history: adaptive turn/time budgets, diff-only review by default, orphaned-process reaping, a structural allow-list for test-file edits, gitleaks scanning gitignored paths, missing resume-stage CLI flags, repeat-review-rejection detection, and hard provider-budget errors retried like transient blips | **All nine gaps implemented (v22, deviations 91-93; G9 was already fixed in v17).** Plan complete, nothing open |
 
 Internal `vN` documents above are **not** the user-facing ones. Public docs
 live in `README.md`, `user-docs/`, and the four root docs — written for a

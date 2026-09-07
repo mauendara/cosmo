@@ -148,6 +148,43 @@ def test_review_uses_review_model_override(tmp_path: Path, monkeypatch: pytest.M
     assert "--model claude-haiku-4-5" in log.read_text()
 
 
+def test_review_default_prompt_forbids_running_the_app(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """G2 (docs/v15-fixes-after-wa-chat-run.md): diff-only by default -- a
+    hard instruction not to start a preview/dev server or re-run tests,
+    since a review that reasonably decides to do that anyway can run out of
+    the (shorter) default time budget and discard a real, defect-free
+    review."""
+    log = tmp_path / "calls.log"
+    monkeypatch.setenv("FAKE_CLAUDE_LOG", str(log))
+    adapter = _adapter(tmp_path)
+
+    adapter.review("t1", Path("openspec/changes/add-foo"), "main")
+
+    prompt = log.read_text()
+    assert "do not start a preview" in prompt
+    assert "longer time budget" not in prompt
+
+
+def test_review_live_verification_prompt_grants_the_longer_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """G2: `live_verification=True` (this task's spec matched a live/visual
+    keyword) flips the instruction to explicitly expect and permit a real
+    check, matching `task.machine._do_reviewing`'s own longer
+    `reviewing_wall_live` budget for the same call."""
+    log = tmp_path / "calls.log"
+    monkeypatch.setenv("FAKE_CLAUDE_LOG", str(log))
+    adapter = _adapter(tmp_path)
+
+    adapter.review("t1", Path("openspec/changes/add-foo"), "main", live_verification=True)
+
+    prompt = log.read_text()
+    assert "longer time budget" in prompt
+    assert "do not start a preview" not in prompt
+
+
 def test_probe_uses_an_explicit_model_override(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

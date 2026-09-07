@@ -243,6 +243,15 @@ or `MERGING`, neither of the above applies — the task resumes directly at
 that stage instead, since everything before it already passed validation
 (and review, for `MERGING`).
 
+Pass `--resume-at-validating`/`--resume-at-committing` to force one of those
+same resume points directly, regardless of what the most recent block was —
+for when a fix was already applied to the worktree by something other than a
+full harness session (a human patch, or independent verification) and the
+goal is to hand it back to Cosmo's own judgment without paying for a stage
+that already succeeded by some other means. Neither touches `attempt_count`
+or the worktree, and neither combines with `--keep-implementation` or each
+other — they resume at different points, so pass only one.
+
 **Repeat-block guard**: a task whose most recent block repeats
 `retries.repeat_block_threshold` prior blocks for the same reason is refused
 rather than silently granted another attempt budget.
@@ -252,6 +261,8 @@ rather than silently granted another attempt budget.
 | `--repo <path>` | current directory | Target repo the worktree lives in. |
 | `--force` | off | Proceed past the repeat-block guard. |
 | `--keep-implementation` | off | Keep the failed attempt's own code instead of discarding it back to the `PROPOSING` commit. |
+| `--resume-at-validating` | off | Skip straight to `VALIDATING`, regardless of the most recent block. A genuine failure there falls through to a real `IMPLEMENTING` retry. |
+| `--resume-at-committing` | off | Skip straight to `COMMITTING`, regardless of the most recent block. |
 | `--config`, `-c <path>` | — | Config file. |
 
 ### `cosmo queue block TASK_ID`

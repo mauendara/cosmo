@@ -177,7 +177,7 @@ class OriClaudeAdapter(_ClaudeCodeInvoker):
 
     # -- invocation mechanics ------------------------------------------------
 
-    def _build_argv(self, prompt: str, model: str) -> list[str]:
+    def _build_argv(self, prompt: str, model: str, *, max_turns: int | None = None) -> list[str]:
         argv = [
             self._binary,
             ORI_SUBCOMMAND,
@@ -186,7 +186,7 @@ class OriClaudeAdapter(_ClaudeCodeInvoker):
             "--",
             "-p",
             prompt,
-            *self._claude_flags(),
+            *self._claude_flags(max_turns=max_turns),
         ]
         # Ori consumes `--model` itself (v12); a second one after `--` would
         # be a conflicting flag reaching `claude`, not an override.

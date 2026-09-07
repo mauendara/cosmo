@@ -106,7 +106,7 @@ class _ClaudeCodeInvoker(HarnessAdapter):
         self._running: dict[str, ManagedProcess] = {}
 
     @abstractmethod
-    def _build_argv(self, prompt: str, model: str) -> list[str]:
+    def _build_argv(self, prompt: str, model: str, *, max_turns: int | None = None) -> list[str]:
         """Full argv for this route. Must never contain
         `--dangerously-skip-permissions`/`bypassPermissions` -- assert it on
         the final list, in addition to `_claude_flags`' own assertion, so a
@@ -121,7 +121,7 @@ class _ClaudeCodeInvoker(HarnessAdapter):
         directly rather than passing `--model`, the one route where model
         selection genuinely happens in the environment, not argv."""
 
-    def _claude_flags(self) -> list[str]:
+    def _claude_flags(self, *, max_turns: int | None = None) -> list[str]:
         """Everything after `-p <prompt>` that is identical either route --
         notably NOT `--model`: the native route passes it here directly, the
         Ori route passes it to `ori` before its own `--`, since Ori consumes
@@ -139,13 +139,17 @@ class _ClaudeCodeInvoker(HarnessAdapter):
         `--setting-sources` was never the cause. See `harness/ori/adapter.py`
         and `harness/claude_openrouter/adapter.py` for what *is* real from
         this same investigation (a genuine, still-unresolved `ori` bug,
-        unrelated to this flag)."""
+        unrelated to this flag).
+
+        `max_turns`, given, overrides `config.harness.max_turns` for this
+        call only (G1's adaptive budget, see `implement`'s own docstring
+        on `HarnessAdapter`)."""
         flags = [
             "--output-format",
             "stream-json",
             "--verbose",
             "--max-turns",
-            str(self.config.harness.max_turns),
+            str(max_turns if max_turns is not None else self.config.harness.max_turns),
             "--permission-mode",
             self.config.harness.permission_mode,
             # A headless run must run under Cosmo's own project settings
@@ -222,6 +226,7 @@ class _ClaudeCodeInvoker(HarnessAdapter):
         retry_context: str | None = None,
         *,
         on_activity: Callable[[str], None] | None = None,
+        max_turns: int | None = None,
     ) -> HarnessResult:
         prompt = f"Implement the OpenSpec change at {spec_path} (task {task_id})."
         if retry_context:
@@ -241,7 +246,13 @@ class _ClaudeCodeInvoker(HarnessAdapter):
                 "and continue from there rather than redoing finished subtasks."
             )
         model = self.config.harness.resolve_model(self.name, "implement")
-        return self._invoke(task_id=task_id, prompt=prompt, model=model, on_activity=on_activity)
+        return self._invoke(
+            task_id=task_id,
+            prompt=prompt,
+            model=model,
+            on_activity=on_activity,
+            max_turns=max_turns,
+        )
 
     def review(
         self,
@@ -250,6 +261,7 @@ class _ClaudeCodeInvoker(HarnessAdapter):
         base_branch: str,
         *,
         on_activity: Callable[[str], None] | None = None,
+        live_verification: bool = False,
     ) -> HarnessResult:
         # No `retry_context`, no session resumption -- a fresh `claude -p`
         # call with no memory of the implementation session (v4 workflow
@@ -260,11 +272,38 @@ class _ClaudeCodeInvoker(HarnessAdapter):
         # instructs the reviewer to write it to
         # `task.review.REVIEW_RESULT_RELATIVE_PATH`, which
         # `task.machine._do_reviewing` reads back after this returns.
+        #
+        # G2 (docs/v15-fixes-after-wa-chat-run.md): diff-only by default --
+        # a hard instruction, not a hint, mirroring the `reviewer.md`
+        # templates' own "the validation gate already confirmed the build
+        # and tests pass" framing -- since a review session that reasonably
+        # decides to spin up a preview server and replay an entire
+        # Playwright VR suite screenshot-by-screenshot can run out of time
+        # under the default budget, discarding a real, defect-free review.
+        # `live_verification=True` (this task's own spec content matched a
+        # live/visual-verification keyword) explicitly lifts that
+        # restriction and says the longer budget is available for a reason.
+        if live_verification:
+            verification_instruction = (
+                "This task's own spec calls for live/visual verification -- you have a "
+                "longer time budget for this call specifically so you can actually run it "
+                "(e.g. start a preview server, replay a Playwright/visual-regression suite) "
+                "rather than judging from the diff alone."
+            )
+        else:
+            verification_instruction = (
+                "The validation gate has already run this diff's real build/test/lint "
+                "commands and confirmed they pass -- that is not what you're here to "
+                "re-check. Judge from the diff and that already-passing gate output alone; "
+                "do not start a preview/dev server or re-run the test suite yourself, and "
+                "do not spend this call's time budget attempting to."
+            )
         prompt = (
             f"Review this branch's implementation for task {task_id}. Run "
             f"`git diff {base_branch}...HEAD` to see the diff and read the OpenSpec "
             f"change at {spec_path} (its spec/tasks.md) for what was asked -- you have "
             f"no memory of the implementation session, judge only what these show. "
+            f"{verification_instruction} "
             f"When done, write your verdict to "
             f"`{REVIEW_RESULT_RELATIVE_PATH.as_posix()}` as JSON: "
             f'`{{"verdict": "approved"}}` or `{{"verdict": "rejected", "reason": "<why, '
@@ -304,8 +343,9 @@ class _ClaudeCodeInvoker(HarnessAdapter):
         prompt: str,
         model: str,
         on_activity: Callable[[str], None] | None = None,
+        max_turns: int | None = None,
     ) -> HarnessResult:
-        argv = self._build_argv(prompt, model)
+        argv = self._build_argv(prompt, model, max_turns=max_turns)
         env = self._build_env(task_id, model)
         raw_log_path = (
             self.config.paths.log_dir / "harness" / task_id / f"{uuid.uuid4().hex}.ndjson"

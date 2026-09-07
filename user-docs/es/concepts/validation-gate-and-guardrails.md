@@ -105,12 +105,27 @@ que renderiza JSX *debe* ser `.tsx`, así que proteger solo
 `**/*.test.ts` deja sin protección cada test de componente en un proyecto
 TypeScript+JSX.
 
-El guardián se evita solo cuando la propia fila de cola de la tarea tiene
+El guardián se evita cuando la propia fila de cola de la tarea tiene
 `allow_test_edits: true` — fijado por tarea al momento de encolar
 (`cosmo queue add --allow-test-edits`) o en el frontmatter del archivo de la
 tarea. El hook lee ese flag directamente de la base de datos de Cosmo,
 porque un hook es un proceso del sistema operativo separado sin otra manera
 de preguntar.
+
+También se evita, sin `allow_test_edits`, cuando la edición *específica*
+solicitada califica estructuralmente: no reduce el conteo de aserciones del
+archivo, no introduce una anotación de omisión, y no es una eliminación
+completa del archivo ni una reducción drástica de contenido. Una corrección
+genuina que toca un archivo de test — actualizar una firma de prop que un
+test pasa, por ejemplo — no necesita `allow_test_edits` fijado de antemano.
+Debilitar o deshabilitar un test, o eliminarlo/vaciarlo, sí lo necesita.
+`NotebookEdit` no tiene excepción estructural (la estructura JSON de un
+notebook hace que el conteo de aserciones a nivel de línea no sea confiable)
+— un notebook protegido solo puede editarse con `allow_test_edits` fijado.
+Esto refleja las mismas verificaciones de conteo de aserciones/anotación de
+omisión/caída de líneas del diff gate más abajo, evaluadas contra la única
+llamada solicitada en lugar de un diff ya comprometido, ya que el hook se
+dispara antes de que se haga ningún commit.
 
 **`annotation_guard.py`** — bloquea *introducir* una anotación de skip o
 disable: `@Disabled`, `@Ignore`, `.skip(`, `.only(`, `xit(`, `xdescribe(` y
@@ -187,12 +202,22 @@ sospechoso.
 
 **Pero que un archivo de test existente se modifique, sea como sea, es una
 violación.** No "modificado de forma sospechosa" — modificado. Si una tarea
-legítimamente necesita cambiar un test existente, esa tarea necesita
-`allow_test_edits`, lo cual evade el diff gate por completo para ella. Esta
-es una regla deliberadamente contundente: distinguir una actualización
-honesta de un test de una interesada es precisamente el juicio que no se
-puede confiar que un agente sin supervisión haga en su propio nombre, así
-que se escala a una decisión humana tomada al momento de encolar.
+legítimamente necesita cambiar un test existente — casi siempre porque la
+verificación estructural previa de arriba ya la dejó pasar durante la
+sesión —, esa tarea necesita `allow_test_edits`. Esta es una regla
+deliberadamente contundente: distinguir una actualización honesta de un
+test de una interesada es precisamente el juicio que no se puede confiar
+que un agente sin supervisión haga en su propio nombre, así que se escala a
+una decisión humana tomada al momento de encolar.
+
+Sin embargo, `allow_test_edits` solo evade *esta* regla contundente de
+"modificado o eliminado" — las comprobaciones de conteo de aserciones,
+anotación de omisión y caída de LOC de abajo se siguen ejecutando de todos
+modos. Una tarea marcada con `allow_test_edits` puede eliminar
+legítimamente un archivo de test obsoleto (eliminar todas sus aserciones es
+esperado, no es "debilitar" uno que sobrevive), pero aun así no puede vaciar
+o deshabilitar silenciosamente un test que sigue presente; eso sigue siendo
+un fallo real de `test_integrity`.
 
 El conteo de aserciones es por diff, no por archivo: los sitios de llamada
 se cuentan en líneas agregadas versus eliminadas a través de cada archivo de

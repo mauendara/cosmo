@@ -94,11 +94,24 @@ The `.tsx`/`.jsx` patterns aren't decorative: a React component test that
 renders JSX *must* be `.tsx`, so guarding only `**/*.test.ts` leaves every
 component test in a TypeScript+JSX project unprotected.
 
-The guard is bypassed only when the task's own queue row has
+The guard is bypassed when the task's own queue row has
 `allow_test_edits: true` — set per task at enqueue time
 (`cosmo queue add --allow-test-edits`) or in the task file's frontmatter. The
 hook reads that flag out of Cosmo's database directly, because a hook is a
 separate OS process with no other way to ask.
+
+It's also bypassed, without `allow_test_edits`, when the *specific* edit
+being requested structurally qualifies: it doesn't reduce the file's
+assertion count, doesn't introduce a skip annotation, and isn't a full-file
+deletion or drastic content drop. A genuine fix that happens to touch a test
+file — updating a prop signature a test passes, say — doesn't need
+`allow_test_edits` set in advance. Weakening or disabling a test, or
+deleting/gutting one, still does. `NotebookEdit` has no structural exception
+(a notebook's JSON structure makes line-level assertion-counting
+unreliable) — a protected notebook can only be edited with `allow_test_edits`
+set. This mirrors the diff gate's own assertion-count/skip-annotation/LOC
+checks below, evaluated against just the one call being requested rather
+than a committed diff, since the hook fires before anything is committed.
 
 **`annotation_guard.py`** — blocks *introducing* a skip or disable
 annotation: `@Disabled`, `@Ignore`, `.skip(`, `.only(`, `xit(`, `xdescribe(`
@@ -167,11 +180,19 @@ checks — an added-but-immediately-disabled test is still suspicious.
 
 **But an existing test file being modified at all is a violation.** Not
 "modified suspiciously" — modified. If a task legitimately needs to change an
-existing test, that task needs `allow_test_edits`, which bypasses the diff
-gate entirely for it. This is a blunt rule on purpose: distinguishing an
-honest test update from a self-serving one is precisely the judgment call an
+existing test — most often because the pre-flight structural check above
+already let it through during the session — that task needs
+`allow_test_edits`. This is a blunt rule on purpose: distinguishing an honest
+test update from a self-serving one is precisely the judgment call an
 unsupervised agent can't be trusted to make on its own behalf, so it's
 escalated to a human decision made at enqueue time.
+
+`allow_test_edits` only bypasses *this* blunt "modified or deleted" rule,
+though — the assertion-count, skip-annotation, and LOC-drop checks below
+still run regardless. A task flagged `allow_test_edits` can legitimately
+delete an obsolete test file (removing all of its assertions is expected,
+not "weakening" one that survives) but still can't quietly gut or disable a
+test that's still present; that's still a real `test_integrity` failure.
 
 Assertion counting is per-diff, not per-file: call sites are counted on added
 versus removed lines across every test file — `assertThat(` (AssertJ),

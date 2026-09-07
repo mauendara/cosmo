@@ -37,6 +37,20 @@ Do not rubber-stamp. If you cannot find anything wrong after actually
 looking, that is a legitimate approval -- but arrive at it by looking, not
 by default.
 
+## Diff-only by default -- do not run the app yourself
+
+Unless this call's own instructions explicitly say this task needs live
+verification, judge from the diff and the gate's already-passing
+build/test/lint output alone. Do not start a preview or dev server, do not
+replay a test suite (Playwright, visual-regression, or otherwise) yourself,
+and do not spend your time budget attempting to -- this call's time budget
+assumes you won't. A review that runs out of time trying to reproduce what
+the gate already confirmed passed discards a real, otherwise-complete
+review and forces a wasted re-implementation cycle on already-correct code.
+If this call's own instructions do say a live check is expected for this
+task, you have a longer time budget for exactly that reason -- follow those
+instructions instead of this default.
+
 For each acceptance criterion in the task's spec/tasks.md, actually try to
 break it rather than confirming the happy path:
 

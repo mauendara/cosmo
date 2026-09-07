@@ -111,6 +111,15 @@ class TimeoutConfig(_Strict):
     """v4 workflow changes: `REVIEWING`'s own wall clock. No stall variant
     -- like `proposing_wall`, this is one bounded harness call, not a
     multi-turn session with a liveness watcher to stall-check."""
+    reviewing_wall_live: int = Field(gt=0)
+    """G2 (docs/v15-fixes-after-wa-chat-run.md): the longer budget applied
+    only when `review.live_verification_keywords` matches the task's own
+    spec/tasks.md content -- a review that's expected to spin up a preview
+    server and replay a visual/e2e suite needs more than the diff-only
+    default. Real evidence: `wa-chat-storybook-vr`'s review twice ran out
+    of time replaying an entire Playwright VR suite screenshot-by-
+    screenshot under the default budget, discarding a real, defect-free
+    review both times."""
     committing_wall: int = Field(gt=0)
     merging_wall: int = Field(gt=0)
     run_wall: int = Field(gt=0)
@@ -147,6 +156,25 @@ class RetryConfig(_Strict):
     # identical `error_max_turns` reason 3 separate times before this
     # existed, each time silently handed 2 more attempts.
     repeat_block_threshold: int = Field(gt=0)
+
+    # G1 (docs/v15-fixes-after-wa-chat-run.md): adaptive, not static
+    # per-template -- widen `IMPLEMENTING`'s turn/wall-clock budget after
+    # *repeated* `max_turns_exhausted` failures on the *same* task, rather
+    # than trying to pre-classify which task templates need more room (a
+    # Storybook+Playwright-VR task is far more turn-hungry than a scaffold
+    # task, and nothing short of real per-task history tells them apart).
+    # `cost.max_cost_per_task_usd` is the real backstop against a task
+    # stuck in an unproductive loop burning an ever-larger budget for
+    # nothing -- deliberately not a new turn-count ceiling invented to do
+    # that job twice.
+    turn_budget_growth_factor: float = Field(gt=1.0)
+    """Multiplier applied per prior consecutive `max_turns_exhausted`
+    failure this task has logged, e.g. 1.5 -> 1.5x after the 1st, 2.25x
+    after the 2nd. Never applied on a task's first `IMPLEMENTING` attempt."""
+    turn_budget_max_multiplier: float = Field(ge=1.0)
+    """Hard ceiling on the multiplier above, e.g. 3.0 caps an 80-turn
+    default at 240 turns no matter how many times this task has exhausted
+    its budget."""
 
     @model_validator(mode="after")
     def _delay_ordered(self) -> RetryConfig:
@@ -284,6 +312,14 @@ class ReviewConfig(_Strict):
     decision: "a failed adversarial review retries like a gate failure")."""
 
     enabled: bool
+    # G2 (docs/v15-fixes-after-wa-chat-run.md): a deterministic, case-
+    # insensitive substring check against the task's own spec/tasks.md
+    # content -- not prose interpretation (spec 4) -- for "this task's own
+    # acceptance criteria call for live/visual verification, budget the
+    # review accordingly." Every real case behind this gap already names
+    # its verification method in prose, so this needs no new queue-row
+    # column or migration.
+    live_verification_keywords: list[str] = Field(min_length=1)
 
 
 class DiskConfig(_Strict):

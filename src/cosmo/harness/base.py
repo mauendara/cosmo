@@ -151,7 +151,15 @@ class HarnessAdapter(ABC):
         retry_context: str | None = None,
         *,
         on_activity: Callable[[str], None] | None = None,
-    ) -> HarnessResult: ...
+        max_turns: int | None = None,
+    ) -> HarnessResult:
+        """`max_turns`, if given, overrides `config.harness.max_turns` for
+        this call only (G1, `docs/v15-fixes-after-wa-chat-run.md`):
+        `task.machine._do_implementing` widens it on a task that has
+        already exhausted the default budget in a row, rather than every
+        task paying for a wider budget upfront. `None` (the default) uses
+        the harness's own configured default. A harness with no turn-count
+        concept of its own (e.g. Codex) accepts and ignores it."""
 
     @abstractmethod
     def review(
@@ -161,6 +169,7 @@ class HarnessAdapter(ABC):
         base_branch: str,
         *,
         on_activity: Callable[[str], None] | None = None,
+        live_verification: bool = False,
     ) -> HarnessResult:
         """v4 workflow changes (`docs/v4-changes-to-workflow-plan.md`): a
         genuinely fresh, separate call -- no session resumption, no
@@ -180,7 +189,15 @@ class HarnessAdapter(ABC):
         stream" shape `HarnessCapabilities.reports_native_progress=False`
         already uses for `tasks.md` -- and `task.machine._do_reviewing`
         reads it back after this call returns, harness-agnostically.
-        """
+
+        `live_verification` (G2, `docs/v15-fixes-after-wa-chat-run.md`):
+        `False` (the default) means judge from the diff and the gate's
+        already-passing build/test/lint output alone -- do not re-run
+        servers or test suites. `True` means this task's own spec content
+        matched a live/visual-verification keyword and a real check is
+        expected, paired with `task.machine`'s own longer
+        `timeouts.reviewing_wall_live` budget for the same call. A harness
+        with no distinct review prompt of its own accepts and ignores it."""
 
     @abstractmethod
     def get_progress(self, task_id: str) -> tuple[int, int]:
