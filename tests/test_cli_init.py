@@ -48,6 +48,9 @@ def test_templates_list_shows_the_real_shipped_templates() -> None:
     assert "java-spring-react" in result.stdout
 
 
+_IDENTITY_INPUT = "Test Dev\ntest@example.com\n"
+
+
 @pytest.mark.skipif(
     subprocess.run(["which", "openspec"], capture_output=True, check=False).returncode != 0,
     reason="real openspec CLI not on PATH",
@@ -55,8 +58,7 @@ def test_templates_list_shows_the_real_shipped_templates() -> None:
 def test_init_auto_inits_a_non_git_directory(tmp_path: Path) -> None:
     target = tmp_path / "plain-dir"
     target.mkdir()
-    # "\n" accepts the (now-interactive) default git-identity prompt below.
-    result = runner.invoke(app, ["init", str(target)], input="\n")
+    result = runner.invoke(app, ["init", str(target)], input=_IDENTITY_INPUT)
     assert result.exit_code == 0, result.stdout
     assert (target / ".git").is_dir()
     current_branch = subprocess.run(
@@ -80,7 +82,9 @@ def test_init_against_a_scratch_git_repo_produces_every_documented_artifact(
     target = _git_repo(tmp_path)
 
     result = runner.invoke(
-        app, ["init", str(target), "--project-template", "java-spring-react"], input="\n"
+        app,
+        ["init", str(target), "--project-template", "java-spring-react"],
+        input=_IDENTITY_INPUT,
     )
 
     assert result.exit_code == 0, result.stdout
@@ -106,7 +110,7 @@ def test_init_commits_its_own_bootstrap_output(tmp_path: Path) -> None:
     run` doesn't inherit init's own leftovers."""
     target = _git_repo(tmp_path)
 
-    result = runner.invoke(app, ["init", str(target)], input="\n")
+    result = runner.invoke(app, ["init", str(target)], input=_IDENTITY_INPUT)
 
     assert result.exit_code == 0, result.stdout
     assert "committed" in result.stdout
@@ -139,7 +143,9 @@ def test_init_cosmo_branch_mode_flag_forks_and_commits_on_the_cosmo_branch(
     target = _git_repo(tmp_path)
 
     result = runner.invoke(
-        app, ["init", str(target), "--base-branch-mode", "cosmo_branch"], input="\n"
+        app,
+        ["init", str(target), "--base-branch-mode", "cosmo_branch"],
+        input=_IDENTITY_INPUT,
     )
 
     assert result.exit_code == 0, result.stdout
@@ -207,7 +213,7 @@ def test_init_cosmo_branch_mode_stashes_dirty_work_and_reports_recovery(
     result = runner.invoke(
         app,
         ["init", str(target), "--base-branch-mode", "cosmo_branch", "--cosmo-branch-name", "iso"],
-        input="\n",
+        input=_IDENTITY_INPUT,
     )
 
     assert result.exit_code == 0, result.stdout
@@ -269,7 +275,7 @@ def test_init_does_not_auto_commit_pre_existing_dirty_work(tmp_path: Path) -> No
     subprocess.run(["git", "init", "-q"], cwd=target, check=True)
     (target / "untracked.txt").write_text("someone's own work in progress\n")
 
-    result = runner.invoke(app, ["init", str(target)], input="\n")
+    result = runner.invoke(app, ["init", str(target)], input=_IDENTITY_INPUT)
 
     assert result.exit_code == 0, result.stdout
     assert "init bootstrap output" not in result.stdout
@@ -288,7 +294,7 @@ def test_init_does_not_auto_commit_pre_existing_dirty_work(tmp_path: Path) -> No
 )
 def test_rerunning_init_reports_skipped_docs_and_refreshes_agent_dir(tmp_path: Path) -> None:
     target = _git_repo(tmp_path)
-    runner.invoke(app, ["init", str(target)], input="\n")
+    runner.invoke(app, ["init", str(target)], input=_IDENTITY_INPUT)
     stale = target / ".agent" / "claude" / "no-longer-in-the-template.txt"
     stale.write_text("stale")
 
@@ -304,33 +310,22 @@ def test_rerunning_init_reports_skipped_docs_and_refreshes_agent_dir(tmp_path: P
     subprocess.run(["which", "openspec"], capture_output=True, check=False).returncode != 0,
     reason="real openspec CLI not on PATH",
 )
-def test_init_seeds_the_config_default_identity_when_none_exists(tmp_path: Path) -> None:
+def test_init_prompts_for_identity_when_none_exists(tmp_path: Path) -> None:
+    """No config-default suggestion any more -- a human always types their
+    own identity, and it gets synced into `[git]` in the user config too, so
+    Cosmo's own automated commits stop defaulting to "Cosmo" as well."""
     target = _git_repo(tmp_path)
 
-    # "\n" accepts the default via the (now-interactive) prompt's own default=True.
-    result = runner.invoke(app, ["init", str(target)], input="\n")
+    result = runner.invoke(app, ["init", str(target)], input="Jane Dev\njane@example.com\n")
 
     assert result.exit_code == 0, result.stdout
     assert "No git identity configured" in result.stdout
-    assert "git identity" in result.stdout and "config default" in result.stdout
-    assert read_configured_identity(target) == GitIdentity(
-        name="Cosmo", email="cosmo@entropiainversa.com"
-    )
-
-
-@pytest.mark.skipif(
-    subprocess.run(["which", "openspec"], capture_output=True, check=False).returncode != 0,
-    reason="real openspec CLI not on PATH",
-)
-def test_init_declining_the_default_identity_prompts_for_one_instead(tmp_path: Path) -> None:
-    target = _git_repo(tmp_path)
-
-    result = runner.invoke(app, ["init", str(target)], input="n\nJane Dev\njane@example.com\n")
-
-    assert result.exit_code == 0, result.stdout
+    assert "cosmo@entropiainversa.com" not in result.stdout
     assert read_configured_identity(target) == GitIdentity(
         name="Jane Dev", email="jane@example.com"
     )
+    assert load_config().git.commit_author_name == "Jane Dev"
+    assert load_config().git.commit_author_email == "jane@example.com"
 
 
 @pytest.mark.skipif(
@@ -341,14 +336,18 @@ def test_init_declining_to_replace_an_existing_identity_leaves_it_untouched(
     tmp_path: Path,
 ) -> None:
     target = _git_repo(tmp_path)
-    runner.invoke(app, ["init", str(target)], input="\n")  # seeds the config default
+    runner.invoke(app, ["init", str(target)], input="Jane Dev\njane@example.com\n")
 
     result = runner.invoke(app, ["init", str(target)], input="n\n")
 
     assert result.exit_code == 0, result.stdout
     assert read_configured_identity(target) == GitIdentity(
-        name="Cosmo", email="cosmo@entropiainversa.com"
+        name="Jane Dev", email="jane@example.com"
     )
+    # Declining still syncs the existing repo identity into `[git]` -- so
+    # Cosmo's own commits match the human's real identity, not "Cosmo".
+    assert load_config().git.commit_author_name == "Jane Dev"
+    assert load_config().git.commit_author_email == "jane@example.com"
 
 
 @pytest.mark.skipif(
@@ -359,14 +358,16 @@ def test_init_confirming_replaces_an_existing_identity_with_the_prompted_one(
     tmp_path: Path,
 ) -> None:
     target = _git_repo(tmp_path)
-    runner.invoke(app, ["init", str(target)], input="\n")  # seeds the config default
+    runner.invoke(app, ["init", str(target)], input="Jane Dev\njane@example.com\n")
 
-    result = runner.invoke(app, ["init", str(target)], input="y\nJane Dev\njane@example.com\n")
+    result = runner.invoke(app, ["init", str(target)], input="y\nJohn Dev\njohn@example.com\n")
 
     assert result.exit_code == 0, result.stdout
     assert read_configured_identity(target) == GitIdentity(
-        name="Jane Dev", email="jane@example.com"
+        name="John Dev", email="john@example.com"
     )
+    assert load_config().git.commit_author_name == "John Dev"
+    assert load_config().git.commit_author_email == "john@example.com"
 
 
 @pytest.mark.skipif(
@@ -410,9 +411,10 @@ def test_init_without_target_path_or_interactive_fails_clean() -> None:
 def test_init_interactive_wizard_accepts_every_default(tmp_path: Path) -> None:
     target = _git_repo(tmp_path)
     # harness / template / base branch / base-branch-strategy / force-docs
-    # confirm / model-overrides confirm / git-identity confirm -- one blank
-    # line per prompt, each falling back to its own default.
-    result = runner.invoke(app, ["init", str(target), "-i"], input="\n\n\n\n\n\n\n")
+    # confirm / model-overrides confirm -- one blank line per prompt, each
+    # falling back to its own default -- then a mandatory git-identity
+    # name/email (no default is offered for that one).
+    result = runner.invoke(app, ["init", str(target), "-i"], input="\n\n\n\n\n\n" + _IDENTITY_INPUT)
 
     assert result.exit_code == 0, result.stdout
     assert "claude" in result.stdout and "-i wizard" in result.stdout
@@ -441,8 +443,8 @@ def test_init_interactive_skips_prompts_for_values_already_given_as_flags(
             "java-spring-react",
         ],
         # base branch / base-branch-strategy / force-docs confirm /
-        # model-overrides confirm / git-identity confirm
-        input="\n\n\n\n\n",
+        # model-overrides confirm, then mandatory git-identity name/email.
+        input="\n\n\n\n" + _IDENTITY_INPUT,
     )
 
     assert result.exit_code == 0, result.stdout
@@ -462,7 +464,7 @@ def test_init_interactive_reprompts_on_an_unknown_harness_name(tmp_path: Path) -
     result = runner.invoke(
         app,
         ["init", str(target), "-i"],
-        input="bogus-harness\nclaude\n\n\n\n\n\n\n",
+        input="bogus-harness\nclaude\n\n\n\n\n\n" + _IDENTITY_INPUT,
     )
 
     assert result.exit_code == 0, result.stdout
@@ -479,12 +481,12 @@ def test_init_interactive_model_overrides_only_write_the_fields_entered(
 ) -> None:
     target = _git_repo(tmp_path)
     # harness/template/base_branch/base-branch-strategy defaults, force-docs
-    # declined, model overrides accepted, only propose_model filled in, git
-    # identity default.
+    # declined, model overrides accepted, only propose_model filled in, then
+    # mandatory git-identity name/email.
     result = runner.invoke(
         app,
         ["init", str(target), "-i"],
-        input="\n\n\n\nn\ny\n\ncustom-propose-model\n\n\n\n",
+        input="\n\n\n\nn\ny\n\ncustom-propose-model\n\n\n" + _IDENTITY_INPUT,
     )
 
     assert result.exit_code == 0, result.stdout
@@ -507,11 +509,12 @@ def test_init_interactive_choosing_cosmo_branch_prompts_for_a_branch_name(
 ) -> None:
     target = _git_repo(tmp_path)
     # harness/template/base_branch defaults, base-branch-strategy=cosmo_branch,
-    # branch name default, force-docs/model-overrides/git-identity defaults.
+    # branch name default, force-docs/model-overrides defaults, then
+    # mandatory git-identity name/email.
     result = runner.invoke(
         app,
         ["init", str(target), "-i"],
-        input="\n\n\ncosmo_branch\n\n\n\n\n",
+        input="\n\n\ncosmo_branch\n\n\n\n" + _IDENTITY_INPUT,
     )
 
     assert result.exit_code == 0, result.stdout

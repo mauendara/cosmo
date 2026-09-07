@@ -11,6 +11,30 @@ not a record of how we got here.
 
 ## Where things stand
 
+- **`cosmo init`'s git-identity step (2026-09-06): now mandatory, never
+  suggests the "Cosmo" identity, and syncs into `[git]` config too.**
+  Requested directly: the user didn't want commits authored by
+  `Cosmo <cosmo@entropiainversa.com>`. Old behavior offered that address as
+  a one-keystroke-accept default whenever no identity existed; new behavior
+  (`cli/main.py::_ensure_git_identity`) always requires the human to type a
+  real name/email in that case — no default offered, no way to skip short
+  of `--git-author-name`/`--git-author-email`. Also fixes a real gap the
+  old code had even after a human set a real local identity: Cosmo's own
+  automated commits (decisions-log, merges — `task/machine.py`,
+  `git/merge.py`) never read the target repo's local git config at all,
+  only `cfg.git.commit_author_name`/`commit_author_email` via `-c` flags —
+  so they'd keep showing "Cosmo" regardless of what was set locally, unless
+  `unified_identity=True`. Fixed by writing whatever identity ends up in
+  effect (fresh prompt, `--git-author-*` flags, or an existing identity the
+  user chose to keep) back into `[git]` in the user config via
+  `write_user_config_table`, every `cosmo init` run. `tests/test_cli_init.py`
+  updated for the new mandatory two-prompt flow (18 tests, all passing).
+  Separately confirmed (no code needed): other CLI commands already refuse
+  to run against an unregistered repo — `_resolve_project_repo`
+  (`cli/main.py:226-250`) checks `find_project_by_path` and exits cleanly
+  with "run cosmo init ... first" if nothing's registered; already wired
+  into `run`, `run resume`, `spec add`, `spec queue`, `queue retry`.
+  `./check.sh` green, **754 tests passing, 9 skipped**.
 - **Codex adapter (2026-09-06): complete through real Phase 5/6 validation.**
   `codex` is a first-class harness with structured JSONL, explicit audited
   hooks, isolated personal configuration, saved-login authentication,

@@ -1094,7 +1094,13 @@ def init(
         if result.already_registered
         else f"[green]registered[/green] project {result.project_id}"
     )
-    _ensure_git_identity(result.target, cfg, git_author_name, git_author_email)
+    _ensure_git_identity(
+        result.target,
+        cfg,
+        git_author_name,
+        git_author_email,
+        config if config is not None else user_config_path(),
+    )
 
     # Found live: none of the steps above commit anything on their own --
     # `openspec/`, `docs/`, `.agent/<harness>/`, and the root symlinks all
@@ -1113,6 +1119,7 @@ def _ensure_git_identity(
     cfg: CosmoConfig,
     override_name: str | None,
     override_email: str | None,
+    config_path: Path,
 ) -> None:
     """Spec 3.4 extended: guarantees the target repo has *some* local git
     identity before the implementer's own ad hoc commits can rely on one --
@@ -1120,32 +1127,45 @@ def _ensure_git_identity(
     init` is a human-run command, unlike the headless harness sessions this
     identity ultimately serves) -- pass both --git-author-name/
     --git-author-email to skip the prompt for scripted/CI use.
+
+    Never offers the config's own `commit_author_name`/`commit_author_email`
+    default (i.e. "Cosmo <cosmo@entropiainversa.com>") as a suggestion --
+    a human always types their own. Whatever identity ends up in effect for
+    this repo is also written back into `[git]` in the user config, so
+    Cosmo's own automated commits (decisions-log, merges -- see
+    `task.machine`) stop defaulting to the "Cosmo" identity too, not just
+    the implementer's ad hoc commits.
     """
+
+    def _persist(identity: GitIdentity) -> None:
+        write_user_config_table(
+            config_path,
+            "git",
+            {"commit_author_name": identity.name, "commit_author_email": identity.email},
+        )
+
     if override_name and override_email:
-        set_local_identity(target, GitIdentity(name=override_name, email=override_email))
+        identity = GitIdentity(name=override_name, email=override_email)
+        set_local_identity(target, identity)
+        _persist(identity)
         console.print(f"git identity: [green]set[/green] {override_name} <{override_email}>")
         return
 
-    def _prompt_for_identity() -> None:
+    def _prompt_for_identity() -> GitIdentity:
         name = typer.prompt("Git author name")
         email = typer.prompt("Git author email")
-        set_local_identity(target, GitIdentity(name=name, email=email))
+        identity = GitIdentity(name=name, email=email)
+        set_local_identity(target, identity)
+        _persist(identity)
         console.print(f"git identity: [green]set[/green] {name} <{email}>")
+        return identity
 
     existing = read_configured_identity(target)
     if existing is None:
-        default = GitIdentity(name=cfg.git.commit_author_name, email=cfg.git.commit_author_email)
-        if typer.confirm(
-            f"No git identity configured for this repo. Use the default -- "
-            f"{default.name} <{default.email}>?",
-            default=True,
-        ):
-            set_local_identity(target, default)
-            console.print(
-                f"git identity: [green]set[/green] {default.name} <{default.email}> "
-                f"(config default)"
-            )
-            return
+        console.print(
+            "[yellow]No git identity configured for this repo (and none in global git "
+            "config).[/yellow] Enter one now -- required before any commit can be made."
+        )
         _prompt_for_identity()
         return
 
@@ -1157,6 +1177,7 @@ def _ensure_git_identity(
         "Define a separate identity for Cosmo to use in this repo instead?", default=False
     ):
         console.print("git identity: [dim]left as-is[/dim]")
+        _persist(existing)
         return
     _prompt_for_identity()
 
