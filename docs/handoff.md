@@ -1,4 +1,4 @@
-# Handoff — v0.1.1, three real bugs from v0.1.0's first real usage
+# Handoff — v0.2.0 version bump staged, not yet released
 
 This document was compressed for v0.1.0 forward: ~10 sessions' worth of
 session-by-session narrative (what changed, what was found, how it was
@@ -11,6 +11,25 @@ not a record of how we got here.
 
 ## Where things stand
 
+- **v0.2.0 (2026-09-08): version bumped from 0.1.1, changelog written,
+  not yet tagged/released.** Everything since v0.1.1's release (three new
+  harness adapters — `ori-claude`, `claude-openrouter`, `codex` — the
+  `cosmo_branch` base-branch isolation mode, the `cosmo init -i` wizard,
+  per-role model config, local-timezone console output, adaptive turn/wall
+  budgets, diff-only review by default, orphan reaping, the structural
+  test-edit allow-list, and the review-verdict/Task-tool/crash-resume/
+  gitleaks/provider-budget/git-identity fixes below) is new functionality
+  or a real bug fix, not a patch-level change — semver's pre-1.0 minor slot
+  fits. `pyproject.toml`, `src/cosmo/__init__.py.__version__`, and
+  `uv.lock` (via `uv lock`) all bumped to `0.2.0`; the release-notes text
+  is [changelogs/v0.2.0.md](changelogs/v0.2.0.md), meant to be pasted
+  directly into the GitHub Release body. **Not yet done**: no `develop`/
+  `master` merge, no PR, no `v0.2.0` tag, no GitHub Release published, no
+  `git push` — this session only staged the bump and the changelog on
+  `private`. Follow the same release flow v0.1.1 used (see the "v0.1.1 is
+  now the first real public release" bullet lower in this file) when ready
+  to actually cut it, and mark it **pre-release** again, same reasoning as
+  before (v6 and the v8 real-invocation validations are still open).
 - **v22 (2026-09-06/07): all nine of v15's wa-chat-component audit gaps are
   now implemented (G9 already shipped in v17).** See deviations 91-93 in
   `v3-implementation-state.md` for the full file:line account; summary
