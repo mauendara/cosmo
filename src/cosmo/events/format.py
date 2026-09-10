@@ -18,6 +18,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 from cosmo.events.envelope import Event, EventType
+from cosmo.store.clock import format_local
 
 WATCH_STALE_EVENT_TYPE = "watch.stale"
 """Not a real `EventType` member -- `notify.watch` constructs this event
@@ -56,7 +57,7 @@ def _run_paused_detail(payload: dict[str, object]) -> str:
     resume_delay = payload.get("resume_delay_seconds")
     if isinstance(resume_delay, int | float):
         eta = datetime.now(UTC) + timedelta(seconds=resume_delay)
-        parts.append(f"resume at {eta.strftime('%Y-%m-%d %H:%M UTC')}")
+        parts.append(f"resume at {eta.astimezone().strftime('%Y-%m-%d %H:%M %Z')}")
     return ", ".join(parts)
 
 
@@ -105,7 +106,9 @@ def event_detail(event: Event) -> str:
         case EventType.QUOTA_BYPASSED.value:
             cost = payload.get("run_cost_so_far_usd")
             cost_str = f"${cost:.2f}" if isinstance(cost, int | float) else "?"
-            return f"resets_at={payload.get('resets_at')}, cost_so_far={cost_str}"
+            resets_at = payload.get("resets_at")
+            resets_str = format_local(resets_at) if isinstance(resets_at, str) else resets_at
+            return f"resets_at={resets_str}, cost_so_far={cost_str}"
         case EventType.RUN_STOPPED.value:
             reason = payload.get("reason")
             return f"reason={reason}" if reason is not None else ""

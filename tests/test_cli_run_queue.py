@@ -35,6 +35,22 @@ def _register(repo: Path, *, harness: str = "claude") -> None:
         writer.close()
 
 
+def _register_cosmo_branch(
+    repo: Path, *, harness: str = "claude", real_base_branch: str = "develop"
+) -> None:
+    writer = StoreWriter(load_config().paths.db_path)
+    try:
+        writer.register_project(
+            target_path=str(repo.resolve()),
+            harness=harness,
+            base_branch_mode="cosmo_branch",
+            real_base_branch=real_base_branch,
+            cosmo_branch_name="cosmo",
+        )
+    finally:
+        writer.close()
+
+
 @pytest.fixture(autouse=True)
 def _isolated_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("COSMO_CONFIG", str(tmp_path / "absent.toml"))
@@ -136,6 +152,46 @@ def test_no_task_flag_routes_to_run_queue_and_prints_the_outcome(
     assert captured["repo_path"] == tmp_path.resolve()
     assert captured["base_branch"] == "develop"
     assert captured["harness_name"] == "claude"
+
+
+def test_cosmo_branch_mode_project_resolves_to_the_cosmo_branch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """v14: `run` against a `cosmo_branch`-mode project operates on the
+    project's own isolated branch, not the real upstream `base_branch`."""
+    _register_cosmo_branch(tmp_path)
+    captured: dict[str, Any] = {}
+
+    def _fake_run_queue(**kwargs: Any) -> RunOutcome:
+        captured.update(kwargs)
+        return _outcome(status=RunStatus.STOPPED, stop_reason=StopReason.QUEUE_EMPTY)
+
+    monkeypatch.setattr(cli_main, "run_queue", _fake_run_queue)
+
+    result = runner.invoke(app, ["run", "--repo", str(tmp_path)])
+
+    assert result.exit_code == 0, result.output
+    assert captured["base_branch"] == "cosmo"
+
+
+def test_explicit_base_branch_flag_still_overrides_cosmo_branch_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _register_cosmo_branch(tmp_path)
+    captured: dict[str, Any] = {}
+
+    def _fake_run_queue(**kwargs: Any) -> RunOutcome:
+        captured.update(kwargs)
+        return _outcome(status=RunStatus.STOPPED, stop_reason=StopReason.QUEUE_EMPTY)
+
+    monkeypatch.setattr(cli_main, "run_queue", _fake_run_queue)
+
+    result = runner.invoke(
+        app, ["run", "--repo", str(tmp_path), "--base-branch", "some-other-branch"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["base_branch"] == "some-other-branch"
 
 
 def test_a_paused_or_non_terminal_outcome_exits_nonzero(

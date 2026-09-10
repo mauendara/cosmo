@@ -51,7 +51,7 @@ class _StubProcess:
 
 def test_argv_never_contains_dangerously_skip_permissions(tmp_path: Path) -> None:
     adapter = _adapter(tmp_path)
-    argv = adapter._build_argv("hello")  # noqa: SLF001 -- exactly what this test pins
+    argv = adapter._build_argv("hello", adapter.config.harness.model)  # noqa: SLF001 -- exactly what this test pins
 
     assert "--dangerously-skip-permissions" not in argv
     assert "bypassPermissions" not in argv
@@ -59,7 +59,7 @@ def test_argv_never_contains_dangerously_skip_permissions(tmp_path: Path) -> Non
 
 def test_argv_carries_max_turns_and_permission_mode_from_config(tmp_path: Path) -> None:
     adapter = _adapter(tmp_path)
-    argv = adapter._build_argv("hello")  # noqa: SLF001
+    argv = adapter._build_argv("hello", adapter.config.harness.model)  # noqa: SLF001
 
     assert "--max-turns" in argv
     assert argv[argv.index("--max-turns") + 1] == str(adapter.config.harness.max_turns)
@@ -69,12 +69,148 @@ def test_argv_carries_max_turns_and_permission_mode_from_config(tmp_path: Path) 
     assert argv[argv.index("--output-format") + 1] == "stream-json"
 
 
-def test_argv_carries_model_from_config(tmp_path: Path) -> None:
+def test_argv_carries_the_model_it_was_given(tmp_path: Path) -> None:
+    """`_build_argv` no longer reads `config.harness.model` itself -- every
+    caller (`probe`/`propose`/`implement`/`review`) resolves its own model
+    (plain default, or a role-specific override) and passes it in. This
+    only pins that whatever model is passed reaches `--model` unchanged;
+    `test_propose_uses_propose_model_override`/`_implement_uses_.../
+    `_review_uses_...` below cover the per-role resolution itself."""
     adapter = _adapter(tmp_path)
-    argv = adapter._build_argv("hello")  # noqa: SLF001
+    argv = adapter._build_argv("hello", "claude-opus-5")  # noqa: SLF001
 
     assert "--model" in argv
-    assert argv[argv.index("--model") + 1] == adapter.config.harness.model
+    assert argv[argv.index("--model") + 1] == "claude-opus-5"
+
+
+def _adapter_with_model_overrides(
+    tmp_path: Path,
+    *,
+    propose_model: str | None = None,
+    implement_model: str | None = None,
+    review_model: str | None = None,
+) -> ClaudeCodeAdapter:
+    cfg = _config(tmp_path)
+    harness = cfg.harness.model_copy(
+        update={
+            "propose_model": propose_model,
+            "implement_model": implement_model,
+            "review_model": review_model,
+        }
+    )
+    cfg = cfg.model_copy(update={"harness": harness})
+    return ClaudeCodeAdapter(cfg, cwd=tmp_path, binary=str(FAKE_CLAUDE))
+
+
+def test_propose_uses_propose_model_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    log = tmp_path / "calls.log"
+    monkeypatch.setenv("FAKE_CLAUDE_LOG", str(log))
+    adapter = _adapter_with_model_overrides(tmp_path, propose_model="claude-opus-5")
+
+    adapter.propose(Path("openspec/changes/add-foo"), {"task_id": "add-foo"})
+
+    assert "--model claude-opus-5" in log.read_text()
+
+
+def test_propose_falls_back_to_the_default_model_when_unset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    log = tmp_path / "calls.log"
+    monkeypatch.setenv("FAKE_CLAUDE_LOG", str(log))
+    adapter = _adapter(tmp_path)
+
+    adapter.propose(Path("openspec/changes/add-foo"), {"task_id": "add-foo"})
+
+    assert f"--model {adapter.config.harness.model}" in log.read_text()
+
+
+def test_implement_uses_implement_model_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    log = tmp_path / "calls.log"
+    monkeypatch.setenv("FAKE_CLAUDE_LOG", str(log))
+    adapter = _adapter_with_model_overrides(tmp_path, implement_model="claude-sonnet-5")
+
+    adapter.implement("t1", Path("openspec/changes/add-foo"))
+
+    assert "--model claude-sonnet-5" in log.read_text()
+
+
+def test_review_uses_review_model_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    log = tmp_path / "calls.log"
+    monkeypatch.setenv("FAKE_CLAUDE_LOG", str(log))
+    adapter = _adapter_with_model_overrides(tmp_path, review_model="claude-haiku-4-5")
+
+    adapter.review("t1", Path("openspec/changes/add-foo"), "main")
+
+    assert "--model claude-haiku-4-5" in log.read_text()
+
+
+def test_review_default_prompt_forbids_running_the_app(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """G2 (docs/v15-fixes-after-wa-chat-run.md): diff-only by default -- a
+    hard instruction not to start a preview/dev server or re-run tests,
+    since a review that reasonably decides to do that anyway can run out of
+    the (shorter) default time budget and discard a real, defect-free
+    review."""
+    log = tmp_path / "calls.log"
+    monkeypatch.setenv("FAKE_CLAUDE_LOG", str(log))
+    adapter = _adapter(tmp_path)
+
+    adapter.review("t1", Path("openspec/changes/add-foo"), "main")
+
+    prompt = log.read_text()
+    assert "do not start a preview" in prompt
+    assert "longer time budget" not in prompt
+
+
+def test_review_live_verification_prompt_grants_the_longer_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """G2: `live_verification=True` (this task's spec matched a live/visual
+    keyword) flips the instruction to explicitly expect and permit a real
+    check, matching `task.machine._do_reviewing`'s own longer
+    `reviewing_wall_live` budget for the same call."""
+    log = tmp_path / "calls.log"
+    monkeypatch.setenv("FAKE_CLAUDE_LOG", str(log))
+    adapter = _adapter(tmp_path)
+
+    adapter.review("t1", Path("openspec/changes/add-foo"), "main", live_verification=True)
+
+    prompt = log.read_text()
+    assert "longer time budget" in prompt
+    assert "do not start a preview" not in prompt
+
+
+def test_probe_uses_an_explicit_model_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`spec add` is `probe`'s one real caller that wants a non-default
+    model (see `cli.main.spec_add`, which passes `harness.propose_model`
+    through) -- `probe` has no state-machine role of its own to resolve an
+    override from internally, so it takes one as a plain argument instead."""
+    log = tmp_path / "calls.log"
+    monkeypatch.setenv("FAKE_CLAUDE_LOG", str(log))
+    adapter = _adapter(tmp_path)
+
+    adapter.probe("hello", model="claude-opus-5")
+
+    assert "--model claude-opus-5" in log.read_text()
+
+
+def test_probe_falls_back_to_the_default_model_with_no_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    log = tmp_path / "calls.log"
+    monkeypatch.setenv("FAKE_CLAUDE_LOG", str(log))
+    adapter = _adapter(tmp_path)
+
+    adapter.probe("hello")
+
+    assert f"--model {adapter.config.harness.model}" in log.read_text()
 
 
 def test_propose_prompt_pins_the_change_name_to_spec_id(
@@ -93,7 +229,7 @@ def test_propose_prompt_pins_the_change_name_to_spec_id(
     captured: dict[str, object] = {}
 
     def _fake_invoke(
-        self: ClaudeCodeAdapter, *, task_id: str, prompt: str, on_activity: object
+        self: ClaudeCodeAdapter, *, task_id: str, prompt: str, model: str, on_activity: object
     ) -> None:
         captured["task_id"] = task_id
         captured["prompt"] = prompt
@@ -120,7 +256,7 @@ def test_propose_prompt_falls_back_to_spec_path_stem_without_spec_id(
     captured: dict[str, object] = {}
 
     def _fake_invoke(
-        self: ClaudeCodeAdapter, *, task_id: str, prompt: str, on_activity: object
+        self: ClaudeCodeAdapter, *, task_id: str, prompt: str, model: str, on_activity: object
     ) -> None:
         captured["prompt"] = prompt
         return None
@@ -138,7 +274,7 @@ def test_argv_restricts_setting_sources_to_project_only(tmp_path: Path) -> None:
     the real CLI by hand (Phase 4 state doc) -- this only pins the flag's
     presence in the constructed argv."""
     adapter = _adapter(tmp_path)
-    argv = adapter._build_argv("hello")  # noqa: SLF001
+    argv = adapter._build_argv("hello", adapter.config.harness.model)  # noqa: SLF001
 
     assert "--setting-sources" in argv
     assert argv[argv.index("--setting-sources") + 1] == "project"
@@ -156,7 +292,7 @@ def test_argv_carries_allowed_tools_regardless_of_settings_json(tmp_path: Path) 
     `--allowedTools` executed normally, unaffected by workspace trust. This
     only pins the flag's presence in the constructed argv."""
     adapter = _adapter(tmp_path)
-    argv = adapter._build_argv("hello")  # noqa: SLF001
+    argv = adapter._build_argv("hello", adapter.config.harness.model)  # noqa: SLF001
 
     assert "--allowedTools" in argv
     idx = argv.index("--allowedTools")
@@ -169,7 +305,7 @@ def test_env_carries_task_id_and_db_path_for_the_guardrail_hooks(tmp_path: Path)
     Cosmo's state -- it reads these two env vars to look up
     task_queue.allow_test_edits read-only."""
     adapter = _adapter(tmp_path)
-    env = adapter._build_env("task-42")  # noqa: SLF001
+    env = adapter._build_env("task-42", "claude-sonnet-5")  # noqa: SLF001
 
     assert env["COSMO_TASK_ID"] == "task-42"
     assert env["COSMO_DB_PATH"] == str(adapter.config.paths.db_path)

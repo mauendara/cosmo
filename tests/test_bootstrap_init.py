@@ -41,6 +41,25 @@ def _git_repo(tmp_path: Path) -> Path:
     return target
 
 
+def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", "-C", str(repo), *args], capture_output=True, text=True, check=True
+    )
+
+
+def _repo_with_committed_base_branch(tmp_path: Path, branch: str = "develop") -> Path:
+    target = tmp_path / "target-repo"
+    target.mkdir()
+    _git(target, "init", "-q")
+    _git(target, "config", "user.name", "t")
+    _git(target, "config", "user.email", "t@example.com")
+    _git(target, "checkout", "-b", branch)
+    (target / "README.md").write_text("hello\n")
+    _git(target, "add", "README.md")
+    _git(target, "commit", "-q", "-m", "base")
+    return target
+
+
 def test_auto_inits_a_directory_that_is_not_a_git_repo(tmp_path: Path) -> None:
     target = tmp_path / "not-a-repo"
     target.mkdir()
@@ -168,3 +187,140 @@ def test_rerun_skips_registration_and_reports_skipped_docs(tmp_path: Path) -> No
     ).fetchall()
     assert len(events) == 2
     writer.close()
+
+
+# ---------------------------------------------------------------------------
+# `base_branch_mode="cosmo_branch"` (v14) -- mirrors the `direct`-mode
+# matrix above, one case per `GitBranchOutcome.COSMO_BRANCH_*` member.
+# ---------------------------------------------------------------------------
+
+
+def test_cosmo_branch_mode_forks_off_a_freshly_initialized_repo(tmp_path: Path) -> None:
+    target = tmp_path / "not-a-repo"
+    target.mkdir()
+    cfg = _config(tmp_path)
+    writer = StoreWriter(cfg.paths.db_path)
+
+    result = run_init(
+        target,
+        harness="claude",
+        project_template="_blank",
+        base_branch="develop",
+        force_docs=False,
+        writer=writer,
+        db_path=cfg.paths.db_path,
+        base_branch_mode="cosmo_branch",
+        cosmo_branch_name="cosmo",
+    )
+    writer.close()
+
+    assert result.git_branch is GitBranchOutcome.COSMO_BRANCH_REPO_INITIALIZED_AND_CREATED
+    assert result.stashed is False
+    assert result.effective_base_branch == "cosmo"
+    current_branch = _git(target, "branch", "--show-current").stdout.strip()
+    assert current_branch == "cosmo"
+    # `develop` had zero commits at fork time (a totally fresh repo), so it
+    # never became a real ref -- only `cosmo`, the branch that actually goes
+    # on to receive `cli.main.init`'s later bootstrap commit, does.
+
+    project = find_project_by_path(cfg.paths.db_path, str(target))
+    assert project is not None
+    assert project.base_branch_mode == "cosmo_branch"
+    assert project.real_base_branch == "develop"
+    assert project.cosmo_branch_name == "cosmo"
+
+
+def test_cosmo_branch_mode_forks_off_an_existing_clean_base_branch(tmp_path: Path) -> None:
+    target = _repo_with_committed_base_branch(tmp_path, branch="develop")
+    cfg = _config(tmp_path)
+    writer = StoreWriter(cfg.paths.db_path)
+
+    result = run_init(
+        target,
+        harness="claude",
+        project_template="_blank",
+        base_branch="develop",
+        force_docs=False,
+        writer=writer,
+        db_path=cfg.paths.db_path,
+        base_branch_mode="cosmo_branch",
+        cosmo_branch_name="cosmo",
+    )
+    writer.close()
+
+    assert result.git_branch is GitBranchOutcome.COSMO_BRANCH_CREATED
+    assert result.stashed is False
+    current_branch = _git(target, "branch", "--show-current").stdout.strip()
+    assert current_branch == "cosmo"
+    # `develop`'s own tip is untouched by the fork.
+    develop_tip = _git(target, "rev-parse", "develop").stdout.strip()
+    cosmo_tip = _git(target, "rev-parse", "cosmo").stdout.strip()
+    assert develop_tip == cosmo_tip
+
+
+def test_cosmo_branch_mode_stashes_a_dirty_base_branch_instead_of_skipping(
+    tmp_path: Path,
+) -> None:
+    target = _repo_with_committed_base_branch(tmp_path, branch="develop")
+    (target / "untracked.txt").write_text("uncommitted work\n")
+    cfg = _config(tmp_path)
+    writer = StoreWriter(cfg.paths.db_path)
+
+    result = run_init(
+        target,
+        harness="claude",
+        project_template="_blank",
+        base_branch="develop",
+        force_docs=False,
+        writer=writer,
+        db_path=cfg.paths.db_path,
+        base_branch_mode="cosmo_branch",
+        cosmo_branch_name="cosmo",
+    )
+    writer.close()
+
+    assert result.git_branch is not GitBranchOutcome.SKIPPED_DIRTY
+    assert result.stashed is True
+    current_branch = _git(target, "branch", "--show-current").stdout.strip()
+    assert current_branch == "cosmo"
+    assert "untracked.txt" not in _git(target, "status", "--porcelain").stdout
+
+    _git(target, "checkout", "develop")
+    _git(target, "stash", "pop")
+    assert (target / "untracked.txt").is_file()
+
+
+def test_cosmo_branch_mode_rerun_is_idempotent(tmp_path: Path) -> None:
+    target = _repo_with_committed_base_branch(tmp_path, branch="develop")
+    cfg = _config(tmp_path)
+    writer = StoreWriter(cfg.paths.db_path)
+    first = run_init(
+        target,
+        harness="claude",
+        project_template="_blank",
+        base_branch="develop",
+        force_docs=False,
+        writer=writer,
+        db_path=cfg.paths.db_path,
+        base_branch_mode="cosmo_branch",
+        cosmo_branch_name="cosmo",
+    )
+    assert first.git_branch is GitBranchOutcome.COSMO_BRANCH_CREATED
+
+    second = run_init(
+        target,
+        harness="claude",
+        project_template="_blank",
+        base_branch="develop",
+        force_docs=False,
+        writer=writer,
+        db_path=cfg.paths.db_path,
+        base_branch_mode="cosmo_branch",
+        cosmo_branch_name="cosmo",
+    )
+    writer.close()
+
+    assert second.git_branch is GitBranchOutcome.ALREADY_ON_COSMO_BRANCH
+    assert second.already_registered is True
+    current_branch = _git(target, "branch", "--show-current").stdout.strip()
+    assert current_branch == "cosmo"

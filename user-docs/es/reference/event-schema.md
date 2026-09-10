@@ -230,6 +230,37 @@ el bloqueo se limpió. Aquí no falló nada.
 | --- | --- |
 | `task_cost_usd` | float |
 
+### `task.orphan_detected` — `warning`
+
+Una sesión del harness para esta tarea terminó — con éxito, con fallo o por
+timeout, no solo por una cancelación forzada — y se encontró un proceso que
+todavía mantenía abierto el worktree de la tarea (p. ej. un servidor de
+desarrollo en segundo plano que la sesión inició y que escapó de su propio
+grupo de procesos). Solo detección: en este punto no hay un handle de
+proceso vivo para matar, solo algo que un humano debe revisar. Puede
+dispararse más de una vez por tarea, una por cada llamada al harness que
+todavía tuviera un proceso remanente después.
+
+| Campo | Tipo |
+| --- | --- |
+| `worktree_holder_pids` | lista de int |
+
+### `task.review_repeat_rejection` — `warning`
+
+La revisión adversarial de esta tarea rechazó su diff en 2 o más intentos
+*consecutivos*. Los rechazos de revisión ordinarios se reintentan solos sin
+un evento propio (`next_action=retry`, nunca `block`) — este evento se
+dispara para que el patrón llegue a un humano vía `notify.watch` mientras
+una ejecución desatendida sigue en curso, en lugar de ser visible solo
+después de leer `task_failures` a mano. Se dispara en el 2do rechazo, no en
+el 3ro. Deliberadamente no intenta determinar si el rechazo N+1 plantea el
+mismo problema que el rechazo N — la prosa libre de una revisión no es un
+formato fijo que valga la pena intentar emparejar con una firma.
+
+| Campo | Tipo |
+| --- | --- |
+| `consecutive_rejections` | int |
+
 ### `task.finishing_failed` — `warning`
 
 El paso `openspec archive` de mejor esfuerzo de `FINISHING` falló. Siempre

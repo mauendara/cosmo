@@ -19,9 +19,12 @@ down, flaky-test confirm-by-rerun, and correct process-group kills.
 
 ## Which agents does it work with?
 
-Claude Code today. The adapter interface is real and test-enforced — no
-orchestration code branches on which harness is configured — but Claude Code
-is the only implementation. Writing another is one class:
+Four adapters ship today: `claude` (native Claude Code), `ori-claude` and
+`claude-openrouter` (both routing the `claude` binary to OpenRouter, for
+non-subscription/non-Anthropic models), and `codex` (the OpenAI Codex CLI —
+see [use-codex-harness](user-docs/en/how-to/use-codex-harness.md)). The
+adapter interface is real and test-enforced — no orchestration code branches
+on which harness is configured. Writing another is one class:
 [write-a-new-adapter](user-docs/en/how-to/write-a-new-adapter.md).
 
 ## Does it work with my stack?

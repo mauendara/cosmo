@@ -33,9 +33,72 @@ The only place in Cosmo's core that names a specific harness.
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
 | `name` | string | `"claude"` | Which adapter to use. Resolution order: `--harness` flag → project registration → this. |
-| `permission_mode` | string | `"dontAsk"` | Permission posture passed to the harness. The Claude adapter accepts `dontAsk` or `auto`, and refuses `bypassPermissions` outright. |
+| `permission_mode` | string | `"dontAsk"` | Permission posture passed to the harness. Claude accepts `dontAsk` or `auto`; Codex accepts only `dontAsk`. Unsafe bypass modes are refused. |
 | `max_turns` | int > 0 | `80` | Turn ceiling per harness call. |
-| `model` | string | `"claude-sonnet-5"` | Pinned so a run's model doesn't drift with whatever the host CLI defaults to. |
+| `model` | string | `"claude-sonnet-5"` | Pinned so a run's model doesn't drift with whatever the host CLI defaults to. Also the fallback for any of the three overrides below left unset. |
+| `propose_model` | string or unset | unset (falls back to `model`) | Model for `PROPOSING`'s `propose()` call and `cosmo spec add`'s enrichment/decomposition call -- both planning-shaped work, sharing one override. |
+| `implement_model` | string or unset | unset (falls back to `model`) | Model for `IMPLEMENTING`'s `implement()` call. |
+| `review_model` | string or unset | unset (falls back to `model`) | Model for `REVIEWING`'s adversarial-review `review()` call -- a separate session with no memory of the implementation, so a different model here is a genuine second pair of eyes. |
+
+Set any of these three in a user config file to run different stages on
+different models, e.g. Opus for planning, Sonnet for implementation, and a
+third model as a distinct reviewer:
+
+```toml
+[harness]
+propose_model = "claude-opus-5"
+implement_model = "claude-sonnet-5"
+review_model = "claude-haiku-4-5"
+```
+
+### `[harness.overrides.<name>]`
+
+Per-harness model overrides, keyed by harness name. A harness's model
+namespace is its own — an OpenRouter model id (`anthropic/claude-sonnet-4.5`)
+is meaningless to native Claude Code, and a bare Claude Code id
+(`claude-sonnet-5`) is meaningless to OpenRouter — so one config file can
+hold correct models for every registered harness at once, and switching
+harnesses is a `--harness` flag, not a config edit.
+
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `model` | string or unset | unset | Default/fallback model for this harness. |
+| `propose_model` | string or unset | unset | Overrides `[harness] propose_model` for this harness only. |
+| `implement_model` | string or unset | unset | Overrides `[harness] implement_model` for this harness only. |
+| `review_model` | string or unset | unset | Overrides `[harness] review_model` for this harness only. |
+
+Resolution order for a given harness and role, narrowest first:
+`overrides[harness].<role>_model` → `overrides[harness].model` →
+`[harness] <role>_model` → `[harness] model`. `probe` (the raw-prompt
+smoke test and `cosmo spec add`'s enrichment call) has no dedicated
+`probe_model` field on either rung and resolves straight to the `model`
+rungs.
+
+**The `ori-claude` harness needs this table to work at all.** The shipped
+`[harness] model` default (`"claude-sonnet-5"`) is a native Claude Code
+model id — it is not in OpenRouter's catalog, so `ori-claude` passes it
+through unrecognized and the call fails authentication. Set at least
+`[harness.overrides.ori-claude].model` to a real OpenRouter model id:
+
+```toml
+[harness.overrides.ori-claude]
+model = "anthropic/claude-sonnet-4.5"
+propose_model = "openai/gpt-5"
+implement_model = "qwen/qwen3-coder"
+review_model = "google/gemini-2.5-pro"
+```
+
+**Codex also needs its own model id.** The shipped Claude default is not a
+Codex model. Configure one available to your account and verify it with a
+probe; the validated example was:
+
+```toml
+[harness.overrides.codex]
+model = "gpt-5.6-sol"
+```
+
+See [Use the Codex harness](../how-to/use-codex-harness.md) for authentication,
+billing, and sandbox constraints.
 
 ## `[timeouts]`
 
@@ -48,7 +111,8 @@ All values in seconds, all must be > 0.
 | `implementing_stall` | `1200` | No observed activity for this long during `IMPLEMENTING` kills the call. |
 | `validating_wall` | `2700` | Wall clock for `VALIDATING`. |
 | `validating_stall` | `600` | Stall timer for `VALIDATING`. |
-| `reviewing_wall` | `900` | Wall clock for the adversarial review call. One bounded call, so no stall variant. |
+| `reviewing_wall` | `900` | Wall clock for the adversarial review call. One bounded call, so no stall variant. Applies unless `review.live_verification_keywords` matches the task's own spec content. |
+| `reviewing_wall_live` | `2700` | Wall clock for the adversarial review call when the task's own spec content calls for live/visual verification (see `[review]` below). |
 | `committing_wall` | `300` | Wall clock for `COMMITTING`. |
 | `merging_wall` | `300` | Wall clock for `MERGING`. |
 | `run_wall` | `36000` | Whole-run wall clock (10 hours). Expiry stops the run with `max_time`. |
@@ -67,12 +131,21 @@ protection against a hung harness.
 | `delay_min` | int ≥ 0 | `30` | Lower bound of the randomized delay between retries, in seconds. |
 | `delay_max` | int ≥ 0 | `60` | Upper bound. |
 | `repeat_block_threshold` | int > 0 | `2` | `cosmo queue retry` refuses once the task's latest terminal block matches this many prior blocks for the same reason. `--force` overrides. |
+| `turn_budget_growth_factor` | float > 1.0 | `1.5` | Multiplier applied to `harness.max_turns` (and `timeouts.implementing_wall`/`implementing_stall`) for each prior consecutive turn-budget exhaustion on the same task. Never applied on a task's first `IMPLEMENTING` attempt. |
+| `turn_budget_max_multiplier` | float ≥ 1.0 | `3.0` | Hard cap on the multiplier above — e.g. an 80-turn default can grow to 240 turns but no further, regardless of how many times the task has exhausted its budget. |
 
 **Validated**: `delay_min` must not exceed `delay_max`.
 
 Only attempts that represent a genuine code-level judgment increment the
 counter — a gate verdict of `code_error` or `test_integrity`, or an
 `IMPLEMENTING` timeout. An `environment_error` never does.
+
+The turn-budget growth above is adaptive per task, not a static per-project
+setting — a task that repeatedly exhausts its turn budget gets more room on
+its next attempt; a task that succeeds or fails for a different reason never
+triggers it. `cost.max_cost_per_task_usd` is the real backstop against a
+stuck task consuming an ever-larger budget for nothing, not a separate
+turn-count ceiling.
 
 ## `[circuit_breaker]`
 
@@ -97,6 +170,14 @@ not a broken environment.
 A task blocked on `cost` is re-evaluated against the *current* ceiling at the
 next run's startup and unblocked automatically if a human raised or disabled
 it in between.
+
+**`ori-claude` is metered, unlike native `claude`.** The `0.0` (disabled)
+default is the right posture for native Claude Code, which is
+subscription-billed. `ori-claude` routes through OpenRouter, where every
+token is real, per-call spend — running it with `max_cost_per_run_usd`
+still at `0.0` means an unattended run has no spend hard stop at all. Set a
+real ceiling here before running `ori-claude` unattended; this section is
+shared across every harness (there is no per-harness `[cost]` table).
 
 ## `[gate]`
 
@@ -151,6 +232,15 @@ diff_gate_skip_annotations = [
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
 | `enabled` | bool | `true` | The fresh-session adversarial review between `VALIDATING` and `COMMITTING`. `false` skips `REVIEWING` entirely. A rejected review retries against `retries.max_attempts`, not a separate budget. |
+| `live_verification_keywords` | list of str | `["storybook", "visual regression", "playwright"]` | Case-insensitive substrings checked against the task's own spec/tasks.md content. A match selects `timeouts.reviewing_wall_live` over the diff-only default and tells the reviewer a live check is expected for this task. |
+
+By default, the reviewer is told to judge from the diff and the gate's
+already-passing build/test/lint output alone — not to start a preview
+server or re-run a test suite itself, since doing so can run out of the
+shorter default time budget and discard a real, defect-free review. A task
+whose own spec content matches one of `live_verification_keywords` gets both
+the longer `reviewing_wall_live` budget and an explicit note that a live
+check is expected for it.
 
 ## `[progress]`
 
@@ -175,6 +265,15 @@ must not exist without the spend ceiling it creates the need for.
 The wall-clock heuristic is never reported as a confirmed signal, and is
 always treated as the shorter, safer five-hour window; there is no way to
 infer a weekly window from timing alone.
+
+**On `ori-claude`**, primary (structured) quota detection degrades to this
+section's secondary (`result_error_subtypes`) and tertiary (wall-clock
+heuristic) detectors — confirmed by real invocation: OpenRouter never emits
+the Anthropic-specific rate-limit-shaped stream event the primary detector
+looks for. This is spec 7.2's documented fallback for a harness with no
+primary signal working as designed, not a gap. `bypass_5h_with_credits` is
+meaningless on this route (there is no five-hour subscription window to
+bypass) and stays inert if set.
 
 ## `[notify]`
 

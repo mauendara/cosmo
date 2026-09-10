@@ -39,9 +39,11 @@ not by convention:
 - **The merge ladder never imports the harness.** A merge conflict is
   therefore never handed back to the agent to resolve blind — there is no
   adapter in scope for that code path to hand it to.
-- **Only the Claude adapter module may name Claude-specific binaries, flags
-  or environment variables.** Core orchestration code never branches on which
-  harness is configured.
+- **Only a harness adapter's own module may name its binaries, flags or
+  environment variables.** Core orchestration code never branches on which
+  harness is configured. Four production adapters are registered today:
+  `claude`, `ori-claude`, `claude-openrouter`, and `codex` (plus `fake` for
+  tests). Core code cannot tell them apart.
 
 ## Serial by design
 
@@ -89,8 +91,10 @@ QUEUED → PROPOSING → PROPOSED → IMPLEMENTING → VALIDATING
   attempt counter; there's no code yet to attribute a code error to. The
   change's name is pinned in the prompt, because everything downstream
   (`openspec archive`, worktree reuse) assumes it.
-- **PROPOSED → IMPLEMENTING** — the harness writes and commits the code,
-  watched by a wall clock and a stall timer. Progress is read from the
+- **PROPOSED → IMPLEMENTING** — the harness writes the code, watched by a wall
+  clock and a stall timer. A harness normally commits its output; when its
+  sandbox protects linked-worktree Git metadata, Cosmo captures a successful
+  implementation in a commit before validation. Progress is read from the
   change's `tasks.md`, not from anything the agent asserts.
 - **VALIDATING** — the gate. See
   [validation-gate-and-guardrails](validation-gate-and-guardrails.md).
@@ -243,6 +247,4 @@ Stated here so it isn't mistaken for a shipped feature:
   cancel, logs) from the outside. This is a distinct capability from Cosmo
   *using* an agent as a harness, and the two shouldn't be conflated. **No
   such server exists today.**
-- **Adapters other than Claude Code.** The interface is real and the
-  boundary is test-enforced; the second adapter isn't written.
 - **Parallel task execution.** See "Serial by design" above.

@@ -1,10 +1,25 @@
 # How to write a harness adapter
 
 A **harness** is the coding agent Cosmo drives — the thing that actually
-proposes and writes code. Claude Code is the only adapter implemented today.
-This document specifies the interface precisely enough that you can add
-another (Codex CLI, OpenCode, an in-house agent) without asking anyone a
-question.
+proposes and writes code. Two adapters are implemented today: `claude`
+(native Claude Code, subscription-billed) and `ori-claude` (the same real
+`claude` binary, routed through [Ori](https://openrouter.ai/labs/ori) to
+OpenRouter, metered per token). This document specifies the interface
+precisely enough that you can add another (Codex CLI, OpenCode, an in-house
+agent) without asking anyone a question.
+
+**Two adapters wrapping the same underlying tool, not one adapter with a
+config toggle** is the pattern `ori-claude` established, and it's worth
+following if your new adapter is also "the same real binary, launched a
+different way" rather than a genuinely different tool: extract the shared
+invocation mechanics (argv assembly minus the couple of genuinely differing
+flags, env assembly, `_invoke`, `cancel`, the process-supervision logic
+below) into one internal base class neither adapter subclasses the other
+from, and let each concrete adapter declare only what's actually different
+— `preflight`, and the couple of `_build_argv`/`_build_env` lines that
+differ. See `src/cosmo/harness/claude/invoker.py`'s `_ClaudeCodeInvoker`
+for a real instance of this shape, with `ClaudeCodeAdapter` and
+`OriClaudeAdapter` as its two thin subclasses.
 
 Contributions of new adapters are explicitly welcome. See
 [CONTRIBUTING.md](../../../CONTRIBUTING.md) for the PR conventions.
@@ -39,8 +54,9 @@ from cosmo.harness.mytool import MyToolAdapter
 
 _REGISTRY: dict[str, type[HarnessAdapter]] = {
     ClaudeCodeAdapter.name: ClaudeCodeAdapter,
+    OriClaudeAdapter.name: OriClaudeAdapter,
     FakeHarnessAdapter.name: FakeHarnessAdapter,
-    MyToolAdapter.name: MyToolAdapter,       # ← add this
+    MyToolAdapter.name: MyToolAdapter,  # ← add this
 }
 ```
 
@@ -93,13 +109,13 @@ a weaker guarantee.
 ```python
 @dataclass(frozen=True, slots=True)
 class HarnessCapabilities:
-    reports_native_progress: bool    # False -> Cosmo watches the change's tasks.md
-    supports_retry_context: bool     # False -> Cosmo composes a synthetic retry prompt
-    has_internal_timeout: bool       # False -> Cosmo imposes an external timeout
-    reports_native_cost: bool        # False -> estimate from tokens, or disable cost stop
-    supports_gating: bool            # False -> post-hoc diff inspection only (weaker)
-    supports_structured_stream: bool # False -> file-mtime liveness; the stall
-                                     #          timeout is then the only guard
+    reports_native_progress: bool  # False -> Cosmo watches the change's tasks.md
+    supports_retry_context: bool  # False -> Cosmo composes a synthetic retry prompt
+    has_internal_timeout: bool  # False -> Cosmo imposes an external timeout
+    reports_native_cost: bool  # False -> estimate from tokens, or disable cost stop
+    supports_gating: bool  # False -> post-hoc diff inspection only (weaker)
+    supports_structured_stream: bool  # False -> file-mtime liveness; the stall
+    #          timeout is then the only guard
 ```
 
 **Declare honestly.** `supports_gating=True` when your harness can't actually
@@ -119,16 +135,16 @@ this boundary.
 ```python
 @dataclass(frozen=True, slots=True)
 class HarnessResult:
-    success: bool                    # required
-    output_summary: str              # required: short label, from structured output
-    raw_log_path: Path | None        # required: where you wrote the raw session log
-    files_changed: list[str]         # required (may be empty)
-    duration_seconds: float          # required
-    total_cost_usd: float | None     # required (None if unknown)
-    exit_code: int | None            # required (None if not process-based)
-    session_id: str | None           # required (None if your harness has no concept)
-    quota_window: str | None = None      # "five_hour" | "weekly" | None
-    quota_resets_at: str | None = None   # UTC ISO 8601, or None
+    success: bool  # required
+    output_summary: str  # required: short label, from structured output
+    raw_log_path: Path | None  # required: where you wrote the raw session log
+    files_changed: list[str]  # required (may be empty)
+    duration_seconds: float  # required
+    total_cost_usd: float | None  # required (None if unknown)
+    exit_code: int | None  # required (None if not process-based)
+    session_id: str | None  # required (None if your harness has no concept)
+    quota_window: str | None = None  # "five_hour" | "weekly" | None
+    quota_resets_at: str | None = None  # UTC ISO 8601, or None
     tool_call_count: int = 0
 ```
 
@@ -154,15 +170,16 @@ Notes that matter:
 ```python
 from cosmo.checks import CheckResult, check_executable, ok, warn, fail
 
-ok("check name", "detail")     # informational
-warn("check name", "detail")   # visible, non-blocking
-fail("check name", "detail")   # blocking: cosmo doctor exits non-zero
+ok("check name", "detail")  # informational
+warn("check name", "detail")  # visible, non-blocking
+fail("check name", "detail")  # blocking: cosmo doctor exits non-zero
 ```
 
 ## The interface
 
 ```python
 from cosmo.harness.base import HarnessAdapter, HarnessCapabilities, HarnessResult
+
 
 class MyToolAdapter(HarnessAdapter):
     name: ClassVar[str] = "mytool"
@@ -318,7 +335,7 @@ process = ManagedProcess(
     raw_log_path=raw_log_path,
     cwd=self.cwd,
     env=env,
-    on_stdout_chunk=reader.feed,   # optional: streaming callback
+    on_stdout_chunk=reader.feed,  # optional: streaming callback
 )
 exit_code = process.wait()
 ```
@@ -339,8 +356,12 @@ def cancel(self, task_id: str) -> None:
         return
     if self._emitter is not None:
         cancel_and_reap(
-            process, run_id=self._run_id or "", task_id=task_id,
-            worktree_path=self.cwd, config=self.config, emitter=self._emitter,
+            process,
+            run_id=self._run_id or "",
+            task_id=task_id,
+            worktree_path=self.cwd,
+            config=self.config,
+            emitter=self._emitter,
         )
     else:
         process.cancel(grace_s=self.config.timeouts.kill_grace)
@@ -447,6 +468,23 @@ cosmo harness probe --harness mytool --prompt "reply with the word ok"
 cosmo run --repo /tmp/test-project --harness mytool --task some-task
 ```
 
+Run that lifecycle in a linked worktree, not only a standalone fixture repo.
+Two integration details are easy to miss:
+
+- The task runner reassigns `adapter.cwd` for each worktree. If your adapter
+  composes a separate invoker object, synchronize its working directory at
+  call time; copying `cwd` only in `__init__` launches later calls in the wrong
+  checkout.
+- Some harness sandboxes allow source writes but protect the linked worktree's
+  Git metadata. Do not grant unrestricted filesystem access to compensate.
+  Either prove that the normal harness commit works or arrange a
+  harness-agnostic, path-bounded core commit after a successful call, as the
+  Codex integration does.
+
+A capability such as `supports_gating` must remain false until a real hostile
+run has exercised every enabled write path and an out-of-worktree write. Unit
+tests establish intent; the real CLI establishes the enforcement boundary.
+
 ## Checklist
 
 - [ ] `templates/harness/mytool/` written, modeled on `templates/harness/claude/`
@@ -463,3 +501,5 @@ cosmo run --repo /tmp/test-project --harness mytool --task some-task
 - [ ] A raw log is written and its path returned
 - [ ] Registered in `registry.py`
 - [ ] Boundary test passes: nothing outside your module names your binary
+- [ ] Full linked-worktree lifecycle and hostile gating cases pass with the
+      real CLI

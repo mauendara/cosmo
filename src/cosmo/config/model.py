@@ -22,11 +22,83 @@ class _Strict(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
 
+class HarnessModelOverrides(_Strict):
+    """Per-harness model ids (v13 plan). A harness's model namespace is its
+    own -- an OpenRouter id (`openai/gpt-5`) is meaningless to native Claude
+    Code and a bare `claude-sonnet-5` is meaningless to OpenRouter -- so a
+    host that runs both cannot express both in one flat `[harness]` table."""
+
+    model: str | None = None
+    propose_model: str | None = None
+    implement_model: str | None = None
+    review_model: str | None = None
+
+
 class HarnessConfig(_Strict):
     name: str = Field(min_length=1)
     permission_mode: str = Field(min_length=1)
     max_turns: int = Field(gt=0)
     model: str = Field(min_length=1)
+    """The default/fallback model -- used for `cosmo harness probe` and for
+    any of the three role-specific overrides below left unset."""
+
+    propose_model: str | None = None
+    """Model for the `PROPOSING` state's `propose()` call (`cosmo run`'s
+    OpenSpec-change-creation step) and `cosmo spec add`'s enrichment/
+    decomposition call -- both are planning-shaped work in the same sense,
+    so they share one override rather than each getting their own.
+    `None` falls back to `model`."""
+
+    implement_model: str | None = None
+    """Model for the `IMPLEMENTING` state's `implement()` call.
+    `None` falls back to `model`."""
+
+    review_model: str | None = None
+    """Model for the `REVIEWING` state's `review()` call (v4 workflow
+    changes' adversarial review -- a genuinely separate session with no
+    memory of the implementation, so a different model here is a real
+    second pair of eyes, not just a cost/quality knob). `None` falls back
+    to `model`."""
+
+    overrides: dict[str, HarnessModelOverrides] = Field(default_factory=dict)
+    """Per-harness-name model overrides (v13 plan), keyed by an opaque
+    harness name never matched against a literal here -- same discipline as
+    `resolve_harness_name`. Lets one config file hold sane models for both
+    `claude` and `ori-claude` at once; switching is a `--harness` flag, not
+    a config edit."""
+
+    def resolve_model(self, harness: str, role: str) -> str:
+        """Resolution order, narrowest first: `overrides[harness].<role>_model`
+        -> `overrides[harness].model` -> `<role>_model` -> `model`.
+
+        `role` is one of `"probe"`, `"propose"`, `"implement"`, `"review"`;
+        `"probe"` has no dedicated override field on either rung and resolves
+        straight to the `model` rungs, matching pre-v13 behavior."""
+        role_models: dict[str, str | None] = {
+            "propose": self.propose_model,
+            "implement": self.implement_model,
+            "review": self.review_model,
+        }
+        override_role_models: dict[str, str | None] = {}
+        override = self.overrides.get(harness)
+        if override is not None:
+            override_role_models = {
+                "propose": override.propose_model,
+                "implement": override.implement_model,
+                "review": override.review_model,
+            }
+
+        if override is not None:
+            value = override_role_models.get(role)
+            if value is not None:
+                return value
+            if override.model is not None:
+                return override.model
+
+        value = role_models.get(role)
+        if value is not None:
+            return value
+        return self.model
 
 
 class TimeoutConfig(_Strict):
@@ -39,6 +111,15 @@ class TimeoutConfig(_Strict):
     """v4 workflow changes: `REVIEWING`'s own wall clock. No stall variant
     -- like `proposing_wall`, this is one bounded harness call, not a
     multi-turn session with a liveness watcher to stall-check."""
+    reviewing_wall_live: int = Field(gt=0)
+    """G2 (docs/v15-fixes-after-wa-chat-run.md): the longer budget applied
+    only when `review.live_verification_keywords` matches the task's own
+    spec/tasks.md content -- a review that's expected to spin up a preview
+    server and replay a visual/e2e suite needs more than the diff-only
+    default. Real evidence: `wa-chat-storybook-vr`'s review twice ran out
+    of time replaying an entire Playwright VR suite screenshot-by-
+    screenshot under the default budget, discarding a real, defect-free
+    review both times."""
     committing_wall: int = Field(gt=0)
     merging_wall: int = Field(gt=0)
     run_wall: int = Field(gt=0)
@@ -75,6 +156,25 @@ class RetryConfig(_Strict):
     # identical `error_max_turns` reason 3 separate times before this
     # existed, each time silently handed 2 more attempts.
     repeat_block_threshold: int = Field(gt=0)
+
+    # G1 (docs/v15-fixes-after-wa-chat-run.md): adaptive, not static
+    # per-template -- widen `IMPLEMENTING`'s turn/wall-clock budget after
+    # *repeated* `max_turns_exhausted` failures on the *same* task, rather
+    # than trying to pre-classify which task templates need more room (a
+    # Storybook+Playwright-VR task is far more turn-hungry than a scaffold
+    # task, and nothing short of real per-task history tells them apart).
+    # `cost.max_cost_per_task_usd` is the real backstop against a task
+    # stuck in an unproductive loop burning an ever-larger budget for
+    # nothing -- deliberately not a new turn-count ceiling invented to do
+    # that job twice.
+    turn_budget_growth_factor: float = Field(gt=1.0)
+    """Multiplier applied per prior consecutive `max_turns_exhausted`
+    failure this task has logged, e.g. 1.5 -> 1.5x after the 1st, 2.25x
+    after the 2nd. Never applied on a task's first `IMPLEMENTING` attempt."""
+    turn_budget_max_multiplier: float = Field(ge=1.0)
+    """Hard ceiling on the multiplier above, e.g. 3.0 caps an 80-turn
+    default at 240 turns no matter how many times this task has exhausted
+    its budget."""
 
     @model_validator(mode="after")
     def _delay_ordered(self) -> RetryConfig:
@@ -212,6 +312,14 @@ class ReviewConfig(_Strict):
     decision: "a failed adversarial review retries like a gate failure")."""
 
     enabled: bool
+    # G2 (docs/v15-fixes-after-wa-chat-run.md): a deterministic, case-
+    # insensitive substring check against the task's own spec/tasks.md
+    # content -- not prose interpretation (spec 4) -- for "this task's own
+    # acceptance criteria call for live/visual verification, budget the
+    # review accordingly." Every real case behind this gap already names
+    # its verification method in prose, so this needs no new queue-row
+    # column or migration.
+    live_verification_keywords: list[str] = Field(min_length=1)
 
 
 class DiskConfig(_Strict):

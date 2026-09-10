@@ -97,6 +97,9 @@ class ProjectRow:
     harness: str
     project_template: str | None
     initialized_at: str
+    base_branch_mode: str
+    real_base_branch: str | None
+    cosmo_branch_name: str | None
 
 
 def _task_from_row(row: sqlite3.Row) -> TaskRow:
@@ -431,4 +434,7 @@ def _project_from_row(row: sqlite3.Row) -> ProjectRow:
         harness=row["harness"],
         project_template=row["project_template"],
         initialized_at=row["initialized_at"],
+        base_branch_mode=row["base_branch_mode"],
+        real_base_branch=row["real_base_branch"],
+        cosmo_branch_name=row["cosmo_branch_name"],
     )

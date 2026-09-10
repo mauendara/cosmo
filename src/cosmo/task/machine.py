@@ -50,12 +50,14 @@ section (summarized at each relevant point below, not repeated in full):
   a background thread without stopping the Docker containers it started --
   a timeout that doesn't free what it claims to bound is worse than no
   timeout, so this is recorded as a deferred item instead of a fake one.
-- `COMMITTING` never calls the harness -- `templates/harness/claude/
-  CLAUDE.md` already instructs the agent to append knowledge notes and
-  commit its own work as the last step of `IMPLEMENTING`. `COMMITTING` here
-  only enforces the line cap on whatever `docs/**/*.md` files the task's
-  own commits touched (`cosmo.knowledge`) and appends one Cosmo-authored,
-  structured `decisions-log.md` entry. A knowledge-cap violation loops back
+- `COMMITTING` never calls the harness. Harnesses normally commit their own
+  work as the last step of `IMPLEMENTING`; after any successful call Cosmo
+  also captures pending implementation output in a bounded commit. This is
+  a no-op for an already-clean harness and supports sandboxes that protect a
+  linked worktree's Git metadata. `COMMITTING` here only enforces the line
+  cap on whatever `docs/**/*.md` files the task's implementation commits
+  touched (`cosmo.knowledge`) and appends one Cosmo-authored, structured
+  `decisions-log.md` entry. A knowledge-cap violation loops back
   to `IMPLEMENTING` (an informed retry, since it's a real, fixable defect in
   what the harness wrote) using the `attempt_count` already consumed by the
   `VALIDATING` pass that got it here -- it does not consume a second one on
@@ -82,6 +84,7 @@ from cosmo.git.merge import MergeCommandError, merge_task
 from cosmo.harness.base import HarnessAdapter, HarnessResult
 from cosmo.knowledge.caps import docs_md_files, files_over_cap
 from cosmo.knowledge.decisions_log import append_decision_entry
+from cosmo.proc.reap import sweep_orphans_after_completion
 from cosmo.proc.timers import LivenessTimers
 from cosmo.store.enums import (
     BlockedReason,
@@ -92,7 +95,8 @@ from cosmo.store.enums import (
     Severity,
     TaskStatus,
 )
-from cosmo.store.reader import get_task, list_task_failures
+from cosmo.store.failure_signature import detect_repeat_block
+from cosmo.store.reader import TaskFailureRow, get_task, list_task_failures
 from cosmo.store.writer import StoreWriter
 from cosmo.task.classify import classify_harness_failure
 from cosmo.task.progress import ProgressWatcher, read_progress_from_file
@@ -111,6 +115,100 @@ display, threaded straight through to `HarnessAdapter.propose`/`implement`/
 classification decision this module makes."""
 
 _PROPOSING_MAX_LOCAL_ATTEMPTS = 2  # spec 3.3: "retry once, then BLOCKED"
+
+
+def _implementing_turn_budget_multiplier(
+    failures: list[TaskFailureRow], *, config: CosmoConfig
+) -> float:
+    """G1 (docs/v15-fixes-after-wa-chat-run.md): 1.0 (no change) on a
+    task's first `IMPLEMENTING` attempt, or any attempt that hasn't yet hit
+    `error_max_turns` -- adaptive, not static per-template, per the design
+    decision recorded in the plan doc. Grows by `turn_budget_growth_factor`
+    for every *prior* `max_turns_exhausted` this task has logged (already
+    consecutive in practice: a genuine code-level success in between would
+    have moved the task past `IMPLEMENTING` entirely), capped at
+    `turn_budget_max_multiplier` so a stuck task can't grow its budget
+    without bound -- `cost.max_cost_per_task_usd` is the real backstop
+    against that, not a second turn-count ceiling invented here.
+
+    `failures` is this task's own `IMPLEMENT`-stage failure history --
+    `_do_implementing` already fetches it for `build_retry_context`, so
+    this reuses that query rather than issuing a second one."""
+    exhausted = sum(
+        1
+        for f in failures
+        if f.failure_stage == FailureStage.IMPLEMENT.value
+        and f.failure_signature == "max_turns_exhausted"
+    )
+    if exhausted == 0:
+        return 1.0
+    return min(
+        config.retries.turn_budget_growth_factor**exhausted,
+        config.retries.turn_budget_max_multiplier,
+    )
+
+
+def _flag_repeat_review_rejection(
+    *, config: CosmoConfig, emitter: EventEmitter, task_id: str, run_id: str | None
+) -> None:
+    """G7 (docs/v15-fixes-after-wa-chat-run.md): emits `task.
+    review_repeat_rejection` the moment this task's adversarial review has
+    rejected its diff on 2+ *consecutive* attempts -- reuses the shared
+    `detect_repeat_block(require_block=False)` building block G1 also uses,
+    keyed on `failure_stage` alone (no signature classification: the user's
+    own decision was not to try telling whether rejection N+1 raises the
+    same issue as rejection N, since freeform review prose isn't a fixed
+    format worth signature-matching). Called after `_record_failure` has
+    already written this rejection, so the just-recorded row is included in
+    the count -- `threshold=1` fires on the 2nd occurrence, not the 3rd."""
+    review_failures = [
+        f
+        for f in list_task_failures(config.paths.db_path, task_id)
+        if f.failure_stage == FailureStage.ADVERSARIAL_REVIEW.value
+    ]
+    repeat = detect_repeat_block(
+        review_failures, threshold=1, require_block=False, key_fn=lambda f: f.failure_stage
+    )
+    if repeat is None:
+        return
+    emitter.emit(
+        event_type=EventType.TASK_REVIEW_REPEAT_REJECTION,
+        severity=Severity.WARNING,
+        run_id=run_id,
+        task_id=task_id,
+        payload={"consecutive_rejections": len(repeat.occurrences)},
+    )
+
+
+def _needs_live_verification(ctx: TaskContext, config: CosmoConfig) -> bool:
+    """G2 (docs/v15-fixes-after-wa-chat-run.md): a deterministic, case-
+    insensitive substring check (spec 4 forbids prose interpretation for a
+    classification decision, not this) against the task's own spec/
+    tasks.md content -- the same file `_do_implementing` already locates
+    for progress-watching. Every real case behind this gap already names
+    its verification method in prose (Storybook, Playwright, visual
+    regression), so this needs no new queue-row column or migration.
+    Missing/unreadable `tasks.md` reads as "no live verification needed"
+    (the diff-only default), not an error."""
+    spec_id = Path(ctx.spec_path).stem
+    tasks_md_path = ctx.worktree_path / "openspec" / "changes" / spec_id / "tasks.md"
+    try:
+        content = tasks_md_path.read_text().lower()
+    except OSError:
+        return False
+    return any(keyword.lower() in content for keyword in config.review.live_verification_keywords)
+
+
+def _terminal_block_note(error_summary: str) -> str:
+    """G8 (docs/v15-fixes-after-wa-chat-run.md): says what a human needs to
+    go do, rather than just repeating the provider's own error text -- the
+    whole point of distinguishing a hard budget/key ceiling from an
+    ordinary retryable environment_error blip."""
+    return (
+        f"{error_summary} -- this is a hard provider budget/key ceiling, not a "
+        "transient blip; raise the relevant OpenRouter key budget or Claude "
+        "monthly spend limit before retrying"
+    )
 
 
 class GitCommandError(RuntimeError):
@@ -155,8 +253,24 @@ def run_task(
     `environment_error` never gets an in-run retry at all (`_do_committing`/
     `_do_merging` below always `will_retry=False`) -- unlike every earlier
     stage, there is no "the code needs to change" judgment bundled into that
-    failure, so nothing before it needs to be redone either. `cli.main.
-    queue_retry` is the only real caller of anything but the default."""
+    failure, so nothing before it needs to be redone either.
+
+    `VALIDATING` (v19) is a different kind of resume: it skips only
+    `IMPLEMENTING`, and only for the resumed attempt's first loop iteration
+    (one-shot, exactly like `skip_to_committing` below) -- for when a real
+    fix was already applied to the worktree by something other than a full
+    harness `IMPLEMENTING` session (e.g. a human patched a small, well-
+    understood bug directly) and the goal is to hand it back to Cosmo's own
+    `VALIDATING`/`REVIEWING`/`COMMITTING`/`MERGING` judgment without paying
+    for a fresh `IMPLEMENTING` call to rediscover work that's already done.
+    Unlike `COMMITTING`/`MERGING`, `VALIDATING` can still genuinely fail --
+    if it does, this behaves exactly like any other in-run retry and runs a
+    real `IMPLEMENTING` attempt on the next loop iteration; the skip never
+    applies twice.
+
+    `cli.main.queue_retry` is the only real caller of the `COMMITTING`/
+    `MERGING` resume; `VALIDATING` has no CLI flag yet and is set by hand
+    via `store.writer.queue_resume_at` (see docs/handoff.md's v19 entry)."""
     task_id = ctx.task_id
 
     if resume_at is TaskStatus.IMPLEMENTING:
@@ -186,88 +300,102 @@ def run_task(
 
     if resume_at is not TaskStatus.MERGING:
         skip_to_committing = resume_at is TaskStatus.COMMITTING
+        skip_to_validating = resume_at is TaskStatus.VALIDATING
         while True:
             if not skip_to_committing:
-                if check_run_guard is not None:
-                    guard_action = check_run_guard()
-                    if guard_action is RunGuardAction.REQUEUE:
-                        return _requeue(
-                            writer=writer, emitter=emitter, task_id=task_id, run_id=run_id
-                        )
-                    if guard_action is RunGuardAction.BLOCK_COST:
-                        return _block(
-                            writer=writer,
-                            emitter=emitter,
-                            task_id=task_id,
-                            run_id=run_id,
-                            reason=BlockedReason.COST,
-                            note="task cost ceiling reached (spec 7.3)",
-                        )
-
-                # -- IMPLEMENTING -----------------------------------------------
-                emit_state_changed(
-                    emitter,
-                    writer.queue_transition(task_id, TaskStatus.IMPLEMENTING, run_id=run_id),
-                )
-                implemented = _do_implementing(
-                    ctx=ctx,
-                    config=config,
-                    writer=writer,
-                    emitter=emitter,
-                    adapter=adapter,
-                    run_id=run_id,
-                    on_harness_result=on_harness_result,
-                    on_activity=on_activity,
-                )
-
-                if not implemented.success:
-                    assert implemented.classification is not None
-                    if implemented.timed_out:
-                        will_retry = attempt_count < ctx.max_attempts
-                        attempt_count = writer.queue_begin_attempt(task_id)
-                        _record_failure(
-                            writer,
-                            task_id,
-                            run_id,
-                            attempt_count,
-                            implemented.classification,
-                            will_retry,
-                        )
-                        if not will_retry:
+                if not skip_to_validating:
+                    if check_run_guard is not None:
+                        guard_action = check_run_guard()
+                        if guard_action is RunGuardAction.REQUEUE:
+                            return _requeue(
+                                writer=writer, emitter=emitter, task_id=task_id, run_id=run_id
+                            )
+                        if guard_action is RunGuardAction.BLOCK_COST:
                             return _block(
                                 writer=writer,
                                 emitter=emitter,
                                 task_id=task_id,
                                 run_id=run_id,
-                                reason=BlockedReason.TIMEOUT,
-                                note=implemented.classification.error_summary,
+                                reason=BlockedReason.COST,
+                                note="task cost ceiling reached (spec 7.3)",
                             )
-                    else:
-                        validating_env_retries += 1
-                        blocking = validating_env_retries > config.retries.max_attempts
-                        _record_failure(
-                            writer,
-                            task_id,
-                            run_id,
-                            attempt_count,
-                            implemented.classification,
-                            will_retry=not blocking,
-                        )
-                        if blocking:
-                            return _block(
-                                writer=writer,
-                                emitter=emitter,
-                                task_id=task_id,
-                                run_id=run_id,
-                                reason=BlockedReason.ENVIRONMENT,
-                                note=implemented.classification.error_summary,
-                            )
+
+                    # -- IMPLEMENTING -------------------------------------------
                     emit_state_changed(
                         emitter,
-                        writer.queue_transition(task_id, TaskStatus.FAILED_RETRY, run_id=run_id),
+                        writer.queue_transition(task_id, TaskStatus.IMPLEMENTING, run_id=run_id),
                     )
-                    _retry_delay(config)
-                    continue
+                    implemented = _do_implementing(
+                        ctx=ctx,
+                        config=config,
+                        writer=writer,
+                        emitter=emitter,
+                        adapter=adapter,
+                        run_id=run_id,
+                        on_harness_result=on_harness_result,
+                        on_activity=on_activity,
+                    )
+
+                    if not implemented.success:
+                        assert implemented.classification is not None
+                        if implemented.timed_out:
+                            will_retry = attempt_count < ctx.max_attempts
+                            attempt_count = writer.queue_begin_attempt(task_id)
+                            _record_failure(
+                                writer,
+                                task_id,
+                                run_id,
+                                attempt_count,
+                                implemented.classification,
+                                will_retry,
+                            )
+                            if not will_retry:
+                                return _block(
+                                    writer=writer,
+                                    emitter=emitter,
+                                    task_id=task_id,
+                                    run_id=run_id,
+                                    reason=BlockedReason.TIMEOUT,
+                                    note=implemented.classification.error_summary,
+                                )
+                        else:
+                            validating_env_retries += 1
+                            blocking = (
+                                validating_env_retries > config.retries.max_attempts
+                                or implemented.classification.terminal
+                            )
+                            _record_failure(
+                                writer,
+                                task_id,
+                                run_id,
+                                attempt_count,
+                                implemented.classification,
+                                will_retry=not blocking,
+                            )
+                            if blocking:
+                                note = (
+                                    _terminal_block_note(implemented.classification.error_summary)
+                                    if implemented.classification.terminal
+                                    else implemented.classification.error_summary
+                                )
+                                return _block(
+                                    writer=writer,
+                                    emitter=emitter,
+                                    task_id=task_id,
+                                    run_id=run_id,
+                                    reason=BlockedReason.ENVIRONMENT,
+                                    note=note,
+                                )
+                        emit_state_changed(
+                            emitter,
+                            writer.queue_transition(
+                                task_id, TaskStatus.FAILED_RETRY, run_id=run_id
+                            ),
+                        )
+                        _retry_delay(config)
+                        continue
+
+                skip_to_validating = False
 
                 # -- VALIDATING ---------------------------------------------------
                 emit_state_changed(
@@ -500,6 +628,9 @@ def _do_proposing(
             cancel=lambda: adapter.cancel(task_id),
             kill_grace_s=float(config.timeouts.kill_grace),
         )
+        sweep_orphans_after_completion(
+            run_id=run_id, task_id=task_id, worktree_path=ctx.worktree_path, emitter=emitter
+        )
         if result.value is not None and on_harness_result is not None:
             on_harness_result(result.value)
         if result.value is not None and result.value.success:
@@ -508,7 +639,7 @@ def _do_proposing(
         classification = classify_harness_failure(
             result.value, stage=FailureStage.PROPOSE, timed_out=result.timed_out
         )
-        will_retry = local_attempt < _PROPOSING_MAX_LOCAL_ATTEMPTS
+        will_retry = local_attempt < _PROPOSING_MAX_LOCAL_ATTEMPTS and not classification.terminal
         _record_failure(writer, task_id, run_id, local_attempt, classification, will_retry)
         if not will_retry:
             reason = (
@@ -516,13 +647,18 @@ def _do_proposing(
                 if classification.failure_type is FailureType.TIMEOUT
                 else BlockedReason.ENVIRONMENT
             )
+            note = (
+                _terminal_block_note(classification.error_summary)
+                if classification.terminal
+                else classification.error_summary
+            )
             return _block(
                 writer=writer,
                 emitter=emitter,
                 task_id=task_id,
                 run_id=run_id,
                 reason=reason,
-                note=classification.error_summary,
+                note=note,
             )
         emit_state_changed(
             emitter, writer.queue_transition(task_id, TaskStatus.FAILED_RETRY, run_id=run_id)
@@ -568,6 +704,10 @@ def _do_implementing(
         if f.failure_stage != FailureStage.PROPOSE.value
     ]
     retry_context = build_retry_context(failures)
+    turn_budget_multiplier = _implementing_turn_budget_multiplier(failures, config=config)
+    max_turns = int(config.harness.max_turns * turn_budget_multiplier)
+    implementing_wall = config.timeouts.implementing_wall * turn_budget_multiplier
+    implementing_stall = config.timeouts.implementing_stall * turn_budget_multiplier
 
     # `ctx.spec_path` is not always the OpenSpec change directory itself --
     # true for the direct `queue add` front door (spec_path is literally
@@ -594,8 +734,8 @@ def _do_implementing(
         watch_path = tasks_md_path
 
     timers = LivenessTimers(
-        wall_s=float(config.timeouts.implementing_wall),
-        stall_s=float(config.timeouts.implementing_stall),
+        wall_s=float(implementing_wall),
+        stall_s=float(implementing_stall),
     )
     watcher = ProgressWatcher(
         task_id=task_id,
@@ -616,10 +756,14 @@ def _do_implementing(
     try:
         timeout_result = run_with_liveness_timeout(
             lambda: adapter.implement(
-                task_id, Path(ctx.spec_path), retry_context, on_activity=on_activity
+                task_id,
+                Path(ctx.spec_path),
+                retry_context,
+                on_activity=on_activity,
+                max_turns=max_turns,
             ),
             timers=timers,
-            wall_s=float(config.timeouts.implementing_wall),
+            wall_s=float(implementing_wall),
             cancel=lambda: adapter.cancel(task_id),
             kill_grace_s=float(config.timeouts.kill_grace),
             on_tick=_on_tick,
@@ -628,10 +772,27 @@ def _do_implementing(
         watcher.stop()
         writer.drain()
 
+    sweep_orphans_after_completion(
+        run_id=run_id, task_id=task_id, worktree_path=ctx.worktree_path, emitter=emitter
+    )
+
     if timeout_result.value is not None and on_harness_result is not None:
         on_harness_result(timeout_result.value)
 
     if timeout_result.value is not None and timeout_result.value.success:
+        try:
+            _git_commit_pending_implementation(ctx.worktree_path, task_id, config)
+        except GitCommandError as exc:
+            return _ImplementOutcome(
+                success=False,
+                timed_out=False,
+                classification=FailureClassification(
+                    failure_type=FailureType.ENVIRONMENT_ERROR,
+                    failure_stage=FailureStage.IMPLEMENT,
+                    error_summary=str(exc),
+                    error_detail=None,
+                ),
+            )
         return _ImplementOutcome(success=True, timed_out=False, classification=None)
 
     classification = classify_harness_failure(
@@ -703,13 +864,24 @@ def _do_reviewing(
         emitter, writer.queue_transition(task_id, TaskStatus.REVIEWING, run_id=run_id)
     )
 
+    live_verification = _needs_live_verification(ctx, config)
+    reviewing_wall = (
+        config.timeouts.reviewing_wall_live if live_verification else config.timeouts.reviewing_wall
+    )
     timeout_result = run_with_wall_clock_timeout(
         lambda: adapter.review(
-            task_id, Path(ctx.spec_path), ctx.base_branch, on_activity=on_activity
+            task_id,
+            Path(ctx.spec_path),
+            ctx.base_branch,
+            on_activity=on_activity,
+            live_verification=live_verification,
         ),
-        wall_s=float(config.timeouts.reviewing_wall),
+        wall_s=float(reviewing_wall),
         cancel=lambda: adapter.cancel(task_id),
         kill_grace_s=float(config.timeouts.kill_grace),
+    )
+    sweep_orphans_after_completion(
+        run_id=run_id, task_id=task_id, worktree_path=ctx.worktree_path, emitter=emitter
     )
     result = timeout_result.value
     if result is not None and on_harness_result is not None:
@@ -730,6 +902,9 @@ def _do_reviewing(
             error_detail=None,
         )
         _record_failure(writer, task_id, run_id, attempt_count, classification, will_retry)
+        _flag_repeat_review_rejection(
+            config=config, emitter=emitter, task_id=task_id, run_id=run_id
+        )
         if not will_retry:
             _block(
                 writer=writer,
@@ -761,7 +936,7 @@ def _do_reviewing(
         )
 
     validating_env_retries += 1
-    blocking = validating_env_retries > config.retries.max_attempts
+    blocking = validating_env_retries > config.retries.max_attempts or classification.terminal
     _record_failure(writer, task_id, run_id, attempt_count, classification, will_retry=not blocking)
     if blocking:
         reason = (
@@ -769,13 +944,18 @@ def _do_reviewing(
             if classification.failure_type is FailureType.TIMEOUT
             else BlockedReason.ENVIRONMENT
         )
+        note = (
+            _terminal_block_note(classification.error_summary)
+            if classification.terminal
+            else classification.error_summary
+        )
         _block(
             writer=writer,
             emitter=emitter,
             task_id=task_id,
             run_id=run_id,
             reason=reason,
-            note=classification.error_summary,
+            note=note,
         )
         return _ReviewStepResult(_ReviewOutcome.BLOCKED, validating_env_retries)
     return _ReviewStepResult(_ReviewOutcome.RETRY, validating_env_retries)
@@ -902,6 +1082,76 @@ def _git_commit_decisions_log(worktree_path: Path, config: CosmoConfig) -> None:
         )
     except (OSError, subprocess.TimeoutExpired, subprocess.CalledProcessError) as exc:
         raise GitCommandError(f"could not commit decisions-log.md: {exc}") from exc
+
+
+def _git_commit_pending_implementation(
+    worktree_path: Path, task_id: str, config: CosmoConfig
+) -> None:
+    """Commit successful harness output when the harness could not do so.
+
+    Codex's real workspace-write sandbox deliberately protects the linked
+    worktree's Git metadata, so `git add`/`git commit` fail even though source
+    writes are allowed. Existing harnesses normally arrive here clean because
+    they commit their own work; the cached-diff check makes this a no-op for
+    them. Cosmo-managed assets and review evidence are never task output.
+    """
+    identity_flags: list[str] = []
+    if not config.git.unified_identity:
+        identity_flags = [
+            "-c",
+            f"user.name={config.git.commit_author_name}",
+            "-c",
+            f"user.email={config.git.commit_author_email}",
+        ]
+    try:
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(worktree_path),
+                "add",
+                "-A",
+                "--",
+                ".",
+                ":(exclude).agent/**",
+                ":(exclude).agents/**",
+                ":(exclude).cosmo/**",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=60.0,
+        )
+        pending = subprocess.run(
+            ["git", "-C", str(worktree_path), "diff", "--cached", "--quiet", "--exit-code"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=60.0,
+        )
+        if pending.returncode == 0:
+            return
+        if pending.returncode != 1:
+            raise subprocess.CalledProcessError(
+                pending.returncode, pending.args, output=pending.stdout, stderr=pending.stderr
+            )
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(worktree_path),
+                *identity_flags,
+                "commit",
+                "-m",
+                f"cosmo: capture {task_id} implementation",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=60.0,
+        )
+    except (OSError, subprocess.TimeoutExpired, subprocess.CalledProcessError) as exc:
+        raise GitCommandError(f"could not commit implementation output: {exc}") from exc
 
 
 # -- MERGING ----------------------------------------------------------------

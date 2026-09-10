@@ -55,7 +55,7 @@ gate containers`.
 Claude adapter checks: `claude cli`, `subscription billing`
 (fails if `ANTHROPIC_API_KEY` is set), `permission mode`.
 
-## `cosmo init TARGET_PATH`
+## `cosmo init [TARGET_PATH]`
 
 Bootstrap a target repo: `git init` and the base branch if needed,
 `openspec/`, `docs/`, `.agent/<harness>/`, root symlinks, project
@@ -63,7 +63,7 @@ registration.
 
 | Argument | Description |
 | --- | --- |
-| `target_path` | Path to the target repo. Runs `git init` itself if it isn't one. |
+| `target_path` | Path to the target repo. Runs `git init` itself if it isn't one. Optional only when combined with `-i`/`--interactive`, which prompts for it. |
 
 | Option | Default | Description |
 | --- | --- | --- |
@@ -72,7 +72,36 @@ registration.
 | `--force` / `--no-force` | `--no-force` | Overwrite `docs/` files already present. Prompts for confirmation. |
 | `--git-author-name <str>` | — | Git identity to configure locally in the target repo. Paired with `--git-author-email`; given together, skips the interactive prompt. |
 | `--git-author-email <str>` | — | See `--git-author-name`. |
+| `--base-branch-mode <str>` | `direct` | `direct`: operate on the configured base branch itself. `cosmo_branch`: fork an isolated branch off it at init time (see `--cosmo-branch-name`) so templates/harness scaffolding never lands there. Persisted per-project; see "Base-branch isolation" below. |
+| `--cosmo-branch-name <str>` | `cosmo` | Branch name for `--base-branch-mode cosmo_branch`. |
 | `--config`, `-c <path>` | — | Config file. |
+| `-i`, `--interactive` | off | Wizard mode: prompts for target path, harness, project template, base branch, base-branch strategy, docs-overwrite, and (optionally) per-harness model overrides -- for whichever of those weren't already given as a flag. Model overrides, if entered, are written to the *global* user config file (`[harness.overrides.<harness>]`), not scoped to this project. Never triggers on its own; scripted/CI invocations are unaffected unless they pass `-i` themselves. |
+
+### Base-branch isolation (`--base-branch-mode`)
+
+By default (`direct`), every command that touches the target repo operates
+directly on the configured base branch (`git.base_branch`, or `--base-branch`
+per invocation) -- the same behavior as before this option existed.
+
+`--base-branch-mode cosmo_branch` instead forks a new branch (named by
+`--cosmo-branch-name`, default `cosmo`) off the real base branch at `cosmo
+init` time, and treats *that* branch as the effective base branch for
+everything from then on: worktree creation, the diff gate's diff, and where
+task merges land. The real base branch is never touched again after the
+fork -- no scaffolding commits, no task merges. This choice is stored on the
+project's own registration (not in `config.toml`), so every later `cosmo run`
+/ `cosmo validate` / `cosmo spec` invocation against this project picks it up
+automatically; `--base-branch` still overrides it at any single call site.
+
+If the target repo has uncommitted changes on the real base branch at fork
+time, they're stashed (`git stash push -u`) rather than blocking init the way
+`direct` mode does -- the stash is left in the stash list, and `cosmo init`
+prints the exact recovery command (`git checkout <base-branch> && git stash
+pop`).
+
+Not supported yet: syncing an existing `cosmo` branch with upstream base-branch
+commits (do it yourself with `git merge`/`git rebase`), and changing an
+already-registered project's mode after the fact.
 
 ## `cosmo validate WORKTREE`
 
@@ -198,11 +227,30 @@ never carry it.
 
 Reset a `blocked` task to `queued`. `attempt_count` resets to 0.
 
-If the worktree still holds the commit `PROPOSING` made, only the failed
-implementation is discarded (`git reset --hard` to that commit, then `git
-clean -fdx`) — the worktree and the valid OpenSpec change survive, so the
-next run resumes at `IMPLEMENTING`. Otherwise the worktree and branch are
-removed and the task starts over.
+If the worktree still holds the commit `PROPOSING` made, by default only the
+failed implementation is discarded (`git reset --hard` to that commit, then
+`git clean -fdx`) — the worktree and the valid OpenSpec change survive, so
+the next run resumes at `IMPLEMENTING`. Pass `--keep-implementation` to keep
+the failed attempt's own code too instead of discarding it — the next run
+resumes `IMPLEMENTING` on top of it rather than starting that stage over;
+`attempt_count` still resets to 0 either way. If the worktree never got past
+`PROPOSING` (or is gone), both paths fall back to removing the worktree and
+branch entirely and the task starts over — `--keep-implementation` prints a
+note when it has nothing to keep.
+
+If the task's most recent block was an `environment_error` at `COMMITTING`
+or `MERGING`, neither of the above applies — the task resumes directly at
+that stage instead, since everything before it already passed validation
+(and review, for `MERGING`).
+
+Pass `--resume-at-validating`/`--resume-at-committing` to force one of those
+same resume points directly, regardless of what the most recent block was —
+for when a fix was already applied to the worktree by something other than a
+full harness session (a human patch, or independent verification) and the
+goal is to hand it back to Cosmo's own judgment without paying for a stage
+that already succeeded by some other means. Neither touches `attempt_count`
+or the worktree, and neither combines with `--keep-implementation` or each
+other — they resume at different points, so pass only one.
 
 **Repeat-block guard**: a task whose most recent block repeats
 `retries.repeat_block_threshold` prior blocks for the same reason is refused
@@ -212,6 +260,9 @@ rather than silently granted another attempt budget.
 | --- | --- | --- |
 | `--repo <path>` | current directory | Target repo the worktree lives in. |
 | `--force` | off | Proceed past the repeat-block guard. |
+| `--keep-implementation` | off | Keep the failed attempt's own code instead of discarding it back to the `PROPOSING` commit. |
+| `--resume-at-validating` | off | Skip straight to `VALIDATING`, regardless of the most recent block. A genuine failure there falls through to a real `IMPLEMENTING` retry. |
+| `--resume-at-committing` | off | Skip straight to `COMMITTING`, regardless of the most recent block. |
 | `--config`, `-c <path>` | — | Config file. |
 
 ### `cosmo queue block TASK_ID`
@@ -236,6 +287,10 @@ git-tracked content you can hand-edit.
 
 If task files already exist, you are asked whether to re-run the harness (not
 free) or reuse them.
+
+Runs on `harness.propose_model` (falling back to `harness.model` if unset) --
+see `config-schema.md`'s `[harness]` section to run this on a different model
+than `IMPLEMENTING`/`REVIEWING`.
 
 | Argument | Description |
 | --- | --- |
@@ -275,7 +330,10 @@ there is no separate approval UI.
 ### `cosmo events tail`
 
 Print recent events. The table carries `seq`, `timestamp`, `severity`,
-`event_type`, `run_id`, `task_id`.
+`event_type`, `run_id`, `task_id`. `timestamp` (and every other timestamp
+`cosmo` prints to the console) renders in the host's local timezone --
+storage stays UTC internally, and `--payload`'s raw JSON keeps whatever
+timezone the underlying event carries.
 
 | Option | Default | Description |
 | --- | --- | --- |

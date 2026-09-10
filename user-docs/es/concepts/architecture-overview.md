@@ -42,9 +42,12 @@ fuente, no por convención:
   por lo tanto nunca se le devuelve al agente para que lo resuelva a ciegas —
   no hay ningún adaptador dentro del alcance de esa ruta de código al cual
   entregárselo.
-- **Solo el módulo adaptador de Claude puede nombrar binarios, flags o
-  variables de entorno específicos de Claude.** El código central de
-  orquestación nunca se ramifica según qué harness esté configurado.
+- **Solo el propio módulo de un adaptador de harness puede nombrar sus
+  binarios, flags o variables de entorno.** El código central de
+  orquestación nunca se ramifica según qué harness esté configurado. Hoy hay
+  cuatro adaptadores de producción: `claude`, `ori-claude`,
+  `claude-openrouter` y `codex` (más `fake` para pruebas). El código central
+  no puede distinguirlos.
 
 ## Serial por diseño
 
@@ -95,10 +98,11 @@ QUEUED → PROPOSING → PROPOSED → IMPLEMENTING → VALIDATING
   hay ningún código al que atribuirle un error de código. El nombre del
   cambio queda fijado en el prompt, porque todo lo que viene después
   (`openspec archive`, la reutilización del worktree) lo asume.
-- **PROPOSED → IMPLEMENTING** — el harness escribe y hace commit del código,
-  vigilado por un reloj de pared y un temporizador de estancamiento. El
-  progreso se lee del `tasks.md` del cambio, no de nada que el agente
-  afirme.
+- **PROPOSED → IMPLEMENTING** — el harness escribe el código, vigilado por un
+  reloj de pared y un temporizador de estancamiento. Normalmente el harness
+  crea el commit; si su sandbox protege los metadatos Git del worktree
+  enlazado, Cosmo captura la implementación exitosa en un commit antes de
+  validar. El progreso se lee de `tasks.md`, no de lo que afirme el agente.
 - **VALIDATING** — el gate. Ver
   [validation-gate-and-guardrails](validation-gate-and-guardrails.md).
 - **REVIEWING** — una revisión adversarial fresca y sin memoria. Se omite
@@ -264,6 +268,4 @@ Aclarado aquí para que no se confunda con una funcionalidad ya entregada:
   desde afuera. Es una capacidad distinta de que Cosmo *use* un agente como
   harness, y las dos cosas no deben confundirse. **Hoy no existe tal
   servidor.**
-- **Adaptadores distintos de Claude Code.** La interfaz es real y el límite
-  está impuesto por tests; el segundo adaptador aún no está escrito.
 - **Ejecución paralela de tareas.** Ver "Serial por diseño" arriba.

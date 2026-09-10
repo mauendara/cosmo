@@ -1,0 +1,6 @@
+{"type":"thread.started","thread_id":"01900000-0000-7000-8000-000000000003"}
+{"type":"item.completed","item":{"id":"item_0","type":"error","message":"hook trust bypass is enabled"}}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"I will run the requested command."}}
+{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"done"}}
+{"type":"turn.completed","usage":{"input_tokens":24381,"cached_input_tokens":11904,"cache_write_input_tokens":0,"output_tokens":109,"reasoning_output_tokens":56}}

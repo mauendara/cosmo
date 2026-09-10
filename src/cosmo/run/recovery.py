@@ -59,6 +59,32 @@ _STAGE_BY_STATUS: dict[str, FailureStage] = {
     TS.FAILED_RETRY.value: FailureStage.IMPLEMENT,
 }
 
+# v15: which `resume_at_stage` an interrupted status resumes at, keeping the
+# worktree instead of wiping it -- a crash has nothing to do with the code's
+# quality, so it gets the same "resume in place" treatment `task.machine.
+# run_task`'s own in-run retry loop already gives an ordinary IMPLEMENTING/
+# VALIDATING/REVIEWING failure (no reset, re-enter the loop and try again).
+# PROPOSED means "the OpenSpec change this worktree already has is still
+# good, skip _do_proposing and re-enter the loop at IMPLEMENTING" -- FAILED_
+# RETRY lands here too since every in-run retry path funnels back through
+# IMPLEMENTING regardless of which stage actually failed. COMMITTING/MERGING/
+# FINISHING reuse the resume points migration 9 already built for `cli.main.
+# queue_retry`'s environment-error case -- a crash mid-commit or mid-merge is
+# the same "nothing before this stage needs redoing" situation, just
+# discovered by a startup sweep instead of a human. PROPOSING itself is
+# deliberately absent: nothing valid exists yet to resume into, so it keeps
+# the original full-wipe behavior below.
+_RESUME_STAGE_BY_STATUS: dict[str, TS] = {
+    TS.PROPOSED.value: TS.PROPOSED,
+    TS.IMPLEMENTING.value: TS.PROPOSED,
+    TS.VALIDATING.value: TS.PROPOSED,
+    TS.REVIEWING.value: TS.PROPOSED,
+    TS.FAILED_RETRY.value: TS.PROPOSED,
+    TS.COMMITTING.value: TS.COMMITTING,
+    TS.MERGING.value: TS.MERGING,
+    TS.FINISHING.value: TS.MERGING,
+}
+
 
 @dataclass(frozen=True, slots=True)
 class ReconcileOutcome:
@@ -71,7 +97,11 @@ def reconcile_interrupted_tasks(
 ) -> ReconcileOutcome:
     """Requeues every task not in `queued`/`done`/`blocked` (crash-orphaned
     by a prior process) and marks every `run_state` row still `running` as
-    `stopped`/`crashed`. `run_id` is the *new* run about to start (or
+    `stopped`/`crashed`. A task crashed at or after `PROPOSED` keeps its
+    worktree and resumes in place (v15, `_RESUME_STAGE_BY_STATUS`) rather
+    than starting over -- only a crash during `PROPOSING` itself still gets
+    the original full wipe, since nothing valid exists yet to resume into.
+    `run_id` is the *new* run about to start (or
     resume) -- the task-level failure/transition/event rows this writes are
     attributed to it, not to whichever run originally owned the task,
     matching this being a startup fact discovered by the new run, not a
@@ -117,8 +147,20 @@ def reconcile_interrupted_tasks(
         # `queue_retry` (that resets attempt_count, a genuine fresh start);
         # this must not consume the code-level retry budget (the circuit
         # breaker's environment-error tally is the thing that bounds it).
-        transition = writer.queue_transition(task.task_id, TS.QUEUED, run_id=run_id)
-        writer.queue_clear_worktree_path(task.task_id)
+        #
+        # v15: a status past PROPOSING (worktree already has a real OpenSpec
+        # change, possibly real implementation progress on top of it) resumes
+        # in place via `_RESUME_STAGE_BY_STATUS` instead of wiping the
+        # worktree and redoing PROPOSING -- a killed process says nothing
+        # about whether that work was any good. PROPOSING itself has no entry
+        # there (nothing valid exists yet), so it falls through to the
+        # original full-wipe path.
+        resume_stage = _RESUME_STAGE_BY_STATUS.get(task.status)
+        if resume_stage is not None and task.worktree_path is not None:
+            transition = writer.queue_resume_at(task.task_id, resume_stage, run_id=run_id)
+        else:
+            transition = writer.queue_transition(task.task_id, TS.QUEUED, run_id=run_id)
+            writer.queue_clear_worktree_path(task.task_id)
         emit_state_changed(emitter, transition)
         requeued.append(task.task_id)
 

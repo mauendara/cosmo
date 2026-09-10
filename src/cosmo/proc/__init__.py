@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from cosmo.proc.managed import ManagedProcess
 from cosmo.proc.orphans import SweepResult, find_worktree_holders, sweep, sweep_containers
-from cosmo.proc.reap import ReapOutcome, cancel_and_reap
+from cosmo.proc.reap import ReapOutcome, cancel_and_reap, sweep_orphans_after_completion
 from cosmo.proc.timers import LivenessTimers, StallTimer, WallClockTimer
 
 __all__ = [
@@ -19,4 +19,5 @@ __all__ = [
     "find_worktree_holders",
     "sweep",
     "sweep_containers",
+    "sweep_orphans_after_completion",
 ]

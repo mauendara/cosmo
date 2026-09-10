@@ -3,10 +3,28 @@
 > Nota: esta traducción puede no estar actualizada. El inglés es la fuente canónica de esta documentación — consulta la [versión en inglés](../../en/how-to/write-a-new-adapter.md).
 
 Un **harness** es el agente de codificación que Cosmo controla — lo que
-realmente propone y escribe código. Claude Code es el único adaptador
-implementado hasta hoy. Este documento especifica la interfaz con la
-precisión suficiente para que puedas agregar otro (Codex CLI, OpenCode, un
-agente propio) sin tener que preguntarle nada a nadie.
+realmente propone y escribe código. Hoy hay dos adaptadores implementados:
+`claude` (Claude Code nativo, facturado por suscripción) y `ori-claude` (el
+mismo binario real de `claude`, enrutado a través de
+[Ori](https://openrouter.ai/labs/ori) hacia OpenRouter, con tarifa medida
+por token). Este documento especifica la interfaz con la precisión
+suficiente para que puedas agregar otro (Codex CLI, OpenCode, un agente
+propio) sin tener que preguntarle nada a nadie.
+
+**Dos adaptadores que envuelven la misma herramienta subyacente, en lugar de
+un solo adaptador con un interruptor de configuración** es el patrón que
+estableció `ori-claude`, y vale la pena seguirlo si tu nuevo adaptador
+también es "el mismo binario real, lanzado de otra manera" en vez de una
+herramienta genuinamente distinta: extrae la mecánica de invocación
+compartida (el armado del argv salvo por los pocos flags que realmente
+difieren, el armado del entorno, `_invoke`, `cancel`, la lógica de
+supervisión de procesos de más abajo) en una clase base interna que ninguno
+de los dos adaptadores hereda del otro, y deja que cada adaptador concreto
+declare solo lo que realmente es distinto -- `preflight`, y las pocas líneas
+de `_build_argv`/`_build_env` que difieren. Consulta `src/cosmo/harness/
+claude/invoker.py`'s `_ClaudeCodeInvoker` para una instancia real de esta
+forma, con `ClaudeCodeAdapter` y `OriClaudeAdapter` como sus dos subclases
+delgadas.
 
 Las contribuciones de nuevos adaptadores son explícitamente bienvenidas.
 Consulta [CONTRIBUTING.md](../../../CONTRIBUTING.md) para conocer las
@@ -44,8 +62,9 @@ from cosmo.harness.mytool import MyToolAdapter
 
 _REGISTRY: dict[str, type[HarnessAdapter]] = {
     ClaudeCodeAdapter.name: ClaudeCodeAdapter,
+    OriClaudeAdapter.name: OriClaudeAdapter,
     FakeHarnessAdapter.name: FakeHarnessAdapter,
-    MyToolAdapter.name: MyToolAdapter,       # ← agrega esto
+    MyToolAdapter.name: MyToolAdapter,  # ← agrega esto
 }
 ```
 
@@ -104,13 +123,13 @@ conservadora siempre es segura, solo te da una garantía más débil.
 ```python
 @dataclass(frozen=True, slots=True)
 class HarnessCapabilities:
-    reports_native_progress: bool    # False -> Cosmo observa el tasks.md del change
-    supports_retry_context: bool     # False -> Cosmo arma un prompt de reintento sintético
-    has_internal_timeout: bool       # False -> Cosmo impone un timeout externo
-    reports_native_cost: bool        # False -> estima desde tokens, o desactiva el corte por costo
-    supports_gating: bool            # False -> solo inspección post-hoc del diff (más débil)
-    supports_structured_stream: bool # False -> liveness por mtime del archivo; el timeout
-                                     #          de estancamiento es entonces la única guarda
+    reports_native_progress: bool  # False -> Cosmo observa el tasks.md del change
+    supports_retry_context: bool  # False -> Cosmo arma un prompt de reintento sintético
+    has_internal_timeout: bool  # False -> Cosmo impone un timeout externo
+    reports_native_cost: bool  # False -> estima desde tokens, o desactiva el corte por costo
+    supports_gating: bool  # False -> solo inspección post-hoc del diff (más débil)
+    supports_structured_stream: bool  # False -> liveness por mtime del archivo; el timeout
+    #          de estancamiento es entonces la única guarda
 ```
 
 **Declara con honestidad.** Que `supports_gating=True` cuando tu harness en
@@ -131,16 +150,16 @@ filtra más allá de este límite.
 ```python
 @dataclass(frozen=True, slots=True)
 class HarnessResult:
-    success: bool                    # obligatorio
-    output_summary: str              # obligatorio: etiqueta corta, de salida estructurada
-    raw_log_path: Path | None        # obligatorio: dónde escribiste el log de la sesión en crudo
-    files_changed: list[str]         # obligatorio (puede estar vacío)
-    duration_seconds: float          # obligatorio
-    total_cost_usd: float | None     # obligatorio (None si se desconoce)
-    exit_code: int | None            # obligatorio (None si no está basado en un proceso)
-    session_id: str | None           # obligatorio (None si tu harness no tiene ese concepto)
-    quota_window: str | None = None      # "five_hour" | "weekly" | None
-    quota_resets_at: str | None = None   # UTC ISO 8601, o None
+    success: bool  # obligatorio
+    output_summary: str  # obligatorio: etiqueta corta, de salida estructurada
+    raw_log_path: Path | None  # obligatorio: dónde escribiste el log de la sesión en crudo
+    files_changed: list[str]  # obligatorio (puede estar vacío)
+    duration_seconds: float  # obligatorio
+    total_cost_usd: float | None  # obligatorio (None si se desconoce)
+    exit_code: int | None  # obligatorio (None si no está basado en un proceso)
+    session_id: str | None  # obligatorio (None si tu harness no tiene ese concepto)
+    quota_window: str | None = None  # "five_hour" | "weekly" | None
+    quota_resets_at: str | None = None  # UTC ISO 8601, o None
     tool_call_count: int = 0
 ```
 
@@ -168,15 +187,16 @@ Notas que importan:
 ```python
 from cosmo.checks import CheckResult, check_executable, ok, warn, fail
 
-ok("check name", "detail")     # informativo
-warn("check name", "detail")   # visible, no bloqueante
-fail("check name", "detail")   # bloqueante: cosmo doctor sale con código distinto de cero
+ok("check name", "detail")  # informativo
+warn("check name", "detail")  # visible, no bloqueante
+fail("check name", "detail")  # bloqueante: cosmo doctor sale con código distinto de cero
 ```
 
 ## La interfaz
 
 ```python
 from cosmo.harness.base import HarnessAdapter, HarnessCapabilities, HarnessResult
+
 
 class MyToolAdapter(HarnessAdapter):
     name: ClassVar[str] = "mytool"
@@ -340,7 +360,7 @@ process = ManagedProcess(
     raw_log_path=raw_log_path,
     cwd=self.cwd,
     env=env,
-    on_stdout_chunk=reader.feed,   # opcional: callback de streaming
+    on_stdout_chunk=reader.feed,  # opcional: callback de streaming
 )
 exit_code = process.wait()
 ```
@@ -361,8 +381,12 @@ def cancel(self, task_id: str) -> None:
         return
     if self._emitter is not None:
         cancel_and_reap(
-            process, run_id=self._run_id or "", task_id=task_id,
-            worktree_path=self.cwd, config=self.config, emitter=self._emitter,
+            process,
+            run_id=self._run_id or "",
+            task_id=task_id,
+            worktree_path=self.cwd,
+            config=self.config,
+            emitter=self._emitter,
         )
     else:
         process.cancel(grace_s=self.config.timeouts.kill_grace)
@@ -477,6 +501,23 @@ cosmo harness probe --harness mytool --prompt "reply with the word ok"
 cosmo run --repo /tmp/test-project --harness mytool --task some-task
 ```
 
+Ejecuta ese ciclo en un worktree enlazado, no solo en un repositorio fixture.
+Hay dos detalles de integración fáciles de omitir:
+
+- El runner cambia `adapter.cwd` para cada worktree. Si el adaptador compone un
+  objeto invocador separado, sincroniza su directorio al llamar; copiar `cwd`
+  solo en `__init__` hace que las llamadas posteriores se ejecuten en el
+  checkout equivocado.
+- Algunos sandboxes permiten escribir código pero protegen los metadatos Git
+  del worktree enlazado. No concedas acceso irrestricto para compensarlo.
+  Demuestra que el commit normal funciona o usa un commit central,
+  independiente del harness y limitado por rutas, tras una llamada exitosa,
+  como hace la integración Codex.
+
+Una capacidad como `supports_gating` debe permanecer falsa hasta que una
+ejecución hostil real pruebe cada ruta de escritura habilitada y una escritura
+fuera del worktree. Los tests fijan la intención; la CLI real fija la frontera.
+
 ## Lista de verificación
 
 - [ ] `templates/harness/mytool/` escrito, tomando como modelo
@@ -495,3 +536,4 @@ cosmo run --repo /tmp/test-project --harness mytool --task some-task
 - [ ] Se escribe un log en crudo y se devuelve su ruta
 - [ ] Registrado en `registry.py`
 - [ ] La prueba de límite pasa: nada fuera de tu módulo nombra tu binario
+- [ ] El ciclo completo en worktree y los casos hostiles pasan con la CLI real

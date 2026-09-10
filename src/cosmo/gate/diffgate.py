@@ -22,20 +22,14 @@ follow-up spec.
 
 from __future__ import annotations
 
-import fnmatch
 import re
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from cosmo.config.model import GateConfig
+from cosmo.gate.structural_checks import count_assertions, is_test_path
 from cosmo.gate.types import DiffGateResult, DiffGateViolation
-
-_ASSERTION_PATTERNS = (
-    re.compile(r"\bassertThat\("),  # AssertJ (Java)
-    re.compile(r"\bassert[A-Z]\w*\("),  # JUnit Assertions.assertEquals(...) etc
-    re.compile(r"\bexpect\("),  # Vitest / Playwright
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,26 +98,6 @@ def compute_diff(worktree_path: Path, base_branch: str, task_branch: str) -> lis
     return list(files.values())
 
 
-def _count_assertions(lines: list[str]) -> int:
-    return sum(1 for line in lines if any(p.search(line) for p in _ASSERTION_PATTERNS))
-
-
-def _is_test_path(path: str, patterns: list[str]) -> bool:
-    """`fnmatch` has no glob-aware "zero or more directories" semantics for
-    a leading `**/`, unlike `pathlib`/real shell globs -- `**/src/test/**`
-    would otherwise fail to match a bare top-level `src/test/Foo.java` (no
-    directory before `src/`), only matching once something precedes it
-    (confirmed by hand: `fnmatch.translate('**/src/test/**')` requires a
-    literal `/` before `src`). Also trying the pattern with its leading
-    `**/` stripped covers exactly that top-level case."""
-    for pattern in patterns:
-        if fnmatch.fnmatch(path, pattern):
-            return True
-        if pattern.startswith("**/") and fnmatch.fnmatch(path, pattern[3:]):
-            return True
-    return False
-
-
 def run_diff_gate(
     *,
     worktree_path: Path,
@@ -132,48 +106,62 @@ def run_diff_gate(
     gate: GateConfig,
     allow_test_edits: bool,
 ) -> DiffGateResult:
-    """Spec 6.1 layer 2. A no-op (always passes) when `allow_test_edits` is
-    set -- spec 6.1's own condition -- but the diff is still computed so
-    callers always get a `DiffGateResult`, never a special-cased None."""
+    """Spec 6.1 layer 2. `allow_test_edits` (G4, `docs/v15-fixes-after-wa-
+    chat-run.md`) only bypasses the blanket "modified or deleted" rule
+    below -- the assertion-count/skip-annotation/LOC-drop checks always
+    run regardless, so a task granted this escape hatch still can't
+    silently weaken assertions or introduce a skip annotation. Before this
+    fix, `allow_test_edits=True` skipped this whole function outright,
+    which was strictly *more* permissive than the escape hatch needed to
+    be."""
     diff_files = compute_diff(worktree_path, base_branch, task_branch)
-    test_files = [f for f in diff_files if _is_test_path(f.path, gate.diff_gate_test_path_patterns)]
-
-    if allow_test_edits:
-        return DiffGateResult(passed=True, violations=[])
+    test_files = [
+        f for f in diff_files if is_test_path(f.path, gate.diff_gate_test_path_patterns) is not None
+    ]
 
     violations: list[DiffGateViolation] = []
 
-    # Spec 6.1 layer 2's own wording is "modified or deleted" -- a newly
-    # *added* test file is exactly what a well-behaved agent is expected to
-    # produce for new work, and is deliberately not flagged here (confirmed
-    # against a real scenario by hand: an early version of this gate
-    # rejected every task that added a new e2e test at all, which defeats
-    # the point of an autonomous agent that writes its own tests). A new
-    # file is still subject to the assertion-count/skip-annotation/LOC
-    # checks below -- an added-but-immediately-disabled test is still
-    # suspicious.
-    for f in test_files:
-        if f.is_added:
-            continue
-        if f.is_deleted:
-            violations.append(
-                DiffGateViolation(
-                    kind="test_path_deleted",
-                    detail=f"test file deleted: {f.path}",
-                    file=f.path,
+    if not allow_test_edits:
+        # Spec 6.1 layer 2's own wording is "modified or deleted" -- a newly
+        # *added* test file is exactly what a well-behaved agent is expected
+        # to produce for new work, and is deliberately not flagged here
+        # (confirmed against a real scenario by hand: an early version of
+        # this gate rejected every task that added a new e2e test at all,
+        # which defeats the point of an autonomous agent that writes its own
+        # tests). A new file is still subject to the assertion-count/skip-
+        # annotation/LOC checks below -- an added-but-immediately-disabled
+        # test is still suspicious.
+        for f in test_files:
+            if f.is_added:
+                continue
+            if f.is_deleted:
+                violations.append(
+                    DiffGateViolation(
+                        kind="test_path_deleted",
+                        detail=f"test file deleted: {f.path}",
+                        file=f.path,
+                    )
                 )
-            )
-        else:
-            violations.append(
-                DiffGateViolation(
-                    kind="test_path_modified",
-                    detail=f"test file modified: {f.path}",
-                    file=f.path,
+            else:
+                violations.append(
+                    DiffGateViolation(
+                        kind="test_path_modified",
+                        detail=f"test file modified: {f.path}",
+                        file=f.path,
+                    )
                 )
-            )
 
+    # Excludes a deleted file the same way the LOC-drop check below already
+    # does: removing a file removes all of its assertions "by design," in
+    # plain sight in the diff -- not the sneaky case this check exists for,
+    # which is a file that *survives* but has had assertions quietly
+    # weakened inside it. `allow_test_edits`'s own "legitimately deleting an
+    # obsolete test" escape hatch (this fix's own design note) would
+    # otherwise be unusable for any test with real assertions in it.
     net_assertions = sum(
-        _count_assertions(f.added_lines) - _count_assertions(f.removed_lines) for f in test_files
+        count_assertions(f.added_lines) - count_assertions(f.removed_lines)
+        for f in test_files
+        if not f.is_deleted
     )
     if net_assertions < 0:
         violations.append(

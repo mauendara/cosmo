@@ -89,6 +89,49 @@ def test_queue_retry_resets_attempt_count_and_clears_worktree_path(tmp_path: Pat
     writer.close()
 
 
+def test_queue_retry_keep_implementation_resets_attempt_count_but_keeps_worktree_and_resume_stage(
+    tmp_path: Path,
+) -> None:
+    """`--keep-implementation` (v15): `clear_worktree=False` keeps the
+    failed attempt's own code (unlike the default path, which also runs
+    `git.worktree.reset_worktree_to_commit` before calling this), and
+    `resume_at_stage=PROPOSED` tells `task.machine.run_task` to skip
+    `_do_proposing` and resume straight at `IMPLEMENTING`. `attempt_count`
+    still resets to 0 -- a human retry is still a fresh budget, just not a
+    fresh worktree."""
+    db_path = tmp_path / "cosmo.db"
+    writer = StoreWriter(db_path)
+    writer.queue_add(task_id="add-foo", spec_path="p1", max_attempts=2)
+    writer.queue_begin_attempt("add-foo")
+    writer.queue_begin_attempt("add-foo")
+    writer.queue_set_worktree_path("add-foo", Path("/some/worktree"))
+    writer.queue_block("add-foo", BlockedReason.CODE_FAILURE)
+
+    writer.queue_retry("add-foo", clear_worktree=False, resume_at_stage=TaskStatus.PROPOSED)
+    requeued = get_task(db_path, "add-foo")
+    assert requeued is not None
+    assert requeued.status == "queued"
+    assert requeued.attempt_count == 0
+    assert requeued.worktree_path == "/some/worktree"
+    assert requeued.resume_at_stage == "proposed"
+    writer.close()
+
+
+def test_queue_retry_default_path_clears_resume_at_stage_too(tmp_path: Path) -> None:
+    db_path = tmp_path / "cosmo.db"
+    writer = StoreWriter(db_path)
+    writer.queue_add(task_id="add-foo", spec_path="p1", max_attempts=2)
+    writer.queue_set_worktree_path("add-foo", Path("/some/worktree"))
+    writer.queue_resume_at("add-foo", TaskStatus.COMMITTING)
+    writer.queue_block("add-foo", BlockedReason.CODE_FAILURE)
+
+    writer.queue_retry("add-foo")
+    requeued = get_task(db_path, "add-foo")
+    assert requeued is not None
+    assert requeued.resume_at_stage is None
+    writer.close()
+
+
 def test_queue_retry_unknown_task_raises(tmp_path: Path) -> None:
     writer = StoreWriter(tmp_path / "cosmo.db")
     with pytest.raises(TaskNotFoundError):
@@ -119,6 +162,35 @@ def test_queue_resume_at_sets_stage_without_touching_attempt_count_or_worktree(
     assert resumed.resume_at_stage == "merging"
     assert resumed.attempt_count == 1  # untouched
     assert resumed.worktree_path == "/some/worktree"  # untouched
+    writer.close()
+
+
+def test_queue_resume_at_accepts_proposed_and_attributes_a_run_id(tmp_path: Path) -> None:
+    """v15: `run.recovery.reconcile_interrupted_tasks` passes the new run's
+    own `run_id` (unlike `cli.main.queue_retry`'s standalone CLI call, which
+    has none) and resumes crash-interrupted IMPLEMENTING/VALIDATING/
+    REVIEWING work at PROPOSED -- skip PROPOSING, re-enter the loop at
+    IMPLEMENTING."""
+    db_path = tmp_path / "cosmo.db"
+    writer = StoreWriter(db_path)
+    writer.queue_add(task_id="add-foo", spec_path="p1", max_attempts=2)
+    writer.queue_set_worktree_path("add-foo", Path("/some/worktree"))
+    writer.run_create(
+        run_id="new-run",
+        harness="claude",
+        permission_mode="dontAsk",
+        max_turns=80,
+        base_branch="develop",
+    )
+
+    result = writer.queue_resume_at("add-foo", TaskStatus.PROPOSED, run_id="new-run")
+
+    assert result.run_id == "new-run"
+    resumed = get_task(db_path, "add-foo")
+    assert resumed is not None
+    assert resumed.status == "queued"
+    assert resumed.resume_at_stage == "proposed"
+    assert resumed.worktree_path == "/some/worktree"
     writer.close()
 
 

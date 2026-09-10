@@ -22,6 +22,7 @@ from __future__ import annotations
 
 from cosmo.harness.base import HarnessResult
 from cosmo.store.enums import FailureStage, FailureType
+from cosmo.store.failure_signature import classify_failure_signature
 from cosmo.task.types import FailureClassification
 
 
@@ -43,9 +44,26 @@ def classify_harness_failure(
         )
 
     assert result is not None and not result.success
+    error_summary = result.output_summary or f"{stage.value} failed (exit {result.exit_code})"
+    # G1/G8 (docs/v15-fixes-after-wa-chat-run.md): `error_detail` is
+    # otherwise always `None` here -- there's no raw tool output to carry,
+    # only this short summary -- but `classify_failure_signature` matches
+    # on substrings of *some* string, and `error_summary` is exactly where
+    # a real provider budget/key-limit message or the bare `error_max_turns`
+    # subtype lands (see `_summarize` in `harness.claude.invoker`, which
+    # reads a structured `result`/`subtype` field, never prose). Feeding it
+    # in here, rather than only at `store.writer.record_task_failure`'s
+    # storage chokepoint, is what lets `terminal` below reflect a budget
+    # ceiling *before* the retry-vs-block decision is made, not just after
+    # the fact in stored history -- and lets any other matched signature
+    # ride along into storage for free, for `task.machine`'s own
+    # consecutive-failure counting (G1) and general observability alike.
+    signature = classify_failure_signature(error_summary)
+    terminal = signature == "provider_budget_exceeded"
     return FailureClassification(
         failure_type=FailureType.ENVIRONMENT_ERROR,
         failure_stage=stage,
-        error_summary=result.output_summary or f"{stage.value} failed (exit {result.exit_code})",
-        error_detail=None,
+        error_summary=error_summary,
+        error_detail=error_summary if signature is not None else None,
+        terminal=terminal,
     )

@@ -5,6 +5,11 @@ it rather than re-verifying payload shapes themselves."""
 
 from __future__ import annotations
 
+import re
+import time
+
+import pytest
+
 from cosmo.events.envelope import EVENT_SCHEMA_VERSION, Event, EventType
 from cosmo.events.format import WATCH_STALE_EVENT_TYPE, event_detail
 from cosmo.store.enums import Severity
@@ -59,11 +64,15 @@ def test_task_state_changed_shows_transition() -> None:
 
 
 def test_run_paused_shows_reason_and_resume_eta() -> None:
+    # `resume at` renders in the host's local timezone (not always UTC), so
+    # this only checks shape, not a specific zone -- see test_cli.py's
+    # `_pin_tz`-based test for an exact-value check of the conversion.
     payload = {"reason": "quota_exhausted_5h", "resume_delay_seconds": 3600.0}
     detail = event_detail(_event(EventType.RUN_PAUSED.value, payload))
     assert "reason=quota_exhausted_5h" in detail
-    assert "resume at" in detail
-    assert "UTC" in detail
+    assert "resume at " in detail
+    eta_str = detail.split("resume at ", 1)[1]
+    assert re.match(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2} ", eta_str)
 
 
 def test_run_paused_with_no_delay_still_shows_reason() -> None:
@@ -124,3 +133,16 @@ def test_task_interrupted_shows_previous_status() -> None:
     detail = event_detail(_event(EventType.TASK_INTERRUPTED.value, {"previous_status": "merging"}))
     assert "merging" in detail
     assert "requeued" in detail
+
+
+def test_quota_bypassed_shows_resets_at_in_local_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TZ", "America/New_York")
+    time.tzset()
+    try:
+        payload = {"resets_at": "2026-08-27T18:22:52+00:00", "run_cost_so_far_usd": 12.5}
+        detail = event_detail(_event(EventType.QUOTA_BYPASSED.value, payload))
+        assert "resets_at=2026-08-27 14:22:52 EDT" in detail
+        assert "cost_so_far=$12.50" in detail
+    finally:
+        monkeypatch.delenv("TZ")
+        time.tzset()

@@ -1,0 +1,30 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "^(apply_patch|Bash)$",
+        "hooks": [{"type": "command", "command": "python3 .agent/codex/hooks/test_path_guard.py"}]
+      },
+      {
+        "matcher": "^(apply_patch|Bash)$",
+        "hooks": [{"type": "command", "command": "python3 .agent/codex/hooks/annotation_guard.py"}]
+      },
+      {
+        "matcher": "^(apply_patch|Bash)$",
+        "hooks": [{"type": "command", "command": "python3 .agent/codex/hooks/commit_integrity_guard.py"}]
+      },
+      {
+        "matcher": "^Bash$",
+        "hooks": [{"type": "command", "command": "python3 .agent/codex/hooks/background_task_guard.py"}]
+      },
+      {
+        "matcher": "^(apply_patch|Bash)$",
+        "hooks": [{"type": "command", "command": "python3 .agent/codex/hooks/review_write_guard.py"}]
+      },
+      {
+        "matcher": "^(Read|Bash)$",
+        "hooks": [{"type": "command", "command": "python3 .agent/codex/hooks/secret_read_guard.py"}]
+      }
+    ]
+  }
+}

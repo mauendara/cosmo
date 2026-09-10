@@ -50,13 +50,17 @@ class ManagedProcess:
         argv: list[str],
         *,
         raw_log_path: Path,
+        stderr_log_path: Path | None = None,
         cwd: Path | None = None,
         env: dict[str, str] | None = None,
         on_stdout_chunk: Callable[[bytes], None] | None = None,
     ) -> None:
         raw_log_path.parent.mkdir(parents=True, exist_ok=True)
+        if stderr_log_path is not None:
+            stderr_log_path.parent.mkdir(parents=True, exist_ok=True)
         self._log_lock = threading.Lock()
         self._log_file = raw_log_path.open("wb")
+        self._stderr_log_file = stderr_log_path.open("wb") if stderr_log_path else None
         self._proc = subprocess.Popen(
             argv,
             cwd=cwd,
@@ -69,14 +73,29 @@ class ManagedProcess:
         assert self._proc.stderr is not None
         self._drain_threads = [
             threading.Thread(
-                target=self._drain, args=(self._proc.stdout, on_stdout_chunk), daemon=True
+                target=self._drain,
+                args=(self._proc.stdout, on_stdout_chunk, self._log_file),
+                daemon=True,
             ),
-            threading.Thread(target=self._drain, args=(self._proc.stderr, None), daemon=True),
+            threading.Thread(
+                target=self._drain,
+                args=(
+                    self._proc.stderr,
+                    None,
+                    self._stderr_log_file or self._log_file,
+                ),
+                daemon=True,
+            ),
         ]
         for t in self._drain_threads:
             t.start()
 
-    def _drain(self, pipe: IO[bytes], on_chunk: Callable[[bytes], None] | None) -> None:
+    def _drain(
+        self,
+        pipe: IO[bytes],
+        on_chunk: Callable[[bytes], None] | None,
+        log_file: IO[bytes],
+    ) -> None:
         # Runs on its own thread so a slow or silent child never blocks
         # whatever the caller's thread is doing -- the "non-blocking" in
         # the plan's "non-blocking stdout/stderr drain". `os.read` on the
@@ -102,8 +121,8 @@ class ManagedProcess:
             if not chunk:
                 break
             with self._log_lock:
-                self._log_file.write(chunk)
-                self._log_file.flush()
+                log_file.write(chunk)
+                log_file.flush()
             if on_chunk is not None:
                 on_chunk(chunk)
         pipe.close()
@@ -177,3 +196,5 @@ class ManagedProcess:
             t.join(timeout=5.0)
         with self._log_lock:
             self._log_file.close()
+            if self._stderr_log_file is not None:
+                self._stderr_log_file.close()

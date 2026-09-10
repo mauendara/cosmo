@@ -1,0 +1,56 @@
+{
+  "attribution": {
+    "commit": ""
+  },
+  "permissions": {
+    "allow": [
+      "Write",
+      "Edit",
+      "Bash"
+    ],
+    "deny": [
+      "Read(./.env*)",
+      "Read(./secrets/**)",
+      "Read(**/*.pem)",
+      "Read(**/id_rsa*)",
+      "ScheduleWakeup",
+      "ToolSearch",
+      "Task",
+      "TaskOutput"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.agent/ori-claude/hooks/test_path_guard.py\"",
+            "timeout": 5000
+          },
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.agent/ori-claude/hooks/annotation_guard.py\"",
+            "timeout": 5000
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.agent/ori-claude/hooks/commit_integrity_guard.py\"",
+            "timeout": 5000
+          },
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.agent/ori-claude/hooks/background_task_guard.py\"",
+            "timeout": 5000
+          }
+        ]
+      }
+    ]
+  }
+}

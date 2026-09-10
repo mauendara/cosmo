@@ -37,9 +37,75 @@ El único lugar en el núcleo de Cosmo que nombra un harness específico.
 | Clave | Tipo | Por defecto | Descripción |
 | --- | --- | --- | --- |
 | `name` | string | `"claude"` | Qué adaptador usar. Orden de resolución: flag `--harness` → registro del proyecto → esta clave. |
-| `permission_mode` | string | `"dontAsk"` | Postura de permisos pasada al harness. El adaptador de Claude acepta `dontAsk` o `auto`, y rechaza `bypassPermissions` de plano. |
+| `permission_mode` | string | `"dontAsk"` | Postura de permisos pasada al harness. Claude acepta `dontAsk` o `auto`; Codex solo acepta `dontAsk`. Los modos bypass inseguros se rechazan. |
 | `max_turns` | int > 0 | `80` | Tope de turnos por llamada al harness. |
-| `model` | string | `"claude-sonnet-5"` | Fijado para que el modelo de una ejecución no varíe según lo que la CLI del host tenga por defecto en cada momento. |
+| `model` | string | `"claude-sonnet-5"` | Fijado para que el modelo de una ejecución no varíe según lo que la CLI del host tenga por defecto en cada momento. También es el valor de respaldo para las tres claves siguientes cuando no están definidas. |
+| `propose_model` | string o sin definir | sin definir (usa `model`) | Modelo para la llamada `propose()` de `PROPOSING` y para la llamada de enriquecimiento/descomposición de `cosmo spec add` -- ambas son trabajo de planificación, y comparten una sola clave de override. |
+| `implement_model` | string o sin definir | sin definir (usa `model`) | Modelo para la llamada `implement()` de `IMPLEMENTING`. |
+| `review_model` | string o sin definir | sin definir (usa `model`) | Modelo para la llamada `review()` (revisión adversarial) de `REVIEWING` -- una sesión aparte, sin memoria de la implementación, así que un modelo distinto aquí es un segundo par de ojos real. |
+
+Define cualquiera de estas tres claves en un archivo de configuración de
+usuario para ejecutar cada etapa con un modelo distinto, por ejemplo Opus
+para planificación, Sonnet para implementación, y un tercer modelo como
+revisor independiente:
+
+```toml
+[harness]
+propose_model = "claude-opus-5"
+implement_model = "claude-sonnet-5"
+review_model = "claude-haiku-4-5"
+```
+
+### `[harness.overrides.<name>]`
+
+Overrides de modelo por harness, indexados por nombre de harness. El
+espacio de nombres de modelos de un harness es propio -- un id de modelo de
+OpenRouter (`anthropic/claude-sonnet-4.5`) no significa nada para Claude
+Code nativo, y un id nativo de Claude Code (`claude-sonnet-5`) no significa
+nada para OpenRouter -- así que un solo archivo de configuración puede tener
+los modelos correctos para cada harness registrado a la vez, y cambiar de
+harness es un flag `--harness`, no una edición de configuración.
+
+| Clave | Tipo | Por defecto | Descripción |
+| --- | --- | --- | --- |
+| `model` | string o sin definir | sin definir | Modelo por defecto/de respaldo para este harness. |
+| `propose_model` | string o sin definir | sin definir | Sobrescribe `[harness] propose_model` solo para este harness. |
+| `implement_model` | string o sin definir | sin definir | Sobrescribe `[harness] implement_model` solo para este harness. |
+| `review_model` | string o sin definir | sin definir | Sobrescribe `[harness] review_model` solo para este harness. |
+
+Orden de resolución para un harness y rol dados, de más específico a menos:
+`overrides[harness].<rol>_model` → `overrides[harness].model` →
+`[harness] <rol>_model` → `[harness] model`. `probe` (la prueba de humo con
+prompt crudo y la llamada de enriquecimiento de `cosmo spec add`) no tiene
+un campo `probe_model` propio en ningún nivel y resuelve directamente a los
+niveles de `model`.
+
+**El harness `ori-claude` necesita esta tabla para funcionar.** El valor
+por defecto de `[harness] model` (`"claude-sonnet-5"`) es un id de modelo
+nativo de Claude Code -- no está en el catálogo de OpenRouter, así que
+`ori-claude` lo pasa sin reconocer y la llamada falla al autenticar. Define
+al menos `[harness.overrides.ori-claude].model` con un id de modelo real de
+OpenRouter:
+
+```toml
+[harness.overrides.ori-claude]
+model = "anthropic/claude-sonnet-4.5"
+propose_model = "openai/gpt-5"
+implement_model = "qwen/qwen3-coder"
+review_model = "google/gemini-2.5-pro"
+```
+
+**Codex también necesita su propio id de modelo.** El valor Claude incluido no
+es un modelo Codex. Configura uno disponible en tu cuenta y verifícalo con un
+probe; el ejemplo validado fue:
+
+```toml
+[harness.overrides.codex]
+model = "gpt-5.6-sol"
+```
+
+Consulta [Usar el harness de Codex](../how-to/use-codex-harness.md) para las
+restricciones de autenticación, facturación y sandbox.
 
 ## `[timeouts]`
 
@@ -52,7 +118,8 @@ Todos los valores en segundos, todos deben ser > 0.
 | `implementing_stall` | `1200` | Sin actividad observada durante este tiempo en `IMPLEMENTING` termina la llamada. |
 | `validating_wall` | `2700` | Reloj de pared para `VALIDATING`. |
 | `validating_stall` | `600` | Temporizador de estancamiento para `VALIDATING`. |
-| `reviewing_wall` | `900` | Reloj de pared para la llamada de revisión adversarial. Una sola llamada acotada, así que no hay variante de estancamiento. |
+| `reviewing_wall` | `900` | Reloj de pared para la llamada de revisión adversarial. Una sola llamada acotada, así que no hay variante de estancamiento. Aplica salvo que `review.live_verification_keywords` coincida con el contenido del propio spec de la tarea. |
+| `reviewing_wall_live` | `2700` | Reloj de pared para la llamada de revisión adversarial cuando el propio contenido del spec de la tarea pide verificación en vivo/visual (ver `[review]` más abajo). |
 | `committing_wall` | `300` | Reloj de pared para `COMMITTING`. |
 | `merging_wall` | `300` | Reloj de pared para `MERGING`. |
 | `run_wall` | `36000` | Reloj de pared de toda la ejecución (10 horas). Al expirar, detiene la ejecución con `max_time`. |
@@ -71,6 +138,8 @@ desactivando silenciosamente la única protección contra un harness colgado.
 | `delay_min` | int ≥ 0 | `30` | Límite inferior del retraso aleatorizado entre reintentos, en segundos. |
 | `delay_max` | int ≥ 0 | `60` | Límite superior. |
 | `repeat_block_threshold` | int > 0 | `2` | `cosmo queue retry` se rehúsa una vez que el bloqueo terminal más reciente de la tarea coincide con esta cantidad de bloqueos previos por el mismo motivo. `--force` lo anula. |
+| `turn_budget_growth_factor` | float > 1.0 | `1.5` | Multiplicador aplicado a `harness.max_turns` (y a `timeouts.implementing_wall`/`implementing_stall`) por cada agotamiento consecutivo previo del presupuesto de turnos en la misma tarea. Nunca se aplica en el primer intento de `IMPLEMENTING` de una tarea. |
+| `turn_budget_max_multiplier` | float ≥ 1.0 | `3.0` | Límite máximo del multiplicador anterior — p. ej. un valor por defecto de 80 turnos puede crecer hasta 240 pero no más, sin importar cuántas veces la tarea haya agotado su presupuesto. |
 
 **Validado**: `delay_min` no debe superar a `delay_max`.
 
@@ -78,6 +147,14 @@ Solo los intentos que representan un juicio genuino a nivel de código
 incrementan el contador — un veredicto del gate de `code_error` o
 `test_integrity`, o un timeout de `IMPLEMENTING`. Un `environment_error`
 nunca lo hace.
+
+El crecimiento del presupuesto de turnos anterior es adaptativo por tarea,
+no una configuración estática por proyecto — una tarea que agota
+repetidamente su presupuesto de turnos obtiene más margen en su siguiente
+intento; una tarea que tiene éxito o falla por otro motivo nunca lo activa.
+`cost.max_cost_per_task_usd` es el verdadero respaldo contra una tarea
+atascada que consume un presupuesto cada vez mayor sin ningún resultado, no
+un límite de turnos separado.
 
 ## `[circuit_breaker]`
 
@@ -102,6 +179,15 @@ compartidos, no un entorno roto.
 Una tarea bloqueada por `cost` se reevalúa contra el tope *actual* al inicio
 de la siguiente ejecución y se desbloquea automáticamente si un humano lo
 elevó o lo desactivó mientras tanto.
+
+**`ori-claude` es de tarifa medida, a diferencia de `claude` nativo.** El
+valor por defecto `0.0` (desactivado) es la postura correcta para Claude
+Code nativo, que se factura por suscripción. `ori-claude` enruta a través
+de OpenRouter, donde cada token es gasto real por llamada -- ejecutarlo con
+`max_cost_per_run_usd` todavía en `0.0` significa que una ejecución
+desatendida no tiene ningún tope duro de gasto. Define un tope real aquí
+antes de ejecutar `ori-claude` sin supervisión; esta sección se comparte
+entre todos los harnesses (no existe una tabla `[cost]` por harness).
 
 ## `[gate]`
 
@@ -156,6 +242,16 @@ diff_gate_skip_annotations = [
 | Clave | Tipo | Por defecto | Descripción |
 | --- | --- | --- | --- |
 | `enabled` | bool | `true` | La revisión adversarial de sesión fresca entre `VALIDATING` y `COMMITTING`. `false` omite `REVIEWING` por completo. Una revisión rechazada se reintenta contra `retries.max_attempts`, no un presupuesto separado. |
+| `live_verification_keywords` | lista de str | `["storybook", "visual regression", "playwright"]` | Subcadenas sin distinción de mayúsculas comparadas contra el contenido del propio spec/tasks.md de la tarea. Una coincidencia selecciona `timeouts.reviewing_wall_live` en lugar del valor por defecto de solo-diff y le dice al revisor que se espera una verificación en vivo para esta tarea. |
+
+Por defecto, al revisor se le indica que juzgue solo a partir del diff y de
+la salida ya aprobada del build/test/lint del gate — no que inicie un
+servidor de preview ni vuelva a correr una suite de pruebas por su cuenta,
+ya que hacerlo puede agotar el presupuesto de tiempo por defecto (más
+corto) y descartar una revisión real y sin defectos. Una tarea cuyo propio
+contenido del spec coincide con una de `live_verification_keywords` obtiene
+tanto el presupuesto más largo `reviewing_wall_live` como una nota explícita
+de que se espera una verificación en vivo para ella.
 
 ## `[progress]`
 
@@ -181,6 +277,16 @@ necesidad de él.
 La heurística de reloj de pared nunca se reporta como una señal confirmada,
 y siempre se trata como la ventana de cinco horas más corta y segura; no hay
 forma de inferir una ventana semanal solo a partir del tiempo.
+
+**En `ori-claude`**, la detección primaria (estructurada) de cuota degrada a
+los detectores secundario (`result_error_subtypes`) y terciario (heurística
+de reloj de pared) de esta sección -- confirmado por invocación real:
+OpenRouter nunca emite el evento de stream con forma de límite de tasa
+específico de Anthropic que busca el detector primario. Esto es el
+mecanismo de respaldo documentado en la spec 7.2 para un harness sin señal
+primaria funcionando como está diseñado, no un vacío. `bypass_5h_with_credits`
+no tiene sentido en este harness (no hay una ventana de suscripción de
+cinco horas que saltarse) y queda inerte si se define.
 
 ## `[notify]`
 

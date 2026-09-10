@@ -18,7 +18,16 @@ SRC = Path(__file__).resolve().parents[1] / "src" / "cosmo"
 ALLOWED_HARNESS_AWARE = {
     SRC / "harness" / "claude" / "__init__.py",
     SRC / "harness" / "claude" / "adapter.py",
+    SRC / "harness" / "claude" / "invoker.py",  # shared mechanics, both claude-binary routes
     SRC / "harness" / "claude" / "stream.py",
+    SRC / "harness" / "ori" / "__init__.py",
+    SRC / "harness" / "ori" / "adapter.py",
+    SRC / "harness" / "claude_openrouter" / "__init__.py",
+    SRC / "harness" / "claude_openrouter" / "adapter.py",
+    SRC / "harness" / "codex" / "__init__.py",
+    SRC / "harness" / "codex" / "adapter.py",
+    SRC / "harness" / "codex" / "invoker.py",
+    SRC / "harness" / "codex" / "stream.py",
     SRC / "harness" / "registry.py",  # maps names to classes; that is its job
     SRC / "config" / "defaults.toml",  # configuration data, not logic
     # Spec 10.2: which paths a harness expects symlinked at the target repo's
@@ -35,6 +44,12 @@ HARNESS_SPECIFIC_TOKENS = [
     "--permission-mode",
     "dangerously-skip-permissions",
     "max-turns",
+    "OPENROUTER_API_KEY",
+    "ORI_TELEMETRY",
+    "CODEX_API_KEY",
+    "--ignore-user-config",
+    "--dangerously-bypass-hook-trust",
+    "--dangerously-bypass-approvals-and-sandbox",
 ]
 
 
@@ -56,8 +71,8 @@ def test_core_never_names_harness_specific_tokens(token: str) -> None:
 
 
 def test_core_never_hardcodes_a_harness_name() -> None:
-    """The literal 'claude' may appear only in the adapter, registry, and config data."""
-    pattern = re.compile(r"""["']claude["']""")
+    """Literal harness names may appear only in adapters, registry, and config."""
+    pattern = re.compile(r"""["'](claude|ori-claude|codex)["']""")
     offenders = [
         str(p.relative_to(SRC)) for p in _core_python_files() if pattern.search(p.read_text())
     ]

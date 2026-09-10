@@ -65,6 +65,27 @@ class EventType(enum.Enum):
     block. Always `severity=info` -- nothing failed here, unlike `task.
     interrupted`; emitted once per requeued task, before it's transitioned
     back to `queued`."""
+    TASK_REVIEW_REPEAT_REJECTION = "task.review_repeat_rejection"
+    """G7 (docs/v15-fixes-after-wa-chat-run.md): this task's adversarial
+    review has now rejected its diff on 2+ *consecutive* attempts (`store.
+    failure_signature.detect_repeat_block(require_block=False)`, keyed on
+    `failure_stage="adversarial_review"` alone -- deliberately not trying
+    to tell whether rejection N+1 raises the *same* issue as rejection N,
+    per the user's own decision recorded in the plan doc: freeform review
+    prose isn't a fixed format worth signature-matching). Ordinary review
+    rejections auto-retry with no event of their own; this fires so an
+    unattended overnight run surfaces the pattern to a human (via `notify.
+    watch`) while it's still going, rather than only being visible after
+    the fact in `task_failures`. Always `severity=warning`."""
+    TASK_ORPHAN_DETECTED = "task.orphan_detected"
+    """G3 (docs/v15-fixes-after-wa-chat-run.md): a harness session ended
+    (success, failure, or timeout -- not just a forced cancellation) and
+    `proc.orphans.find_worktree_holders` still found a process holding this
+    task's worktree open, e.g. a backgrounded `npm run preview &` that
+    escaped its process group and outlived the session normally. Detection
+    only, same posture as `proc.reap.cancel_and_reap`'s own
+    `worktree_holder_pids` case -- there is no live process handle to kill
+    here, only something for a human to look at. Always `severity=warning`."""
 
 
 @dataclass(frozen=True, slots=True)
