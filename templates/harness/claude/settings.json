@@ -16,6 +16,7 @@
       "Read(**/id_rsa*)",
       "ScheduleWakeup",
       "ToolSearch",
+      "Task",
       "TaskOutput"
     ]
   },

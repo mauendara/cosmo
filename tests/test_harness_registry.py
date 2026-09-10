@@ -20,6 +20,14 @@ def test_every_registered_adapter_declares_all_capabilities() -> None:
             assert isinstance(getattr(adapter.capabilities, field), bool), (name, field)
 
 
+def test_ori_claude_is_registered_by_name() -> None:
+    assert available_harnesses()["ori-claude"].name == "ori-claude"
+
+
+def test_codex_is_registered_by_name() -> None:
+    assert available_harnesses()["codex"].name == "codex"
+
+
 def test_unknown_harness_names_the_registered_ones() -> None:
     with pytest.raises(UnknownHarnessError, match="registered:"):
         get_adapter("nonexistent")

@@ -11,7 +11,6 @@ import threading
 import time
 import uuid
 from dataclasses import Field
-from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -35,6 +34,7 @@ from cosmo.bootstrap import (
     sync_harness_assets,
 )
 from cosmo.checks import CheckResult, CheckStatus
+from cosmo.cli import init_wizard
 from cosmo.config import (
     DEFAULTS_PATH,
     CosmoConfig,
@@ -70,9 +70,11 @@ from cosmo.run.recovery import RunLockHeldError, acquire_run_lock, reconcile_int
 from cosmo.run.types import RunOutcome
 from cosmo.spec import SpecTaskFile, TaskFileError, list_task_files
 from cosmo.store import StoreWriter, TaskNotFoundError
+from cosmo.store.clock import format_local
 from cosmo.store.enums import BlockedReason, RunStatus, StopReason, TaskStatus
 from cosmo.store.failure_signature import detect_repeat_block
 from cosmo.store.reader import (
+    ProjectRow,
     find_project_by_path,
     get_progress,
     get_run,
@@ -172,10 +174,7 @@ def _print_emit(event: Event) -> None:
     if event.task_id or detail_text:
         prefix = f"[{event.task_id}] " if event.task_id else ""
         detail = " " + escape(f"{prefix}{detail_text}".strip())
-    try:
-        when = datetime.fromisoformat(event.timestamp).strftime("%H:%M:%SZ")
-    except ValueError:
-        when = event.timestamp
+    when = format_local(event.timestamp, "%H:%M:%S %Z")
     console.print(f"[dim]{when}[/dim] [bold {style}]>> {event.event_type}[/bold {style}]{detail}")
 
 
@@ -224,7 +223,7 @@ def _load(config_path: Path | None) -> CosmoConfig:
         raise typer.Exit(code=2) from None
 
 
-def _resolve_project_repo(repo: Path | None, cfg: CosmoConfig) -> tuple[Path, str | None]:
+def _resolve_project_repo(repo: Path | None, cfg: CosmoConfig) -> tuple[Path, ProjectRow]:
     """Shared by every command that operates against a target repo (`run`,
     `spec add`, `spec queue`): `repo` defaults to the current working
     directory when omitted -- the common case of running `cosmo` from
@@ -235,12 +234,11 @@ def _resolve_project_repo(repo: Path | None, cfg: CosmoConfig) -> tuple[Path, st
     unregistered path is almost always a typo'd `--repo` or a forgotten
     `cosmo init`, not something to guess through.
 
-    Returns the resolved path and the project's own registered harness
-    (`None` if genuinely unregistered, though that path never returns here
-    -- see below) so callers can feed it into `resolve_harness_name`'s
-    project tier, the same resolution order `cosmo doctor --project-path`
-    already honors (spec 2: "--harness flag > project registration > config
-    default")."""
+    Returns the resolved path and the project's own row so callers can feed
+    `project.harness` into `resolve_harness_name`'s project tier (the same
+    resolution order `cosmo doctor --project-path` already honors -- spec 2:
+    "--harness flag > project registration > config default") and thread
+    `project` into `_resolve_base_branch`."""
     resolved = (repo if repo is not None else Path.cwd()).resolve()
     project = find_project_by_path(cfg.paths.db_path, str(resolved))
     if project is None:
@@ -249,7 +247,24 @@ def _resolve_project_repo(repo: Path | None, cfg: CosmoConfig) -> tuple[Path, st
             f"run `cosmo init {resolved}` first"
         )
         raise typer.Exit(code=1)
-    return resolved, project.harness
+    return resolved, project
+
+
+def _resolve_base_branch(
+    project: ProjectRow, base_branch_flag: str | None, cfg: CosmoConfig
+) -> str:
+    """`--base-branch` stays a full escape hatch at every call site,
+    unchanged in precedence. Absent that, a `cosmo_branch`-mode project
+    resolves to its own isolated branch instead of the real upstream one
+    (v14) -- `real_base_branch` is `None` for a project row that predates
+    this feature, which falls back to `cfg.git.base_branch` exactly as
+    every project did before v14 existed."""
+    if base_branch_flag is not None:
+        return base_branch_flag
+    if project.base_branch_mode == "cosmo_branch":
+        assert project.cosmo_branch_name is not None
+        return project.cosmo_branch_name
+    return project.real_base_branch or cfg.git.base_branch
 
 
 def _render_checks(title: str, results: list[CheckResult]) -> None:
@@ -522,14 +537,14 @@ def run_cmd(
     if typer_ctx.invoked_subcommand is not None:
         return
     cfg = _load(config)
-    resolved_repo, project_harness = _resolve_project_repo(repo, cfg)
+    resolved_repo, project = _resolve_project_repo(repo, cfg)
 
     if task_id is None:
         _run_queue_cmd(
             repo=resolved_repo,
             base_branch=base_branch,
             harness=harness,
-            project_harness=project_harness,
+            project=project,
             dry_run=dry_run,
             cfg=cfg,
         )
@@ -582,8 +597,8 @@ def run_cmd(
                 err_console.print(f"[red]task {task_id!r} is {task.status!r}, not queued[/red]")
                 raise typer.Exit(code=1)
 
-            resolved_base = base_branch if base_branch is not None else cfg.git.base_branch
-            name, source = resolve_harness_name(harness, project_harness, cfg.harness.name)
+            resolved_base = _resolve_base_branch(project, base_branch, cfg)
+            name, source = resolve_harness_name(harness, project.harness, cfg.harness.name)
             console.print(f"harness: [bold]{name}[/bold] (from {source})")
             try:
                 adapter = get_adapter(name)(cfg)
@@ -665,12 +680,12 @@ def _run_queue_cmd(
     repo: Path,
     base_branch: str | None,
     harness: str | None,
-    project_harness: str | None,
+    project: ProjectRow,
     dry_run: bool,
     cfg: CosmoConfig,
 ) -> None:
-    resolved_base = base_branch if base_branch is not None else cfg.git.base_branch
-    name, source = resolve_harness_name(harness, project_harness, cfg.harness.name)
+    resolved_base = _resolve_base_branch(project, base_branch, cfg)
+    name, source = resolve_harness_name(harness, project.harness, cfg.harness.name)
     console.print(f"harness: [bold]{name}[/bold] (from {source})")
 
     if dry_run:
@@ -767,7 +782,7 @@ def run_resume(
     reconciliation sweep, and the process lock all apply exactly as they do
     to a fresh `cosmo run`."""
     cfg = _load(config)
-    resolved_repo, project_harness = _resolve_project_repo(repo, cfg)
+    resolved_repo, project = _resolve_project_repo(repo, cfg)
 
     target_run_id = run_id if run_id is not None else latest_paused_run_id(cfg.paths.db_path)
     if target_run_id is None:
@@ -787,7 +802,7 @@ def run_resume(
     if not yes and not typer.confirm("\nResume this run?"):
         raise typer.Exit(code=0)
 
-    name, source = resolve_harness_name(harness, project_harness, cfg.harness.name)
+    name, source = resolve_harness_name(harness, project.harness, cfg.harness.name)
     console.print(f"harness: [bold]{name}[/bold] (from {source})")
     try:
         adapter = get_adapter(name)(cfg)
@@ -877,6 +892,7 @@ def doctor(
 _SYMLINK_STYLE = {
     "created": "green",
     "refreshed": "green",
+    "removed_legacy": "yellow",
     "skipped_conflict": "red",
     "skipped_missing_target": "yellow",
 }
@@ -885,11 +901,12 @@ _SYMLINK_STYLE = {
 @app.command()
 def init(
     target_path: Annotated[
-        Path,
+        Path | None,
         typer.Argument(
-            help="Path to the target repo. Runs `git init` itself if not already a git repo."
+            help="Path to the target repo. Runs `git init` itself if not already a git repo. "
+            "Omit only when combined with -i/--interactive."
         ),
-    ],
+    ] = None,
     harness: HarnessOption = None,
     project_template: Annotated[
         str | None,
@@ -910,17 +927,94 @@ def init(
     git_author_email: Annotated[
         str | None, typer.Option("--git-author-email", help="See --git-author-name.")
     ] = None,
+    base_branch_mode: Annotated[
+        str | None,
+        typer.Option(
+            "--base-branch-mode",
+            help="'direct' (default): operate on the configured base branch itself. "
+            "'cosmo_branch': fork an isolated branch off it at init time (see "
+            "--cosmo-branch-name) so templates/harness scaffolding never lands there.",
+        ),
+    ] = None,
+    cosmo_branch_name: Annotated[
+        str | None,
+        typer.Option(
+            "--cosmo-branch-name",
+            help="Branch name for --base-branch-mode=cosmo_branch. Defaults to 'cosmo'.",
+        ),
+    ] = None,
     config: ConfigOption = None,
+    interactive: Annotated[
+        bool,
+        typer.Option(
+            "-i",
+            "--interactive",
+            help="Wizard mode: prompt for target path/harness/project template/base branch/"
+            "base-branch strategy/docs-overwrite/model overrides, for whichever of those "
+            "weren't already given as a flag. Never triggers on its own -- scripted/CI "
+            "invocations are unaffected unless they pass -i themselves.",
+        ),
+    ] = False,
 ) -> None:
     """Bootstrap a target repo: git init + base_branch if needed, openspec/,
     docs/, .agent/<harness>/, root symlinks (spec 10.4)."""
     cfg = _load(config)
+
+    model_overrides: dict[str, str] = {}
+    if interactive:
+        default_harness = resolve_harness_name(harness, None, cfg.harness.name)[0]
+        choices = init_wizard.collect(
+            console=console,
+            target_path_flag=target_path,
+            harness_flag=harness,
+            project_template_flag=project_template,
+            force_flag=force,
+            cfg=cfg,
+            default_harness=default_harness,
+        )
+        target_path = choices.target_path
+        harness = choices.harness
+        project_template = choices.project_template
+        base_branch = choices.base_branch
+        base_branch_mode = choices.base_branch_mode
+        cosmo_branch_name = choices.cosmo_branch_name
+        force = choices.force_docs
+        model_overrides = choices.model_overrides
+    elif target_path is None:
+        err_console.print(
+            "[red]Missing argument 'TARGET_PATH'.[/red] (or pass -i/--interactive to be "
+            "prompted for it)"
+        )
+        raise typer.Exit(code=2)
+    else:
+        base_branch = cfg.git.base_branch
+        base_branch_mode = base_branch_mode or "direct"
+        if base_branch_mode not in ("direct", "cosmo_branch"):
+            err_console.print(
+                f"[red]--base-branch-mode must be 'direct' or 'cosmo_branch', "
+                f"got {base_branch_mode!r}[/red]"
+            )
+            raise typer.Exit(code=2)
+        if base_branch_mode == "cosmo_branch" and cosmo_branch_name is None:
+            cosmo_branch_name = "cosmo"
+
     resolved_harness, source = resolve_harness_name(harness, None, cfg.harness.name)
+    if interactive:
+        source = "-i wizard"
     resolved_template = project_template or "_blank"
     console.print(f"harness: [bold]{resolved_harness}[/bold] (from {source})")
     console.print(f"project template: [bold]{resolved_template}[/bold]")
 
-    if force:
+    if model_overrides:
+        config_path = config if config is not None else user_config_path()
+        write_user_config_table(
+            config_path, "harness", {"overrides": {resolved_harness: model_overrides}}
+        )
+        console.print(
+            f"[green]wrote model overrides[/green] for {resolved_harness!r} to {config_path}"
+        )
+
+    if force and not interactive:
         proceed = typer.confirm(
             f"--force will overwrite any existing docs/ file that the "
             f"{resolved_template!r} template also provides. Continue?"
@@ -929,16 +1023,19 @@ def init(
             console.print("[yellow]aborted[/yellow]")
             raise typer.Exit(code=1)
 
+    assert base_branch_mode in ("direct", "cosmo_branch")
     writer = StoreWriter(cfg.paths.db_path)
     try:
         result = run_init(
             target_path,
             harness=resolved_harness,
             project_template=resolved_template,
-            base_branch=cfg.git.base_branch,
+            base_branch=base_branch,
             force_docs=force,
             writer=writer,
             db_path=cfg.paths.db_path,
+            base_branch_mode=base_branch_mode,  # type: ignore[arg-type]
+            cosmo_branch_name=cosmo_branch_name,
         )
     except (TemplatesRootNotFoundError, OpenSpecInitError) as exc:
         err_console.print(f"[red]{exc}[/red]")
@@ -948,19 +1045,34 @@ def init(
 
     _GIT_BRANCH_MESSAGES = {
         GitBranchOutcome.REPO_INITIALIZED_AND_BRANCH_CREATED: (
-            f"[green]git init[/green], then created and checked out {cfg.git.base_branch!r}"
+            f"[green]git init[/green], then created and checked out {base_branch!r}"
         ),
         GitBranchOutcome.BRANCH_CREATED: (
-            f"[green]created and checked out[/green] {cfg.git.base_branch!r}"
+            f"[green]created and checked out[/green] {base_branch!r}"
         ),
-        GitBranchOutcome.ALREADY_ON_BASE_BRANCH: f"already has {cfg.git.base_branch!r}",
+        GitBranchOutcome.ALREADY_ON_BASE_BRANCH: f"already has {base_branch!r}",
         GitBranchOutcome.SKIPPED_DIRTY: (
-            f"[yellow]not on {cfg.git.base_branch!r} and the working tree has uncommitted "
+            f"[yellow]not on {base_branch!r} and the working tree has uncommitted "
             f"changes -- commit or stash first, then create it yourself "
-            f"(`git checkout -b {cfg.git.base_branch}`)[/yellow]"
+            f"(`git checkout -b {base_branch}`)[/yellow]"
+        ),
+        GitBranchOutcome.COSMO_BRANCH_REPO_INITIALIZED_AND_CREATED: (
+            f"[green]git init[/green], then forked {cosmo_branch_name!r} off {base_branch!r} "
+            f"and checked it out"
+        ),
+        GitBranchOutcome.COSMO_BRANCH_CREATED: (
+            f"[green]forked and checked out[/green] {cosmo_branch_name!r} off {base_branch!r}"
+        ),
+        GitBranchOutcome.ALREADY_ON_COSMO_BRANCH: (
+            f"already has {cosmo_branch_name!r} (forked off {base_branch!r}) -- checked out"
         ),
     }
     console.print(f"git branch: {_GIT_BRANCH_MESSAGES[result.git_branch]}")
+    if result.stashed:
+        console.print(
+            f"[yellow]stashed[/yellow] uncommitted changes that were on {base_branch!r} -- "
+            f"recover them with: `git checkout {base_branch} && git stash pop`"
+        )
     console.print(
         "[green]openspec/[/green] created" if result.openspec.ran else "openspec/ already present"
     )
@@ -982,7 +1094,13 @@ def init(
         if result.already_registered
         else f"[green]registered[/green] project {result.project_id}"
     )
-    _ensure_git_identity(result.target, cfg, git_author_name, git_author_email)
+    _ensure_git_identity(
+        result.target,
+        cfg,
+        git_author_name,
+        git_author_email,
+        config if config is not None else user_config_path(),
+    )
 
     # Found live: none of the steps above commit anything on their own --
     # `openspec/`, `docs/`, `.agent/<harness>/`, and the root symlinks all
@@ -1001,6 +1119,7 @@ def _ensure_git_identity(
     cfg: CosmoConfig,
     override_name: str | None,
     override_email: str | None,
+    config_path: Path,
 ) -> None:
     """Spec 3.4 extended: guarantees the target repo has *some* local git
     identity before the implementer's own ad hoc commits can rely on one --
@@ -1008,32 +1127,45 @@ def _ensure_git_identity(
     init` is a human-run command, unlike the headless harness sessions this
     identity ultimately serves) -- pass both --git-author-name/
     --git-author-email to skip the prompt for scripted/CI use.
+
+    Never offers the config's own `commit_author_name`/`commit_author_email`
+    default (i.e. "Cosmo <cosmo@entropiainversa.com>") as a suggestion --
+    a human always types their own. Whatever identity ends up in effect for
+    this repo is also written back into `[git]` in the user config, so
+    Cosmo's own automated commits (decisions-log, merges -- see
+    `task.machine`) stop defaulting to the "Cosmo" identity too, not just
+    the implementer's ad hoc commits.
     """
+
+    def _persist(identity: GitIdentity) -> None:
+        write_user_config_table(
+            config_path,
+            "git",
+            {"commit_author_name": identity.name, "commit_author_email": identity.email},
+        )
+
     if override_name and override_email:
-        set_local_identity(target, GitIdentity(name=override_name, email=override_email))
+        identity = GitIdentity(name=override_name, email=override_email)
+        set_local_identity(target, identity)
+        _persist(identity)
         console.print(f"git identity: [green]set[/green] {override_name} <{override_email}>")
         return
 
-    def _prompt_for_identity() -> None:
+    def _prompt_for_identity() -> GitIdentity:
         name = typer.prompt("Git author name")
         email = typer.prompt("Git author email")
-        set_local_identity(target, GitIdentity(name=name, email=email))
+        identity = GitIdentity(name=name, email=email)
+        set_local_identity(target, identity)
+        _persist(identity)
         console.print(f"git identity: [green]set[/green] {name} <{email}>")
+        return identity
 
     existing = read_configured_identity(target)
     if existing is None:
-        default = GitIdentity(name=cfg.git.commit_author_name, email=cfg.git.commit_author_email)
-        if typer.confirm(
-            f"No git identity configured for this repo. Use the default -- "
-            f"{default.name} <{default.email}>?",
-            default=True,
-        ):
-            set_local_identity(target, default)
-            console.print(
-                f"git identity: [green]set[/green] {default.name} <{default.email}> "
-                f"(config default)"
-            )
-            return
+        console.print(
+            "[yellow]No git identity configured for this repo (and none in global git "
+            "config).[/yellow] Enter one now -- required before any commit can be made."
+        )
         _prompt_for_identity()
         return
 
@@ -1045,6 +1177,7 @@ def _ensure_git_identity(
         "Define a separate identity for Cosmo to use in this repo instead?", default=False
     ):
         console.print("git identity: [dim]left as-is[/dim]")
+        _persist(existing)
         return
     _prompt_for_identity()
 
@@ -1290,7 +1423,7 @@ def spec_add(
     hand-edit before `cosmo spec queue` inserts them (spec 5's own preview-
     first precedent, `cosmo run --dry-run`)."""
     cfg = _load(config)
-    resolved_repo, project_harness = _resolve_project_repo(repo, cfg)
+    resolved_repo, project = _resolve_project_repo(repo, cfg)
     spec_path = resolved_repo / "docs" / "specs" / f"{name}-spec.md"
     if not spec_path.is_file():
         # `docs/specs/` is deliberately not part of any project template
@@ -1332,7 +1465,7 @@ def spec_add(
             )
             return
 
-    resolved_name, source = resolve_harness_name(harness, project_harness, cfg.harness.name)
+    resolved_name, source = resolve_harness_name(harness, project.harness, cfg.harness.name)
     console.print(f"harness: [bold]{resolved_name}[/bold] (from {source})")
     adapter = get_adapter(resolved_name)(cfg, cwd=resolved_repo)
 
@@ -1351,7 +1484,13 @@ def spec_add(
 
     def _run() -> None:
         try:
-            result_box.append(adapter.probe(prompt, on_activity=_print_activity))
+            result_box.append(
+                adapter.probe(
+                    prompt,
+                    on_activity=_print_activity,
+                    model=cfg.harness.resolve_model(resolved_name, "propose"),
+                )
+            )
         except BaseException as exc:  # noqa: BLE001 -- surfaced on the main thread below
             error_box.append(exc)
 
@@ -1367,6 +1506,11 @@ def spec_add(
         raise error_box[0]
     if not result_box or not result_box[0].success:
         err_console.print("[red]spec enrichment failed[/red]")
+        if result_box:
+            failed = result_box[0]
+            err_console.print(f"[red]{failed.output_summary}[/red]")
+            if failed.raw_log_path is not None:
+                err_console.print(f"[dim]raw log: {failed.raw_log_path}[/dim]")
         raise typer.Exit(code=1)
 
     try:
@@ -1398,7 +1542,7 @@ def spec_queue(
     `cosmo spec add` and this command *is* the preview's confirmation step
     -- there is no separate approval UI."""
     cfg = _load(config)
-    resolved_repo, _project_harness = _resolve_project_repo(repo, cfg)
+    resolved_repo, _project = _resolve_project_repo(repo, cfg)
     tasks_dir = _spec_tasks_dir(resolved_repo, name)
     try:
         task_files = list_task_files(tasks_dir)
@@ -1517,6 +1661,8 @@ def queue_show(task_id: str, config: ConfigOption = None) -> None:
     table.add_column("field", style="bold")
     table.add_column("value")
     for field_name, value in dataclasses.asdict(task).items():
+        if field_name in ("created_at", "updated_at") and isinstance(value, str):
+            value = format_local(value)
         table.add_row(field_name, str(value))
     console.print(table)
 
@@ -1548,7 +1694,7 @@ def queue_failures(
     for f in failures:
         console.print(
             f"\n[bold]attempt {f.attempt_number}[/bold] "
-            f"[dim]{f.timestamp}[/dim]  run={f.run_id or '-'}"
+            f"[dim]{format_local(f.timestamp)}[/dim]  run={f.run_id or '-'}"
         )
         console.print(f"  type:    {f.failure_type} @ {f.failure_stage}")
         console.print(f"  summary: {f.error_summary}")
@@ -1579,22 +1725,57 @@ def queue_retry(
             "one for the same reason (see the repeat-block guard below).",
         ),
     ] = False,
+    keep_implementation: Annotated[
+        bool,
+        typer.Option(
+            "--keep-implementation",
+            help="Keep the failed IMPLEMENTING attempt's own code instead of discarding "
+            "it back to the PROPOSING commit -- the next cosmo run continues on top of "
+            "it rather than redoing it from scratch. attempt_count still resets to 0.",
+        ),
+    ] = False,
+    resume_at_validating: Annotated[
+        bool,
+        typer.Option(
+            "--resume-at-validating",
+            help="Skip straight to VALIDATING -- for when a real fix was already applied "
+            "to the worktree by something other than a full IMPLEMENTING session (e.g. a "
+            "human patched a small, well-understood bug directly) and the goal is to hand "
+            "it back to Cosmo's own judgment without paying for a fresh IMPLEMENTING call. "
+            "A genuine VALIDATING failure falls through to a real IMPLEMENTING retry.",
+        ),
+    ] = False,
+    resume_at_committing: Annotated[
+        bool,
+        typer.Option(
+            "--resume-at-committing",
+            help="Skip straight to COMMITTING -- for when VALIDATING/REVIEWING have "
+            "already genuinely passed on this worktree by some other means and nothing "
+            "before COMMITTING needs redoing.",
+        ),
+    ] = False,
     config: ConfigOption = None,
 ) -> None:
     """Reset a `blocked` task back to `queued` for a genuine fresh start:
     `attempt_count` resets to 0 always. If the task's worktree still has the
-    commit `PROPOSING` made (`openspec/changes/<spec_id>/tasks.md`), only
-    the failed `IMPLEMENTING` attempt is discarded (`git reset --hard` to
-    that commit, then `git clean -fdx`) -- the worktree and the already-
-    valid OpenSpec change survive, so the next `cosmo run` picks up at
-    `IMPLEMENTING` instead of paying for `PROPOSING` again (found by hand:
-    the propose step doesn't need re-running unless the spec/docs it was
-    based on actually changed, which a same-worktree retry never does).
-    Only when that commit can't be found -- the task never got past
-    `PROPOSING`, or the worktree is gone -- does this fall back to removing
-    the worktree and branch entirely, matching `git.worktree.
-    sweep_stale_worktrees`'s own "start over" posture for a task that
-    genuinely never produced anything worth keeping.
+    commit `PROPOSING` made (`openspec/changes/<spec_id>/tasks.md`), by
+    default only that commit is kept -- the failed `IMPLEMENTING` attempt's
+    own code is discarded (`git reset --hard` to that commit, then `git
+    clean -fdx`) -- so the next `cosmo run` picks up at `IMPLEMENTING`
+    instead of paying for `PROPOSING` again (found by hand: the propose step
+    doesn't need re-running unless the spec/docs it was based on actually
+    changed, which a same-worktree retry never does). Pass
+    `--keep-implementation` to keep that code too: the next `cosmo run`
+    resumes `IMPLEMENTING` on top of it rather than starting over -- a
+    genuine judgment call between "the code was on the wrong track, throw it
+    out" and "it was close, just fix it," which only a human reviewing the
+    block reason can make; there is no default that's right for both, so
+    this stays opt-in. Only when that commit can't be found -- the task
+    never got past `PROPOSING`, or the worktree is gone -- does this fall
+    back to removing the worktree and branch entirely (`--keep-
+    implementation` has nothing to keep in that case either), matching
+    `git.worktree.sweep_stale_worktrees`'s own "start over" posture for a
+    task that genuinely never produced anything worth keeping.
 
     **Repeat-block guard**: `attempt_count` resetting to 0 on every retry
     means a task's own `max_attempts` budget has no memory of *why* it kept
@@ -1604,8 +1785,23 @@ def queue_retry(
     own acceptance run) gets refused here instead of a silent 4th round of
     attempts. `--force` overrides -- use it once a human (or a different
     fix) has actually addressed the recurring reason, not to make the
-    message go away."""
+    message go away.
+
+    **`--resume-at-validating`/`--resume-at-committing`** (G6, `docs/v15-
+    fixes-after-wa-chat-run.md`): both stages already work end-to-end
+    (`resume_at=VALIDATING` since v19, `COMMITTING` since migration 9) --
+    this only adds a CLI surface for a choice that previously required
+    hand-running `store.writer.queue_resume_at` directly. Neither combines
+    with `--keep-implementation`: they resume at a later point than
+    `--keep-implementation`'s own `PROPOSED`, and combining them is almost
+    certainly a mistake, not an intentional choice."""
     cfg = _load(config)
+    if sum([keep_implementation, resume_at_validating, resume_at_committing]) > 1:
+        err_console.print(
+            "[red]--keep-implementation, --resume-at-validating, and "
+            "--resume-at-committing resume at different points -- pass only one[/red]"
+        )
+        raise typer.Exit(code=2)
     task = get_task(cfg.paths.db_path, task_id)
     if task is None:
         err_console.print(f"[red]no such task: {task_id!r}[/red]")
@@ -1622,7 +1818,7 @@ def queue_retry(
         )
         for occ in repeat.occurrences:
             err_console.print(
-                f"  [dim]{occ.timestamp}[/dim]  run={occ.run_id or '-'}  "
+                f"  [dim]{format_local(occ.timestamp)}[/dim]  run={occ.run_id or '-'}  "
                 f"attempt={occ.attempt_number}  {occ.error_summary}"
             )
         err_console.print(
@@ -1631,36 +1827,47 @@ def queue_retry(
         )
         raise typer.Exit(code=1)
 
-    # v6: an `environment_error` at `COMMITTING`/`MERGING` is the only case
-    # where nothing before the failed stage needs discarding at all --
-    # `IMPLEMENTING`/`VALIDATING`/`REVIEWING` already succeeded on this
-    # exact worktree. Resuming there instead of the worktree-reset dance
-    # below is what `task.machine.run_task`'s own `resume_at` param exists
-    # for (see its docstring, and `store.writer.queue_resume_at`'s).
-    last_block = next((f for f in reversed(history) if f.next_action == "block"), None)
+    # G6: an explicit --resume-at-* flag wins outright -- no need to inspect
+    # the failure history when the human already knows where to resume.
     resume_stage: TaskStatus | None = None
-    if (
-        last_block is not None
-        and last_block.failure_type == "environment_error"
-        and last_block.failure_stage in ("commit", "merge")
-    ):
-        resume_stage = (
-            TaskStatus.COMMITTING if last_block.failure_stage == "commit" else TaskStatus.MERGING
-        )
+    if resume_at_validating:
+        resume_stage = TaskStatus.VALIDATING
+    elif resume_at_committing:
+        resume_stage = TaskStatus.COMMITTING
+    else:
+        # v6: an `environment_error` at `COMMITTING`/`MERGING` is the only case
+        # where nothing before the failed stage needs discarding at all --
+        # `IMPLEMENTING`/`VALIDATING`/`REVIEWING` already succeeded on this
+        # exact worktree. Resuming there instead of the worktree-reset dance
+        # below is what `task.machine.run_task`'s own `resume_at` param exists
+        # for (see its docstring, and `store.writer.queue_resume_at`'s).
+        last_block = next((f for f in reversed(history) if f.next_action == "block"), None)
+        if (
+            last_block is not None
+            and last_block.failure_type == "environment_error"
+            and last_block.failure_stage in ("commit", "merge")
+        ):
+            resume_stage = (
+                TaskStatus.COMMITTING
+                if last_block.failure_stage == "commit"
+                else TaskStatus.MERGING
+            )
 
     writer = StoreWriter(cfg.paths.db_path)
     try:
         if resume_stage is not None:
             result = writer.queue_resume_at(task_id, resume_stage)
             emit_state_changed(EventEmitter(writer), result)
-            console.print(
-                f"[dim]resuming directly at {resume_stage.value} -- the implementation "
-                "already passed validation"
-                + (" and review" if resume_stage is TaskStatus.MERGING else "")
-                + ", nothing to redo[/dim]"
-            )
+            if resume_stage is TaskStatus.VALIDATING:
+                note = "skipping IMPLEMENTING -- a fix was already applied to the worktree"
+            else:
+                note = "the implementation already passed validation" + (
+                    " and review" if resume_stage is TaskStatus.MERGING else ""
+                )
+            console.print(f"[dim]resuming directly at {resume_stage.value} -- {note}[/dim]")
         else:
             clear_worktree = True
+            resume_at_stage: TaskStatus | None = None
             if task.worktree_path is not None:
                 worktree_path = Path(task.worktree_path)
                 spec_id = Path(task.spec_path).stem
@@ -1669,34 +1876,49 @@ def queue_retry(
                     if worktree_path.is_dir()
                     else None
                 )
-                resolved_repo, project_harness = _resolve_project_repo(repo, cfg)
+                resolved_repo, project = _resolve_project_repo(repo, cfg)
                 if propose_commit is not None:
-                    reset_worktree_to_commit(worktree_path, propose_commit)
                     clear_worktree = False
-                    console.print(
-                        "[dim]kept the already-proposed OpenSpec change, discarded the "
-                        "failed implementation attempt[/dim]"
-                    )
+                    if keep_implementation:
+                        resume_at_stage = TaskStatus.PROPOSED
+                        console.print(
+                            "[dim]kept the failed implementation attempt's code -- "
+                            "resuming IMPLEMENTING on top of it[/dim]"
+                        )
+                    else:
+                        reset_worktree_to_commit(worktree_path, propose_commit)
+                        console.print(
+                            "[dim]kept the already-proposed OpenSpec change, discarded the "
+                            "failed implementation attempt[/dim]"
+                        )
                     # `reset_worktree_to_commit`'s `git clean -fdx` discards the
                     # worktree's `.agent/<harness>/` back to whatever was
                     # committed as of `propose_commit` -- stale if Cosmo's own
                     # harness templates (guardrail hooks, settings.json) changed
-                    # since this worktree was first created. Unlike
-                    # `create_worktree`'s two call sites, a kept-worktree retry
-                    # never re-syncs on its own; do it here so a fixed guardrail
-                    # actually applies to the retried attempt, not just to the
-                    # next brand-new worktree.
+                    # since this worktree was first created. `--keep-
+                    # implementation` skips that reset but the same staleness
+                    # risk applies (this worktree's `.agent/` may just as easily
+                    # predate a template fix), so re-sync unconditionally either
+                    # way -- unlike `create_worktree`'s two call sites, a kept-
+                    # worktree retry never re-syncs on its own.
                     harness_name, _source = resolve_harness_name(
-                        None, project_harness, cfg.harness.name
+                        None, project.harness, cfg.harness.name
                     )
                     sync_harness_assets(worktree_path, harness_name, emitter=EventEmitter(writer))
                 else:
+                    if keep_implementation:
+                        err_console.print(
+                            "[yellow]--keep-implementation has nothing to keep -- this task "
+                            "never got past PROPOSING; falling back to a full reset[/yellow]"
+                        )
                     remove_worktree(
                         repo_path=resolved_repo,
                         worktree_path=worktree_path,
                         branch=f"task/{spec_id}",
                     )
-            result = writer.queue_retry(task_id, clear_worktree=clear_worktree)
+            result = writer.queue_retry(
+                task_id, clear_worktree=clear_worktree, resume_at_stage=resume_at_stage
+            )
             emit_state_changed(EventEmitter(writer), result)
     except TaskNotFoundError:
         err_console.print(f"[red]no such task: {task_id!r}[/red]")
@@ -1788,7 +2010,7 @@ def events_tail(
     for e in rows:
         table.add_row(
             str(e.sequence),
-            e.timestamp,
+            format_local(e.timestamp),
             e.severity,
             e.event_type,
             e.run_id or "-",
@@ -1819,7 +2041,7 @@ def events_tail(
                 if event_type is not None and e.event_type != event_type:
                     continue
                 console.print(
-                    f"{e.sequence}\t{e.timestamp}\t{e.severity}\t{e.event_type}\t"
+                    f"{e.sequence}\t{format_local(e.timestamp)}\t{e.severity}\t{e.event_type}\t"
                     f"{e.run_id or '-'}\t{e.task_id or '-'}"
                 )
                 if payload:
@@ -1895,8 +2117,8 @@ def _render_run_report(cfg: CosmoConfig, run_id: str) -> None:
     if row.stop_reason:
         stop_style = "green" if row.stop_reason in ("completed", "queue_empty") else "red"
         console.print(f"  stop reason:   [{stop_style}]{row.stop_reason}[/{stop_style}]")
-    console.print(f"  started at:    {row.started_at}")
-    console.print(f"  stopped at:    {row.stopped_at or '-'}")
+    console.print(f"  started at:    {format_local(row.started_at)}")
+    console.print(f"  stopped at:    {format_local(row.stopped_at) if row.stopped_at else '-'}")
 
     interrupted = list_events(
         cfg.paths.db_path,

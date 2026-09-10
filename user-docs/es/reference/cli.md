@@ -58,7 +58,7 @@ Verificaciones principales: `python`, `git`, `docker`, `openspec`,
 Verificaciones del adaptador de Claude: `claude cli`, `subscription billing`
 (falla si `ANTHROPIC_API_KEY` está configurada), `permission mode`.
 
-## `cosmo init TARGET_PATH`
+## `cosmo init [TARGET_PATH]`
 
 Inicializa un repositorio objetivo: `git init` y la rama base si hace falta,
 `openspec/`, `docs/`, `.agent/<harness>/`, symlinks en la raíz, registro del
@@ -66,7 +66,7 @@ proyecto.
 
 | Argumento | Descripción |
 | --- | --- |
-| `target_path` | Ruta al repositorio objetivo. Ejecuta `git init` por su cuenta si aún no lo es. |
+| `target_path` | Ruta al repositorio objetivo. Ejecuta `git init` por su cuenta si aún no lo es. Opcional solo si se combina con `-i`/`--interactive`, que la pide por prompt. |
 
 | Opción | Por defecto | Descripción |
 | --- | --- | --- |
@@ -75,7 +75,38 @@ proyecto.
 | `--force` / `--no-force` | `--no-force` | Sobrescribe archivos de `docs/` ya presentes. Pide confirmación. |
 | `--git-author-name <str>` | — | Identidad de Git a configurar localmente en el repositorio objetivo. Se combina con `--git-author-email`; si se dan ambas juntas, se salta el prompt interactivo. |
 | `--git-author-email <str>` | — | Ver `--git-author-name`. |
+| `--base-branch-mode <str>` | `direct` | `direct`: opera directamente sobre la rama base configurada. `cosmo_branch`: bifurca una rama aislada a partir de ella en el momento del init (ver `--cosmo-branch-name`) para que el scaffolding de plantillas/harness nunca la toque. Se persiste por proyecto; ver "Aislamiento de rama base" más abajo. |
+| `--cosmo-branch-name <str>` | `cosmo` | Nombre de rama para `--base-branch-mode cosmo_branch`. |
 | `--config`, `-c <path>` | — | Archivo de configuración. |
+| `-i`, `--interactive` | desactivado | Modo asistente: pide por prompt la ruta objetivo, el harness, la plantilla de proyecto, la rama base, la estrategia de rama base, la sobrescritura de docs y (opcionalmente) overrides de modelos por harness -- para lo que no se haya dado ya como flag. Los overrides de modelos, si se ingresan, se escriben en el archivo de configuración *global* del usuario (`[harness.overrides.<harness>]`), no quedan limitados a este proyecto. Nunca se activa solo; las invocaciones con scripts/CI no se ven afectadas a menos que pasen `-i` ellas mismas. |
+
+### Aislamiento de rama base (`--base-branch-mode`)
+
+Por defecto (`direct`), todo comando que toca el repositorio objetivo opera
+directamente sobre la rama base configurada (`git.base_branch`, o
+`--base-branch` por invocación) -- el mismo comportamiento que existía antes
+de esta opción.
+
+`--base-branch-mode cosmo_branch` en cambio bifurca una rama nueva (nombrada
+por `--cosmo-branch-name`, por defecto `cosmo`) a partir de la rama base real
+en el momento de `cosmo init`, y desde entonces trata *esa* rama como la rama
+base efectiva para todo: creación de worktrees, el diff del gate, y dónde
+aterrizan los merges de las tareas. La rama base real nunca vuelve a tocarse
+después de la bifurcación -- ningún commit de scaffolding, ningún merge de
+tareas. Esta elección se guarda en el registro del propio proyecto (no en
+`config.toml`), así que cada invocación posterior de `cosmo run` / `cosmo
+validate` / `cosmo spec` contra este proyecto la toma automáticamente;
+`--base-branch` sigue teniendo prioridad en cualquier invocación puntual.
+
+Si el repositorio objetivo tiene cambios sin confirmar en la rama base real
+al momento de la bifurcación, se guardan con `git stash push -u` en lugar de
+bloquear el init como hace el modo `direct` -- el stash queda en la lista de
+stashes, y `cosmo init` imprime el comando exacto de recuperación
+(`git checkout <base-branch> && git stash pop`).
+
+Todavía no soportado: sincronizar una rama `cosmo` existente con los commits
+posteriores de la rama base (hacerlo manualmente con `git merge`/`git
+rebase`), y cambiar el modo de un proyecto ya registrado después del hecho.
 
 ## `cosmo validate WORKTREE`
 
@@ -201,11 +232,33 @@ un fallo del gate. Los payloads de eventos nunca lo incluyen.
 
 Restablece una tarea `blocked` a `queued`. `attempt_count` se reinicia a 0.
 
-Si el worktree todavía conserva el commit que hizo `PROPOSING`, solo se
-descarta la implementación fallida (`git reset --hard` a ese commit, luego
-`git clean -fdx`) — el worktree y el cambio de OpenSpec válido sobreviven,
-así que la siguiente ejecución retoma en `IMPLEMENTING`. De lo contrario, el
-worktree y la rama se eliminan y la tarea comienza de nuevo.
+Si el worktree todavía conserva el commit que hizo `PROPOSING`, por defecto
+solo se descarta la implementación fallida (`git reset --hard` a ese commit,
+luego `git clean -fdx`) — el worktree y el cambio de OpenSpec válido
+sobreviven, así que la siguiente ejecución retoma en `IMPLEMENTING`. Pasa
+`--keep-implementation` para conservar también el código del intento
+fallido en lugar de descartarlo — la siguiente ejecución retoma
+`IMPLEMENTING` sobre ese código en vez de rehacerlo desde cero;
+`attempt_count` igual se reinicia a 0 en ambos casos. Si la tarea nunca pasó
+de `PROPOSING` (o el worktree ya no existe), ambas rutas terminan
+eliminando el worktree y la rama por completo y la tarea comienza de
+nuevo — `--keep-implementation` imprime un aviso cuando no hay nada que
+conservar.
+
+Si el bloqueo más reciente de la tarea fue un `environment_error` en
+`COMMITTING` o `MERGING`, nada de lo anterior aplica — la tarea retoma
+directamente en esa etapa, ya que todo lo anterior ya pasó la validación (y
+la revisión, para `MERGING`).
+
+Pasa `--resume-at-validating`/`--resume-at-committing` para forzar
+directamente uno de esos mismos puntos de reanudación, sin importar cuál
+fue el bloqueo más reciente — para cuando ya se aplicó una corrección al
+worktree por algún medio distinto a una sesión completa del harness (un
+parche humano, o una verificación independiente) y el objetivo es
+devolverle el juicio a Cosmo sin pagar por una etapa que ya tuvo éxito por
+otro medio. Ninguna de las dos toca `attempt_count` ni el worktree, y
+ninguna se combina con `--keep-implementation` ni entre sí — cada una
+retoma en un punto distinto, así que pasa solo una.
 
 **Protección contra bloqueos repetidos**: una tarea cuyo bloqueo más
 reciente repite `retries.repeat_block_threshold` bloqueos previos por el
@@ -216,6 +269,9 @@ presupuesto de intentos.
 | --- | --- | --- |
 | `--repo <path>` | directorio actual | Repositorio objetivo en el que vive el worktree. |
 | `--force` | desactivado | Continúa más allá de la protección contra bloqueos repetidos. |
+| `--keep-implementation` | desactivado | Conserva el código del intento fallido en lugar de descartarlo hasta el commit de `PROPOSING`. |
+| `--resume-at-validating` | desactivado | Salta directamente a `VALIDATING`, sin importar el bloqueo más reciente. Un fallo genuino ahí cae de nuevo a un reintento real de `IMPLEMENTING`. |
+| `--resume-at-committing` | desactivado | Salta directamente a `COMMITTING`, sin importar el bloqueo más reciente. |
 | `--config`, `-c <path>` | — | Archivo de configuración. |
 
 ### `cosmo queue block TASK_ID`
@@ -240,6 +296,10 @@ son contenido real, versionado en git, que puedes editar a mano.
 
 Si los archivos de tareas ya existen, se te pregunta si quieres volver a
 ejecutar el harness (no es gratis) o reutilizarlos.
+
+Se ejecuta con `harness.propose_model` (usa `harness.model` si no está
+definido) -- ver la sección `[harness]` de `config-schema.md` para ejecutar
+esto con un modelo distinto al de `IMPLEMENTING`/`REVIEWING`.
 
 | Argumento | Descripción |
 | --- | --- |
@@ -279,7 +339,10 @@ confirmación; no existe una UI de aprobación separada.
 ### `cosmo events tail`
 
 Imprime los eventos recientes. La tabla incluye `seq`, `timestamp`,
-`severity`, `event_type`, `run_id`, `task_id`.
+`severity`, `event_type`, `run_id`, `task_id`. `timestamp` (y cualquier otra
+marca de tiempo que `cosmo` imprime en la consola) se muestra en la zona
+horaria local del host -- el almacenamiento interno sigue siendo UTC, y el
+JSON crudo de `--payload` conserva la zona horaria del evento subyacente.
 
 | Opción | Por defecto | Descripción |
 | --- | --- | --- |

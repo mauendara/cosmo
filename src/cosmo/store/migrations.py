@@ -496,6 +496,137 @@ DROP TABLE run_state;
 ALTER TABLE run_state_v4 RENAME TO run_state;
 """
 
+# ============================================================================
+# Migration 11 -- v14: `projects` gains base-branch isolation mode fields.
+#
+# `git.base_branch` is global-only config today, which is already a known
+# pre-existing limitation (one value for every project Cosmo manages). This
+# follows the existing per-project precedent `harness`/`project_template`
+# already set on this same table, rather than repeating that mistake:
+# `base_branch_mode`/`real_base_branch`/`cosmo_branch_name` land on the
+# `projects` row, not in `config.toml`. Plain nullable/defaulted columns, no
+# existing row's data can violate either CHECK, so `ALTER TABLE ADD COLUMN`
+# is enough -- no recreate-copy-swap needed (same reasoning as migrations
+# 6/8/9). `real_base_branch` is NULL for every row migrated forward from
+# before this feature existed; `_resolve_base_branch` (cli.main) treats NULL
+# as "fall back to `cfg.git.base_branch`", matching current behavior exactly
+# for already-registered projects. See docs/v14-cosmo-branch-isolation-plan.md.
+# ============================================================================
+_SCHEMA_V11 = """
+ALTER TABLE projects ADD COLUMN base_branch_mode TEXT NOT NULL DEFAULT 'direct'
+    CHECK (base_branch_mode IN ('direct', 'cosmo_branch'));
+ALTER TABLE projects ADD COLUMN real_base_branch TEXT;
+ALTER TABLE projects ADD COLUMN cosmo_branch_name TEXT;
+"""
+
+# ============================================================================
+# Migration 12 -- v15: `task_queue.resume_at_stage` gains 'proposed'.
+#
+# `run.recovery.reconcile_interrupted_tasks` used to discard a crashed
+# `IMPLEMENTING`/`VALIDATING`/`REVIEWING` task's entire worktree and redo
+# `PROPOSING` from scratch, even though nothing about a process getting
+# killed says anything about the *code*'s quality -- the exact same
+# "no mid-state resumption" waste migration 9's own comment already
+# describes for `COMMITTING`/`MERGING`, just not fixed there because a
+# crash mid-`IMPLEMENTING` didn't get the same treatment as an ordinary
+# in-run retry (`task.machine.run_task`'s own retry loop already resumes an
+# `IMPLEMENTING` failure in place, no reset, no new worktree). `resume_at
+# =PROPOSED` tells `run_task` "the OpenSpec change this worktree already has
+# is still good, skip `_do_proposing` and re-enter the retry loop at
+# `IMPLEMENTING`" -- distinct from the existing `COMMITTING`/`MERGING`
+# values, which additionally skip stages *within* the loop.
+# `cli.main.queue_retry` also gains a `--keep-implementation` flag built on
+# this same value, so a human retrying a `BLOCKED` task can choose to keep
+# the failed attempt's code instead of the default hard-reset-to-`PROPOSING`
+# behavior. Same recreate-copy-swap recipe as migration 4 -- SQLite has no
+# `ALTER TABLE ... DROP CONSTRAINT` to widen the existing `CHECK` in place.
+# ============================================================================
+_SCHEMA_V12 = """
+CREATE TABLE task_queue_v3 (
+    task_id          TEXT PRIMARY KEY,
+    spec_path        TEXT NOT NULL,
+    depends_on       TEXT NOT NULL DEFAULT '[]',
+    priority         INTEGER NOT NULL DEFAULT 0,
+    status           TEXT NOT NULL CHECK (status IN (
+                         'queued', 'proposing', 'proposed', 'implementing',
+                         'validating', 'reviewing', 'committing', 'merging',
+                         'finishing', 'done', 'failed_retry', 'blocked'
+                     )),
+    attempt_count    INTEGER NOT NULL DEFAULT 0,
+    max_attempts     INTEGER NOT NULL,
+    last_error       TEXT,
+    blocked_reason   TEXT CHECK (blocked_reason IN (
+                         'code_failure', 'cost', 'merge_conflict', 'environment',
+                         'timeout', 'flaky_unresolved'
+                     )),
+    allow_test_edits INTEGER NOT NULL DEFAULT 0 CHECK (allow_test_edits IN (0, 1)),
+    worktree_path    TEXT,
+    session_id       TEXT,
+    created_at       TEXT NOT NULL,
+    updated_at       TEXT NOT NULL,
+    spec_batch_id    TEXT,
+    resume_at_stage  TEXT
+                     CHECK (resume_at_stage IS NULL OR resume_at_stage IN (
+                         'proposed', 'committing', 'merging'
+                     ))
+);
+INSERT INTO task_queue_v3 SELECT * FROM task_queue;
+DROP TABLE task_queue;
+ALTER TABLE task_queue_v3 RENAME TO task_queue;
+"""
+
+# ============================================================================
+# Migration 13 -- v19: `task_queue.resume_at_stage` gains 'validating'.
+#
+# Found by hand against a real blocked task (`wa-chat-chat-shell`): the code
+# had already been fixed directly in the worktree by something other than a
+# full harness `IMPLEMENTING` session (a human patched a small, well-
+# understood bug), and there was no way to hand that straight to Cosmo's own
+# `VALIDATING`/`REVIEWING`/`COMMITTING`/`MERGING` judgment without paying for
+# a fresh `IMPLEMENTING` call to rediscover work that already existed --
+# `COMMITTING`/`MERGING` already covered "everything up to here already
+# succeeded," but nothing covered "IMPLEMENTING succeeded by some other
+# means, judge it for real from here." `task.machine.run_task`'s own
+# `resume_at` handling treats this one-shot, unlike `COMMITTING`/`MERGING`
+# (see its docstring) -- a genuine `VALIDATING` failure here falls through to
+# a real `IMPLEMENTING` retry rather than being treated as unretryable.
+# Same recreate-copy-swap recipe as migrations 4/12 -- SQLite has no
+# `ALTER TABLE ... DROP CONSTRAINT` to widen the existing `CHECK` in place.
+# ============================================================================
+_SCHEMA_V13 = """
+CREATE TABLE task_queue_v4 (
+    task_id          TEXT PRIMARY KEY,
+    spec_path        TEXT NOT NULL,
+    depends_on       TEXT NOT NULL DEFAULT '[]',
+    priority         INTEGER NOT NULL DEFAULT 0,
+    status           TEXT NOT NULL CHECK (status IN (
+                         'queued', 'proposing', 'proposed', 'implementing',
+                         'validating', 'reviewing', 'committing', 'merging',
+                         'finishing', 'done', 'failed_retry', 'blocked'
+                     )),
+    attempt_count    INTEGER NOT NULL DEFAULT 0,
+    max_attempts     INTEGER NOT NULL,
+    last_error       TEXT,
+    blocked_reason   TEXT CHECK (blocked_reason IN (
+                         'code_failure', 'cost', 'merge_conflict', 'environment',
+                         'timeout', 'flaky_unresolved'
+                     )),
+    allow_test_edits INTEGER NOT NULL DEFAULT 0 CHECK (allow_test_edits IN (0, 1)),
+    worktree_path    TEXT,
+    session_id       TEXT,
+    created_at       TEXT NOT NULL,
+    updated_at       TEXT NOT NULL,
+    spec_batch_id    TEXT,
+    resume_at_stage  TEXT
+                     CHECK (resume_at_stage IS NULL OR resume_at_stage IN (
+                         'proposed', 'validating', 'committing', 'merging'
+                     ))
+);
+INSERT INTO task_queue_v4 SELECT * FROM task_queue;
+DROP TABLE task_queue;
+ALTER TABLE task_queue_v4 RENAME TO task_queue;
+"""
+
 MIGRATIONS: list[Migration] = [
     Migration(1, "initial schema: events, queue, progress, run state, cost, history", _SCHEMA_V1),
     Migration(2, "task_failures.failure_stage gains secrets (gate gitleaks backstop)", _SCHEMA_V2),
@@ -528,6 +659,21 @@ MIGRATIONS: list[Migration] = [
         10,
         "run_state.stop_reason gains blocked_remaining (v7, queue_empty-vs-blocked gap)",
         _SCHEMA_V10,
+    ),
+    Migration(
+        11,
+        "projects gains base_branch_mode, real_base_branch, cosmo_branch_name (v14)",
+        _SCHEMA_V11,
+    ),
+    Migration(
+        12,
+        "task_queue.resume_at_stage gains proposed (v15, resume IMPLEMENTING in place)",
+        _SCHEMA_V12,
+    ),
+    Migration(
+        13,
+        "task_queue.resume_at_stage gains validating (v19, resume VALIDATING in place)",
+        _SCHEMA_V13,
     ),
 ]
 

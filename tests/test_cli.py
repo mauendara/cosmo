@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -36,6 +37,18 @@ def _db_path() -> Path:
     return load_config().paths.db_path
 
 
+def _pin_tz(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch, tz: str) -> None:
+    """Console timestamps now render in the host's local timezone (not
+    UTC) -- pin it so a test asserting an exact rendered time isn't at the
+    mercy of whatever TZ the machine running the suite happens to have.
+    `time.tzset()`'s C-library-level effect outlives `monkeypatch.setenv`'s
+    own teardown (which only unsets the env var), so it needs its own
+    finalizer to actually restore the real local timezone afterward."""
+    monkeypatch.setenv("TZ", tz)
+    time.tzset()
+    request.addfinalizer(time.tzset)
+
+
 def test_version() -> None:
     result = runner.invoke(app, ["--version"])
     assert result.exit_code == 0
@@ -64,6 +77,7 @@ def test_harness_list_shows_registered_adapters() -> None:
     result = runner.invoke(app, ["harness", "list"])
     assert result.exit_code == 0
     assert "claude" in result.stdout
+    assert "codex" in result.stdout
 
 
 def test_harness_probe_wires_live_activity_output_to_the_probe_call(
@@ -298,6 +312,82 @@ def test_queue_retry_resumes_at_merging_instead_of_discarding_the_worktree(
     assert info.path.is_dir()
 
 
+def test_queue_retry_resume_at_validating_flag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """G6 (docs/v15-fixes-after-wa-chat-run.md): a CLI surface for the
+    `resume_at=VALIDATING` mechanism that previously required hand-running
+    `store.writer.queue_resume_at` directly -- no worktree/attempt_count
+    side effects, exactly like the existing auto-detected MERGING case."""
+    repo = _repo_on_develop(tmp_path)
+    monkeypatch.chdir(repo)
+    db_path = load_config().paths.db_path
+    writer = StoreWriter(db_path)
+    writer.register_project(target_path=str(repo.resolve()), harness="claude")
+    writer.queue_add(task_id="t1", spec_path="openspec/changes/t1", max_attempts=2)
+    writer.queue_begin_attempt("t1")
+    writer.queue_block("t1", BlockedReason.CODE_FAILURE)
+    writer.close()
+
+    result = runner.invoke(app, ["queue", "retry", "t1", "--resume-at-validating"])
+
+    assert result.exit_code == 0, result.stderr
+    assert "resuming directly at validating" in result.stdout
+    task = get_task(db_path, "t1")
+    assert task is not None
+    assert task.status == "queued"
+    assert task.resume_at_stage == "validating"
+    assert task.attempt_count == 1  # untouched
+
+
+def test_queue_retry_resume_at_committing_flag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """G6: same CLI surface for `resume_at=COMMITTING`."""
+    repo = _repo_on_develop(tmp_path)
+    monkeypatch.chdir(repo)
+    db_path = load_config().paths.db_path
+    writer = StoreWriter(db_path)
+    writer.register_project(target_path=str(repo.resolve()), harness="claude")
+    writer.queue_add(task_id="t1", spec_path="openspec/changes/t1", max_attempts=2)
+    writer.queue_begin_attempt("t1")
+    writer.queue_block("t1", BlockedReason.CODE_FAILURE)
+    writer.close()
+
+    result = runner.invoke(app, ["queue", "retry", "t1", "--resume-at-committing"])
+
+    assert result.exit_code == 0, result.stderr
+    assert "resuming directly at committing" in result.stdout
+    task = get_task(db_path, "t1")
+    assert task is not None
+    assert task.resume_at_stage == "committing"
+
+
+def test_queue_retry_refuses_combining_resume_flags(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """G6: combining --keep-implementation with either new flag (or the two
+    new flags with each other) is almost certainly a mistake -- they each
+    resume at a different point."""
+    repo = _repo_on_develop(tmp_path)
+    monkeypatch.chdir(repo)
+    db_path = load_config().paths.db_path
+    writer = StoreWriter(db_path)
+    writer.register_project(target_path=str(repo.resolve()), harness="claude")
+    writer.queue_add(task_id="t1", spec_path="openspec/changes/t1", max_attempts=2)
+    writer.queue_block("t1", BlockedReason.CODE_FAILURE)
+    writer.close()
+
+    result = runner.invoke(
+        app, ["queue", "retry", "t1", "--resume-at-validating", "--resume-at-committing"]
+    )
+
+    assert result.exit_code == 2
+    task = get_task(db_path, "t1")
+    assert task is not None
+    assert task.status == "blocked"  # refused before touching anything
+
+
 def _repo_on_develop(tmp_path: Path) -> Path:
     repo = tmp_path / "target-repo"
     repo.mkdir()
@@ -434,6 +524,119 @@ def test_queue_retry_with_an_already_proposed_change_keeps_the_worktree(
     assert task.status == "queued"
     assert task.attempt_count == 0
     assert task.worktree_path == str(info.path)
+
+
+def test_queue_retry_keep_implementation_keeps_the_failed_attempts_own_code(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """v15: `--keep-implementation` skips `reset_worktree_to_commit`
+    entirely -- the failed attempt's own untracked/uncommitted work must
+    still be sitting there afterward, and the task resumes at `proposed`
+    (skip PROPOSING, straight back to IMPLEMENTING) instead of the default
+    path's `attempt_count`-reset-and-discard behavior."""
+    repo = _repo_on_develop(tmp_path)
+    monkeypatch.chdir(repo)
+    db_path = load_config().paths.db_path
+    writer = StoreWriter(db_path)
+    writer.register_project(target_path=str(repo.resolve()), harness="claude")
+    writer.queue_add(task_id="t1", spec_path="openspec/changes/t1", max_attempts=2)
+    emitter = EventEmitter(writer)
+    info = create_worktree(
+        repo_path=repo,
+        work_dir=tmp_path / "work",
+        run_id="run-1",
+        task_id="t1",
+        spec_id="t1",
+        base_branch="develop",
+        harness="claude",
+        writer=writer,
+        emitter=emitter,
+    )
+
+    def _git(*args: str) -> None:
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(info.path),
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@example.com",
+                *args,
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+    change_dir = info.path / "openspec" / "changes" / "t1"
+    change_dir.mkdir(parents=True)
+    (change_dir / "tasks.md").write_text("- [x] 1.1 Done\n", encoding="utf-8")
+    _git("add", "openspec")
+    _git("commit", "-q", "-m", "Propose t1 OpenSpec change")
+
+    # The failed implementation attempt's own real progress -- untracked,
+    # never committed, exactly what a killed/abandoned IMPLEMENTING session
+    # leaves behind. --keep-implementation must leave this alone.
+    (info.path / "frontend").mkdir()
+    (info.path / "frontend" / "package.json").write_text("{}\n", encoding="utf-8")
+
+    writer.queue_begin_attempt("t1")
+    writer.queue_begin_attempt("t1")
+    writer.queue_block("t1", BlockedReason.CODE_FAILURE)
+    writer.close()
+
+    result = runner.invoke(app, ["queue", "retry", "t1", "--keep-implementation"])
+
+    assert result.exit_code == 0, result.stderr
+    assert "kept the failed implementation attempt's code" in result.stdout
+    assert (info.path / "frontend" / "package.json").is_file()
+    task = get_task(db_path, "t1")
+    assert task is not None
+    assert task.status == "queued"
+    assert task.attempt_count == 0
+    assert task.worktree_path == str(info.path)
+    assert task.resume_at_stage == "proposed"
+
+
+def test_queue_retry_keep_implementation_falls_back_when_never_proposed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--keep-implementation` has nothing to keep when the task never got
+    past PROPOSING -- must fall back to the ordinary full-wipe path rather
+    than erroring out or silently keeping a half-created worktree."""
+    repo = _repo_on_develop(tmp_path)
+    monkeypatch.chdir(repo)
+    db_path = load_config().paths.db_path
+    writer = StoreWriter(db_path)
+    writer.register_project(target_path=str(repo.resolve()), harness="claude")
+    writer.queue_add(task_id="t1", spec_path="openspec/changes/t1", max_attempts=2)
+    emitter = EventEmitter(writer)
+    info = create_worktree(
+        repo_path=repo,
+        work_dir=tmp_path / "work",
+        run_id="run-1",
+        task_id="t1",
+        spec_id="t1",
+        base_branch="develop",
+        harness="claude",
+        writer=writer,
+        emitter=emitter,
+    )
+    writer.queue_block("t1", BlockedReason.CODE_FAILURE)
+    writer.close()
+
+    result = runner.invoke(app, ["queue", "retry", "t1", "--keep-implementation"])
+
+    assert result.exit_code == 0, result.stderr
+    assert "nothing to keep" in result.stderr
+    assert not info.path.exists()
+    task = get_task(db_path, "t1")
+    assert task is not None
+    assert task.status == "queued"
+    assert task.worktree_path is None
+    assert task.resume_at_stage is None
 
 
 def test_queue_retry_on_a_kept_worktree_re_syncs_harness_assets(
@@ -606,6 +809,7 @@ def test_doctor_resolves_the_project_tier_from_a_registered_project(tmp_path: Pa
 
 
 def test_print_emit_shows_task_state_changed_with_task_id_and_states(
+    request: pytest.FixtureRequest,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """`_print_emit` (`cosmo run`'s live-terminal `on_emit` sink) used to
@@ -618,6 +822,7 @@ def test_print_emit_shows_task_state_changed_with_task_id_and_states(
     tag rather than printed."""
     from rich.console import Console
 
+    _pin_tz(request, monkeypatch, "America/New_York")
     buf = io.StringIO()
     monkeypatch.setattr(cli_main, "console", Console(file=buf, width=200))
 
@@ -639,7 +844,8 @@ def test_print_emit_shows_task_state_changed_with_task_id_and_states(
     assert "task.state_changed" in output
     assert "scaffold-app-task" in output
     assert "implementing -> validating" in output
-    assert "18:22:52Z" in output
+    # UTC 18:22:52 rendered in the host's (pinned) local timezone, not UTC.
+    assert "14:22:52 EDT" in output
 
 
 def test_print_emit_still_filters_out_chatty_info_events(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -137,7 +137,12 @@ class StoreWriter:
             )
 
     def queue_retry(
-        self, task_id: str, *, run_id: str | None = None, clear_worktree: bool = True
+        self,
+        task_id: str,
+        *,
+        run_id: str | None = None,
+        clear_worktree: bool = True,
+        resume_at_stage: TaskStatus | None = None,
     ) -> TransitionResult:
         """Reset a `blocked` or `failed_retry` task back to `queued` -- a
         genuine fresh start, not a continuation: `attempt_count` resets to 0
@@ -154,7 +159,17 @@ class StoreWriter:
         reset_worktree_to_commit`, discarding a failed implementation
         attempt back to PROPOSING's own commit) and kept the worktree at
         the same path -- `worktree_path` must stay exactly as it was so the
-        next `run_task` reuses it rather than creating a redundant one."""
+        next `run_task` reuses it rather than creating a redundant one.
+
+        `resume_at_stage=TaskStatus.PROPOSED` (v15, `cli.main.queue_retry`'s
+        `--keep-implementation` flag) means the caller kept the worktree
+        *without* resetting it to the PROPOSING commit either -- the failed
+        attempt's own code stays exactly as it was, and `task.machine.
+        run_task` skips `_do_proposing` and re-enters the retry loop
+        straight at `IMPLEMENTING`. Always pair with `clear_worktree=False`;
+        passing both `clear_worktree=True` and a `resume_at_stage` makes no
+        sense (there would be nothing left to resume into) and is not
+        checked here -- the CLI is the only caller and never does that."""
         now = utcnow_iso()
         with self._conn:
             from_state = self._current_status(task_id)
@@ -163,7 +178,7 @@ class StoreWriter:
                     """
                     UPDATE task_queue
                     SET status = 'queued', blocked_reason = NULL, attempt_count = 0,
-                        worktree_path = NULL, updated_at = ?
+                        worktree_path = NULL, resume_at_stage = NULL, updated_at = ?
                     WHERE task_id = ?
                     """,
                     (now, task_id),
@@ -173,10 +188,10 @@ class StoreWriter:
                     """
                     UPDATE task_queue
                     SET status = 'queued', blocked_reason = NULL, attempt_count = 0,
-                        updated_at = ?
+                        resume_at_stage = ?, updated_at = ?
                     WHERE task_id = ?
                     """,
-                    (now, task_id),
+                    (resume_at_stage.value if resume_at_stage is not None else None, now, task_id),
                 )
             return self._record_transition(
                 task_id, run_id=run_id, from_state=from_state, to_state="queued", now=now
@@ -206,21 +221,57 @@ class StoreWriter:
                 task_id, run_id=run_id, from_state=from_state, to_state="queued", now=now
             )
 
-    def queue_resume_at(self, task_id: str, stage: TaskStatus) -> TransitionResult:
-        """`stage` is `COMMITTING` or `MERGING` -- both callers (`cli.main.
-        queue_retry`) already checked this task's most recent terminal block
-        was an `environment_error` at that exact stage, with everything
-        before it (`IMPLEMENTING`/`VALIDATING`, and `REVIEWING` when
-        `stage` is `MERGING`) already having succeeded.
+    def queue_resume_at(
+        self, task_id: str, stage: TaskStatus, *, run_id: str | None = None
+    ) -> TransitionResult:
+        """`stage` is `COMMITTING`, `MERGING`, (v15) `PROPOSED`, or (v19)
+        `VALIDATING`.
+
+        `COMMITTING`/`MERGING`: both callers (`cli.main.queue_retry`)
+        already checked this task's most recent terminal block was an
+        `environment_error` at that exact stage, with everything before it
+        (`IMPLEMENTING`/`VALIDATING`, and `REVIEWING` when `stage` is
+        `MERGING`) already having succeeded.
+
+        `PROPOSED` (v15): the OpenSpec change this worktree already has is
+        still good, but something before `COMMITTING` was interrupted --
+        either `run.recovery.reconcile_interrupted_tasks` found a task
+        crashed mid-`IMPLEMENTING`/`VALIDATING`/`REVIEWING`/`FAILED_RETRY`,
+        or a human chose `cli.main.queue_retry`'s `--keep-implementation`
+        flag on a `BLOCKED` task. `task.machine.run_task` skips
+        `_do_proposing` and re-enters its retry loop straight at
+        `IMPLEMENTING`, the same "resume in place" path an ordinary in-run
+        retry already takes -- this is not a new kind of resumption, just
+        this function's existing mechanism reused for it.
+
+        `VALIDATING` (v19): the worktree's code was already fixed by
+        something other than a full harness `IMPLEMENTING` session -- found
+        by hand on a real blocked task where a human patched a small,
+        well-understood bug directly rather than paying for a fresh
+        `IMPLEMENTING` call to rediscover it. Unlike every other value here,
+        this one has no CLI caller yet (set by hand); `task.machine.
+        run_task` skips `IMPLEMENTING` only for the resumed attempt's first
+        loop iteration and, if `VALIDATING` genuinely fails, falls through
+        to a real `IMPLEMENTING` retry rather than treating the failure as
+        unretryable the way `COMMITTING`/`MERGING` do.
 
         Unlike `queue_retry`, this deliberately does **not** touch
-        `attempt_count` or `worktree_path`: neither was consumed or
-        invalidated by an `environment_error` at `COMMITTING`/`MERGING`
+        `attempt_count` or `worktree_path`: for `COMMITTING`/`MERGING`,
+        neither was consumed or invalidated by an `environment_error` there
         (spec 6.2's "does not count toward the task's retry limit" --
-        `task.machine`'s own module docstring), so there is nothing to
-        reset. The worktree stays exactly as `IMPLEMENTING`/`VALIDATING`/
-        `REVIEWING` left it -- resuming here means *not* discarding that
-        work, which is the entire point."""
+        `task.machine`'s own module docstring); for a crash-interrupted
+        `PROPOSED` resume, `run.recovery` already recorded the interruption
+        as its own `environment_error` failure, which by the same rule
+        never touches `attempt_count` either; for a hand-set `VALIDATING`
+        resume, the attempt this fix will be judged under is whatever the
+        task's `attempt_count` already was -- if it fails, the task blocks
+        or retries exactly as that count already dictated, no free attempt
+        granted. The worktree stays exactly as it was left -- resuming here
+        means *not* discarding that work, which is the entire point.
+        `run_id` is `None` for `cli.main.queue_retry`'s standalone CLI call
+        (no run to attribute to, matching every other CLI-only transition
+        in this module) and the new run's own id for `run.recovery`'s
+        startup call."""
         now = utcnow_iso()
         with self._conn:
             from_state = self._current_status(task_id)
@@ -234,7 +285,7 @@ class StoreWriter:
                 (stage.value, now, task_id),
             )
             return self._record_transition(
-                task_id, run_id=None, from_state=from_state, to_state="queued", now=now
+                task_id, run_id=run_id, from_state=from_state, to_state="queued", now=now
             )
 
     def queue_block(
@@ -564,6 +615,9 @@ class StoreWriter:
         target_path: str,
         harness: str,
         project_template: str | None = None,
+        base_branch_mode: str = "direct",
+        real_base_branch: str | None = None,
+        cosmo_branch_name: str | None = None,
     ) -> str:
         project_id = f"{Path(target_path).name}-{_short_id()}"
         now = utcnow_iso()
@@ -571,10 +625,20 @@ class StoreWriter:
             self._conn.execute(
                 """
                 INSERT INTO projects (
-                    project_id, target_path, harness, project_template, initialized_at
-                ) VALUES (?, ?, ?, ?, ?)
+                    project_id, target_path, harness, project_template, initialized_at,
+                    base_branch_mode, real_base_branch, cosmo_branch_name
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (project_id, target_path, harness, project_template, now),
+                (
+                    project_id,
+                    target_path,
+                    harness,
+                    project_template,
+                    now,
+                    base_branch_mode,
+                    real_base_branch,
+                    cosmo_branch_name,
+                ),
             )
         return project_id
 

@@ -61,3 +61,12 @@ class FailureClassification:
     failure_stage: FailureStage
     error_summary: str
     error_detail: str | None
+    terminal: bool = False
+    """G8 (docs/v15-fixes-after-wa-chat-run.md): `True` only for a hard,
+    un-retriable provider condition (an OpenRouter key/spend-limit ceiling,
+    a Claude monthly spend limit) that `classify_harness_failure` recognized
+    via `store.failure_signature`'s `provider_budget_exceeded` signature.
+    Structurally identical to any other `environment_error` except that
+    retrying cannot fix it -- callers in `task.machine` should block
+    immediately on `terminal=True` rather than spending the task's
+    remaining retry budget against a condition retrying cannot resolve."""

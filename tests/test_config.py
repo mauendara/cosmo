@@ -134,6 +134,39 @@ def test_write_user_config_table_overwrites_its_own_prior_values(tmp_path: Path)
     assert cfg.notify.telegram_chat_id == "new"
 
 
+def test_resolve_model_falls_back_through_every_rung(tmp_path: Path) -> None:
+    override = tmp_path / "config.toml"
+    override.write_text(
+        "[harness]\n"
+        'model = "claude-sonnet-5"\n'
+        'implement_model = "claude-opus-5"\n'
+        "\n"
+        "[harness.overrides.ori-claude]\n"
+        'model = "anthropic/claude-sonnet-4.5"\n'
+        'propose_model = "openai/gpt-5"\n'
+    )
+    cfg = load_config(config_path=override)
+
+    # overrides[harness].<role>_model
+    assert cfg.harness.resolve_model("ori-claude", "propose") == "openai/gpt-5"
+    # overrides[harness].model (no role-specific override set)
+    assert cfg.harness.resolve_model("ori-claude", "implement") == "anthropic/claude-sonnet-4.5"
+    # <role>_model (no override table for this harness at all)
+    assert cfg.harness.resolve_model("claude", "implement") == "claude-opus-5"
+    # model (nothing else set)
+    assert cfg.harness.resolve_model("claude", "review") == "claude-sonnet-5"
+    # "probe" skips straight to the model rungs, matching pre-v13 behavior
+    assert cfg.harness.resolve_model("claude", "probe") == "claude-sonnet-5"
+    assert cfg.harness.resolve_model("ori-claude", "probe") == "anthropic/claude-sonnet-4.5"
+
+
+def test_resolve_model_unknown_key_inside_override_table_still_raises(tmp_path: Path) -> None:
+    override = tmp_path / "config.toml"
+    override.write_text('[harness.overrides.ori-claude]\nmodell = "typo"\n')
+    with pytest.raises(ValidationError):
+        load_config(config_path=override)
+
+
 def test_write_user_config_table_sets_owner_only_permissions(tmp_path: Path) -> None:
     path = tmp_path / "config.toml"
     write_user_config_table(path, "notify", {"telegram_bot_token": "secret"})

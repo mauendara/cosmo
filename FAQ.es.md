@@ -22,10 +22,14 @@ pruebas inestables, y terminaciones correctas de grupos de procesos.
 
 ## ¿Con qué agentes funciona?
 
-Con Claude Code, por ahora. La interfaz de adaptador es real y está reforzada por
-pruebas — ningún código de orquestación se ramifica según qué harness esté
-configurado — pero Claude Code es la única implementación. Escribir otra es una sola
-clase: [write-a-new-adapter](user-docs/es/how-to/write-a-new-adapter.md).
+Hoy hay cuatro adaptadores: `claude` (Claude Code nativo), `ori-claude` y
+`claude-openrouter` (ambos enrutando el binario `claude` hacia OpenRouter,
+para modelos no-Anthropic o sin suscripción), y `codex` (el CLI de OpenAI
+Codex — ver [use-codex-harness](user-docs/es/how-to/use-codex-harness.md)).
+La interfaz de adaptador es real y está reforzada por pruebas — ningún
+código de orquestación se ramifica según qué harness esté configurado.
+Escribir otro es una sola clase:
+[write-a-new-adapter](user-docs/es/how-to/write-a-new-adapter.md).
 
 ## ¿Funciona con mi stack?
 

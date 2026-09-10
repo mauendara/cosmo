@@ -2,8 +2,9 @@
 
 Thanks for looking. Two contributions are especially wanted:
 
-- **A harness adapter** for another coding agent — Codex CLI, OpenCode,
-  anything with a CLI. The interface is stable, documented, and
+- **A harness adapter** for another coding agent — OpenCode, Cursor,
+  anything with a CLI. (`claude`, `ori-claude`, `claude-openrouter`, and
+  `codex` already ship.) The interface is stable, documented, and
   test-enforced: [write-a-new-adapter](user-docs/en/how-to/write-a-new-adapter.md).
 - **A project template** for a stack the shipped ones don't cover:
   [add-project-template](user-docs/en/how-to/add-project-template.md).
@@ -70,7 +71,7 @@ fails the build, not review:
 | --- | --- |
 | `cosmo.gate` never imports `cosmo.harness` | `tests/test_gate_boundary.py` |
 | `cosmo.git` never imports `cosmo.harness` | `tests/test_git_boundary.py` |
-| Only the Claude adapter module names Claude-specific binaries, flags or env vars | `tests/test_harness_boundary.py` |
+| Only a harness adapter's own module names its binaries, flags or env vars | `tests/test_harness_boundary.py` |
 | `--dangerously-skip-permissions` / `bypassPermissions` never appear in constructed argv | adapter assertion plus an external test |
 
 These make guarantees structural rather than conventional. The gate can't be

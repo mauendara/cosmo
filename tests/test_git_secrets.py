@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from cosmo.git.secrets import HOOK_MARKER, install_gitleaks_pre_commit_hook
+from cosmo.git.secrets import HOOK_MARKER, install_gitleaks_pre_commit_hook, run_gitleaks_scan
 
 pytestmark_gitleaks = pytest.mark.skipif(
     shutil.which("gitleaks") is None, reason="real gitleaks CLI not on PATH"
@@ -113,3 +113,38 @@ def test_installed_hook_allows_a_clean_commit(tmp_path: Path) -> None:
     )
 
     assert result.returncode == 0, result.stderr
+
+
+@pytestmark_gitleaks
+def test_scan_excludes_a_gitignored_build_artifact(tmp_path: Path) -> None:
+    """G5 (docs/v15-fixes-after-wa-chat-run.md): reproduces the real
+    `wa-chat-storybook-vr` incident -- a gitignored, never-committed
+    `storybook-static/` build artifact false-flagging gitleaks'
+    `generic-api-key` rule on minified vendor JS noise, blocking an
+    otherwise-correct task."""
+    repo = _repo(tmp_path)
+    (repo / ".gitignore").write_text("storybook-static/\n")
+    build_dir = repo / "storybook-static"
+    build_dir.mkdir()
+    # Mimics the real false-positive shape: a bare assignment gitleaks'
+    # generic-api-key rule matches on minified vendor JS, no real secret.
+    (build_dir / "bundle.js").write_text(
+        'var o=e.childrens,k="sk_live_" + "abcdefghijklmnopqrstuvwx";\n'
+    )
+
+    result = run_gitleaks_scan(repo)
+
+    assert result.clean, result.findings
+
+
+@pytestmark_gitleaks
+def test_scan_still_catches_a_real_secret_in_a_tracked_file(tmp_path: Path) -> None:
+    """The G5 exclusion must not become a blanket bypass -- a real secret
+    outside any gitignored/build-output path still fails the scan."""
+    repo = _repo(tmp_path)
+    (repo / "config.py").write_text('AWS_SECRET_ACCESS_KEY = "AKIAABCDEFGHIJKLMNOP"\n')
+
+    result = run_gitleaks_scan(repo)
+
+    assert not result.clean
+    assert result.findings

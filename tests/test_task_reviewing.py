@@ -162,6 +162,67 @@ def test_approved_review_reaches_done_through_reviewing(tmp_path: Path) -> None:
         writer.close()
 
 
+def test_review_stays_diff_only_when_spec_has_no_live_verification_keyword(
+    tmp_path: Path,
+) -> None:
+    """G2 (docs/v15-fixes-after-wa-chat-run.md): the diff-only default --
+    no `tasks.md` at all (this test's own fixture repo has no real OpenSpec
+    content) reads as "no live verification needed," not an error."""
+    cfg, repo, writer, emitter, ctx = _setup(tmp_path)
+    _write_verdict(ctx.worktree_path, approved=True)
+    adapter = FakeHarnessAdapter(
+        cfg, cwd=ctx.worktree_path, script=ScriptedCall(FakeOutcome.SUCCESS)
+    )
+    gate = FakeGate(ScriptedGateResult(passed=True))
+
+    try:
+        status = run_task(
+            ctx=ctx,
+            config=cfg,
+            writer=writer,
+            emitter=emitter,
+            adapter=adapter,
+            repo_path=repo,
+            gate_runner=_gate_runner(gate),
+        )
+
+        assert status is TaskStatus.DONE
+        assert adapter.review_live_verification == [False]
+    finally:
+        writer.close()
+
+
+def test_review_gets_live_verification_when_spec_names_playwright(tmp_path: Path) -> None:
+    """G2: a task whose own spec/tasks.md names a live/visual-verification
+    method (Playwright, Storybook, visual regression) gets
+    `live_verification=True` -- real shape from `wa-chat-storybook-vr`."""
+    cfg, repo, writer, emitter, ctx = _setup(tmp_path)
+    tasks_md = ctx.worktree_path / "openspec" / "changes" / "add-foo" / "tasks.md"
+    tasks_md.parent.mkdir(parents=True, exist_ok=True)
+    tasks_md.write_text("- [ ] 1.1 Run the Playwright visual regression suite\n")
+    _write_verdict(ctx.worktree_path, approved=True)
+    adapter = FakeHarnessAdapter(
+        cfg, cwd=ctx.worktree_path, script=ScriptedCall(FakeOutcome.SUCCESS)
+    )
+    gate = FakeGate(ScriptedGateResult(passed=True))
+
+    try:
+        status = run_task(
+            ctx=ctx,
+            config=cfg,
+            writer=writer,
+            emitter=emitter,
+            adapter=adapter,
+            repo_path=repo,
+            gate_runner=_gate_runner(gate),
+        )
+
+        assert status is TaskStatus.DONE
+        assert adapter.review_live_verification == [True]
+    finally:
+        writer.close()
+
+
 def test_rejected_review_retries_then_a_second_approval_reaches_done(tmp_path: Path) -> None:
     cfg, repo, writer, emitter, ctx = _setup(tmp_path)
     adapter = FakeHarnessAdapter(
@@ -181,11 +242,18 @@ def test_rejected_review_retries_then_a_second_approval_reaches_done(tmp_path: P
         base_branch: str,
         *,
         on_activity: Callable[[str], None] | None = None,
+        live_verification: bool = False,
     ) -> HarnessResult:
         call_count["n"] += 1
         if call_count["n"] == 2:
             _write_verdict(ctx.worktree_path, approved=True)
-        return real_review(task_id, spec_path, base_branch, on_activity=on_activity)
+        return real_review(
+            task_id,
+            spec_path,
+            base_branch,
+            on_activity=on_activity,
+            live_verification=live_verification,
+        )
 
     adapter.review = scripted_review  # type: ignore[method-assign]
 
@@ -217,6 +285,75 @@ def test_rejected_review_retries_then_a_second_approval_reaches_done(tmp_path: P
         # pass is what actually spends the second code-level attempt, not
         # the rejection itself.
         assert task.attempt_count == 2
+    finally:
+        writer.close()
+
+
+def test_second_consecutive_review_rejection_flags_a_repeat_event(tmp_path: Path) -> None:
+    """G7 (docs/v15-fixes-after-wa-chat-run.md): the real
+    `wa-chat-interactive-buttons-cta` shape -- a second consecutive
+    adversarial-review rejection on the same task should surface via a
+    dedicated event even though each individual rejection auto-retries
+    (`next_action=retry`, never `block`) and would otherwise be invisible
+    to an unattended overnight run until the task's `task_failures` history
+    is read by hand after the fact. Fires on the 2nd rejection, not the 3rd
+    -- the user's own decision was not to wait for a 3rd."""
+    cfg, repo, writer, emitter, ctx = _setup(tmp_path, max_attempts=2)
+    adapter = FakeHarnessAdapter(
+        cfg, cwd=ctx.worktree_path, script=ScriptedCall(FakeOutcome.SUCCESS)
+    )
+    gate = FakeGate(ScriptedGateResult(passed=True))
+
+    _write_verdict(ctx.worktree_path, approved=False, reason="first rejection")
+
+    call_count = {"n": 0}
+    real_review = adapter.review
+
+    def scripted_review(
+        task_id: str,
+        spec_path: Path,
+        base_branch: str,
+        *,
+        on_activity: Callable[[str], None] | None = None,
+        live_verification: bool = False,
+    ) -> HarnessResult:
+        call_count["n"] += 1
+        if call_count["n"] == 2:
+            _write_verdict(ctx.worktree_path, approved=False, reason="second rejection")
+        elif call_count["n"] == 3:
+            _write_verdict(ctx.worktree_path, approved=True)
+        return real_review(
+            task_id,
+            spec_path,
+            base_branch,
+            on_activity=on_activity,
+            live_verification=live_verification,
+        )
+
+    adapter.review = scripted_review  # type: ignore[method-assign]
+
+    try:
+        status = run_task(
+            ctx=ctx,
+            config=cfg,
+            writer=writer,
+            emitter=emitter,
+            adapter=adapter,
+            repo_path=repo,
+            gate_runner=_gate_runner(gate),
+        )
+
+        assert status is TaskStatus.DONE
+        assert call_count["n"] == 3
+
+        repeat_events = [
+            e
+            for e in list_events(cfg.paths.db_path, task_id=ctx.task_id, limit=200)
+            if e.event_type == "task.review_repeat_rejection"
+        ]
+        assert len(repeat_events) == 1
+        assert repeat_events[0].severity == "warning"
+        assert repeat_events[0].payload["consecutive_rejections"] == 2
     finally:
         writer.close()
 

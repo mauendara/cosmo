@@ -83,12 +83,24 @@ Rate-limit windows are the constraint that actually bites a subscription-billed
 overnight run. Cosmo detects exhaustion three ways, in descending order of
 confidence.
 
-**1. Primary — the harness's own structured signal.** The Claude adapter
-extracts a rate-limit signal from the CLI's stream output, giving a window
-(`five_hour` or `weekly`) and, when the wire carries one, a reset time.
-Confirmed. Only actionable on a *failed* call: a rate-limit signal seen
-mid-stream doesn't mean the call failed — the CLI's own internal retry often
-absorbs one and the call succeeds anyway.
+**1. Primary — the harness's own structured signal.** The native `claude`
+adapter extracts a rate-limit signal from the CLI's stream output, giving a
+window (`five_hour` or `weekly`) and, when the wire carries one, a reset
+time. Confirmed. Only actionable on a *failed* call: a rate-limit signal
+seen mid-stream doesn't mean the call failed — the CLI's own internal retry
+often absorbs one and the call succeeds anyway.
+
+On `ori-claude`, this primary signal never fires — confirmed by real
+invocation: OpenRouter emits no Anthropic-shaped rate-limit event.
+`ori-claude` runs always degrade straight to the secondary and tertiary
+detectors below; this is spec 7.2's documented fallback for a harness with
+no primary signal, not a gap specific to this adapter.
+
+Codex has the same fallback posture for a different reason. Its validated
+JSONL stream exposes token usage but no authoritative quota window, reset
+time, or USD cost. The Codex adapter therefore reports neither native quota
+nor native cost. Subscription limits must be managed in the Codex account,
+and Cosmo's USD ceilings cannot stop a Codex run from native spend data.
 
 **2. Secondary — the terminal result's error subtype**, matched against
 `quota.result_error_subtypes` (default `["error_rate_limit"]`). Also treated
@@ -125,13 +137,15 @@ spend-so-far.
 **This requires a non-zero `cost.max_cost_per_run_usd`.** Cosmo refuses to
 load a config with the bypass on and no spend ceiling — the bypass exists to
 remove the thing that would otherwise stop the spending, so it must not ship
-without the backstop that recreates it.
+without the backstop that recreates it. `bypass_5h_with_credits` is
+meaningless on `ori-claude` — there is no five-hour subscription window to
+bypass on a metered OpenRouter route — and stays inert if set there.
 
 ## Cost
 
 Two independent ceilings, both defaulting to `0.0`, which means *no hard
-stop* — the correct posture for a subscription-billed harness, where quota
-windows govern instead of dollars.
+stop* — the correct posture for native `claude`, a subscription-billed
+harness where quota windows govern instead of dollars.
 
 - **`cost.max_cost_per_run_usd`** — the whole run. A `run.cost_warning` event
   fires at `cost.warn_at_fraction` (default 80%); hitting the ceiling stops
@@ -139,7 +153,13 @@ windows govern instead of dollars.
 - **`cost.max_cost_per_task_usd`** — one task. Exceeding it blocks the task
   with `blocked_reason=cost` and moves on, rather than stopping the run.
 
-Set both if you're on metered billing.
+Set both if you're on metered billing — **and always set at least
+`max_cost_per_run_usd` before running `ori-claude` unattended.** Unlike
+native `claude`, `ori-claude` is metered per OpenRouter token regardless of
+account type, so the shipped `0.0` default leaves an unattended run with no
+spend hard stop at all. `[cost]` is shared across every harness — there is
+no per-harness cost table — so this ceiling applies to `claude` runs too
+once set.
 
 A cost-blocked task has a useful property: it can only ever legitimately
 clear by a human raising the ceiling, since the recorded cost never goes
@@ -197,7 +217,10 @@ At every run's startup:
 
 ## The permission model
 
-Specific to the Claude Code adapter, though the posture generalizes.
+Specific to the `claude` binary's own permission system — shared by both
+adapters that launch it (`claude` and `ori-claude`, confirmed identical by
+real invocation through both routes), though the posture generalizes to a
+future non-Claude-Code adapter too.
 
 - **`dontAsk` fails closed.** Only tool calls matching the allow-list
   execute. Nothing not explicitly allowed runs — the default is denial, not

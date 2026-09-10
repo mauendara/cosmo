@@ -13,8 +13,32 @@ name = "claude"
 permission_mode = "dontAsk"
 max_turns = 80
 # Not a spec value -- pinned so a run's model doesn't silently drift with
-# whatever the host's `claude` CLI happens to default to.
+# whatever the host's `claude` CLI happens to default to. Also the fallback
+# for any of propose_model/implement_model/review_model left unset -- set
+# those in a user config file to run PROPOSING/IMPLEMENTING/REVIEWING on
+# different models (e.g. opus for planning, sonnet for implementation, a
+# third model as a separate pair of eyes for adversarial review).
 model = "claude-sonnet-5"
+
+# Per-harness model overrides. Each harness's model namespace is its own; an
+# OpenRouter model id means nothing to native Claude Code and vice versa.
+# See HarnessConfig.resolve_model for the resolution order.
+#
+# ori-claude only reliably works with Anthropic models (found by hand,
+# 2026-09-04: a real ori bug 400s every non-Anthropic OpenRouter model --
+# see harness/ori/adapter.py's module docstring) -- an Anthropic id routed
+# through OpenRouter, as below, is the safe case for it.
+# [harness.overrides.ori-claude]
+# model = "anthropic/claude-sonnet-4.5"
+#
+# claude-openrouter has no such restriction -- talks to `claude` directly,
+# no `ori` involved (see harness/claude_openrouter/adapter.py) -- so this is
+# the one to use for a non-Anthropic model like the qwen3-coder/gpt-5 below.
+# [harness.overrides.claude-openrouter]
+# model = "anthropic/claude-sonnet-4.5"
+# propose_model = "openai/gpt-5"
+# implement_model = "qwen/qwen3-coder"
+# review_model = "google/gemini-2.5-pro"
 
 [timeouts]
 # Spec 3.3. All seconds. Anchored to an observed 5-15 min validation gate;
@@ -27,6 +51,10 @@ validating_stall = 600
 # v4 workflow changes: REVIEWING's own wall clock -- one bounded fresh-session
 # harness call, anchored to the same rough order of magnitude as proposing_wall.
 reviewing_wall = 900
+# G2: applied instead of reviewing_wall only when review.live_verification_keywords
+# matches the task's own spec content -- a review expected to replay a visual/e2e
+# suite live needs more than the diff-only default.
+reviewing_wall_live = 2700
 committing_wall = 300
 merging_wall = 300
 run_wall = 36000
@@ -42,6 +70,11 @@ delay_max = 60
 # terminal block matches this many *prior* terminal blocks for the same
 # reason -- see RetryConfig.repeat_block_threshold's own comment.
 repeat_block_threshold = 2
+# G1: adaptive IMPLEMENTING turn/wall-clock budget on repeated
+# max_turns_exhausted for the same task -- see RetryConfig's own comments.
+# Starting points to observe and retune, not conclusions reached from data.
+turn_budget_growth_factor = 1.5
+turn_budget_max_multiplier = 3.0
 
 [circuit_breaker]
 # Spec 6.5. merge_conflict and flaky are excluded from the tally.
@@ -107,6 +140,10 @@ max_file_lines = 400
 # and COMMITTING. A project can turn this off; the retry budget it uses is
 # retries.max_attempts, not a separate ceiling.
 enabled = true
+# G2: a case-insensitive substring match against the task's own spec/tasks.md
+# content selects timeouts.reviewing_wall_live over the diff-only default and
+# tells the reviewer a live check is expected for this task.
+live_verification_keywords = ["storybook", "visual regression", "playwright"]
 
 [progress]
 # Spec 4: "polling fallback at 5-10s". Also used as the native-progress poll

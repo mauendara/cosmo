@@ -21,7 +21,7 @@ from pathlib import Path
 from cosmo.config import CosmoConfig
 from cosmo.events import EventEmitter, EventType, Severity
 from cosmo.proc.managed import ManagedProcess
-from cosmo.proc.orphans import SweepResult, sweep
+from cosmo.proc.orphans import SweepResult, find_worktree_holders, sweep
 from cosmo.store.enums import FailureType
 
 
@@ -68,3 +68,35 @@ def cancel_and_reap(
             },
         )
     return outcome
+
+
+def sweep_orphans_after_completion(
+    *, run_id: str | None, task_id: str, worktree_path: Path, emitter: EventEmitter
+) -> list[int]:
+    """G3 (docs/v15-fixes-after-wa-chat-run.md): the ordinary-completion
+    counterpart to `cancel_and_reap`'s own worktree-holder backstop.
+    `cancel_and_reap` only ever runs from a forced cancellation (an
+    operator cancel, the cost guard tripping) -- an ordinary
+    success/failure/timeout ending never called it, which is how 12 stray
+    `vite preview`/`http-server` processes (backgrounded via a harness
+    session's own `Bash` calls, escaping the process group) accumulated
+    silently across several already-`done` tasks and drove real load
+    average to ~17-18.
+
+    Deliberately just the worktree-holder detection half, not the full
+    `sweep()` (which also does a `docker ps`/`docker rm -f` container
+    sweep keyed on `run_id`/`task_id` labels) -- there is no live process
+    handle to `killpg` here since the harness call already exited on its
+    own, so this can only ever detect and report, never kill, exactly like
+    `cancel_and_reap`'s own `worktree_holder_pids` case. Call this
+    unconditionally once a harness call returns, regardless of outcome."""
+    holders = find_worktree_holders(worktree_path)
+    if holders:
+        emitter.emit(
+            event_type=EventType.TASK_ORPHAN_DETECTED,
+            severity=Severity.WARNING,
+            run_id=run_id,
+            task_id=task_id,
+            payload={"worktree_holder_pids": holders},
+        )
+    return holders

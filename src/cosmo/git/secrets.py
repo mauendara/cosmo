@@ -14,12 +14,22 @@ file is ever deleted or a worktree is created before this has run.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import stat
 import subprocess
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
+
+# G5 (docs/v15-fixes-after-wa-chat-run.md): a real, regenerable, gitignored
+# `frontend/storybook-static/` build artifact false-flagged gitleaks'
+# `generic-api-key` rule on minified vendor JS and blocked an otherwise-
+# correct task. These are excluded unconditionally, even when the dynamic
+# `git status --ignored` lookup below finds nothing or the worktree isn't a
+# git repo for some reason -- cheap, and covers the exact real incident
+# regardless of the dynamic exclusion's edge cases.
+_STATIC_BUILD_OUTPUT_DIRS = ("dist", "build", "storybook-static", "node_modules")
 
 HOOK_MARKER = "# cosmo:gitleaks-pre-commit -- managed by Cosmo, safe to overwrite"
 
@@ -114,6 +124,49 @@ class GitleaksScanResult:
     ran: bool = True  # False when gitleaks itself was unavailable (environment_error)
 
 
+def _gitignored_paths(worktree_path: Path) -> list[str]:
+    """Paths `git` itself considers ignored under `worktree_path`, relative
+    to it -- both directories and files, per `git status --ignored`'s
+    `!!`-prefixed porcelain lines. Best-effort: an error here (not a git
+    repo, `git` missing) just means the dynamic exclusion finds nothing,
+    falling back to `_STATIC_BUILD_OUTPUT_DIRS` alone."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(worktree_path), "status", "--ignored", "--porcelain"],
+            capture_output=True,
+            text=True,
+            timeout=30.0,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    if result.returncode != 0:
+        return []
+    paths = []
+    for line in result.stdout.splitlines():
+        if line.startswith("!! "):
+            paths.append(line[3:].strip())
+    return paths
+
+
+def _gitleaks_allowlist_config(worktree_path: Path) -> str:
+    """A gitleaks config (`[extend] useDefault = true`, confirmed by hand to
+    keep every default rule active) that additionally allowlists gitignored
+    paths and known build-output directory names, so a regenerable,
+    never-committed build artifact can't false-flag the scan (G5)."""
+    patterns = {re.escape(p) for p in _gitignored_paths(worktree_path)}
+    patterns.update(re.escape(d) for d in _STATIC_BUILD_OUTPUT_DIRS)
+    paths = "\n".join(f"  '''{p}'''," for p in sorted(patterns))
+    return f"""[extend]
+useDefault = true
+
+[allowlist]
+paths = [
+{paths}
+]
+"""
+
+
 def run_gitleaks_scan(worktree_path: Path, *, gitleaks_bin: str = "gitleaks") -> GitleaksScanResult:
     """Spec 6.1's gate-side backstop -- the second, non-bypassable secret
     layer alongside the pre-commit hook, since local hooks are bypassable
@@ -123,12 +176,20 @@ def run_gitleaks_scan(worktree_path: Path, *, gitleaks_bin: str = "gitleaks") ->
     the final state of this task's work contain a secret," not re-scanning
     every commit already on `develop`. Detection only -- "any secret that
     reaches a commit is treated as compromised and requires rotation";
-    remediation is a human's job, never automated here."""
+    remediation is a human's job, never automated here.
+
+    Excludes gitignored paths and known build-output directories (G5,
+    `docs/v15-fixes-after-wa-chat-run.md`) via a generated gitleaks config
+    rather than post-filtering findings by path -- a regenerable,
+    never-committed artifact like `storybook-static/` shouldn't be able to
+    block an otherwise-correct task on noise in bundled vendor JS."""
     if shutil.which(gitleaks_bin) is None:
         return GitleaksScanResult(clean=False, ran=False)
 
     with tempfile.TemporaryDirectory() as tmp:
         report_path = Path(tmp) / "gitleaks-report.json"
+        config_path = Path(tmp) / "gitleaks.toml"
+        config_path.write_text(_gitleaks_allowlist_config(worktree_path))
         result = subprocess.run(
             [
                 gitleaks_bin,
@@ -136,6 +197,8 @@ def run_gitleaks_scan(worktree_path: Path, *, gitleaks_bin: str = "gitleaks") ->
                 "--no-git",
                 "--no-banner",
                 "--redact",
+                "-c",
+                str(config_path),
                 "-f",
                 "json",
                 "-r",

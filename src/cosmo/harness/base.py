@@ -104,13 +104,22 @@ class HarnessAdapter(ABC):
 
     @abstractmethod
     def probe(
-        self, prompt: str, *, on_activity: Callable[[str], None] | None = None
+        self,
+        prompt: str,
+        *,
+        on_activity: Callable[[str], None] | None = None,
+        model: str | None = None,
     ) -> HarnessResult:
         """Run a single raw prompt through the harness and return the uniform
         result. A second extension to spec 2.2 (see `preflight()` above):
         `cosmo harness probe` (plan Phase 3 exit criterion) needs a
         harness-agnostic smoke-test entry point that doesn't presuppose an
-        OpenSpec change on disk the way `propose`/`implement` do.
+        OpenSpec change on disk the way `propose`/`implement` do. `cosmo
+        spec add`'s enrichment/decomposition call also goes through here
+        (it has no OpenSpec change on disk yet either), which is why `model`
+        exists as a caller-supplied override -- unlike `propose`/`implement`/
+        `review`, this method has no fixed state-machine role of its own to
+        resolve a config override from internally.
 
         `on_activity`, if given, is called with one short human-readable
         line per notable live event (a tool call, session start) -- a
@@ -119,6 +128,10 @@ class HarnessAdapter(ABC):
         reads. Deliberately a plain string here, not a harness-specific
         event type: keeps `task.machine`/`run.loop` harness-agnostic, same
         reasoning as `HarnessResult` itself.
+
+        `model`, if given, overrides `config.harness.model` for this call
+        only. `None` (the default) uses the harness's own configured
+        default.
         """
 
     @abstractmethod
@@ -138,7 +151,15 @@ class HarnessAdapter(ABC):
         retry_context: str | None = None,
         *,
         on_activity: Callable[[str], None] | None = None,
-    ) -> HarnessResult: ...
+        max_turns: int | None = None,
+    ) -> HarnessResult:
+        """`max_turns`, if given, overrides `config.harness.max_turns` for
+        this call only (G1, `docs/v15-fixes-after-wa-chat-run.md`):
+        `task.machine._do_implementing` widens it on a task that has
+        already exhausted the default budget in a row, rather than every
+        task paying for a wider budget upfront. `None` (the default) uses
+        the harness's own configured default. A harness with no turn-count
+        concept of its own (e.g. Codex) accepts and ignores it."""
 
     @abstractmethod
     def review(
@@ -148,6 +169,7 @@ class HarnessAdapter(ABC):
         base_branch: str,
         *,
         on_activity: Callable[[str], None] | None = None,
+        live_verification: bool = False,
     ) -> HarnessResult:
         """v4 workflow changes (`docs/v4-changes-to-workflow-plan.md`): a
         genuinely fresh, separate call -- no session resumption, no
@@ -167,7 +189,15 @@ class HarnessAdapter(ABC):
         stream" shape `HarnessCapabilities.reports_native_progress=False`
         already uses for `tasks.md` -- and `task.machine._do_reviewing`
         reads it back after this call returns, harness-agnostically.
-        """
+
+        `live_verification` (G2, `docs/v15-fixes-after-wa-chat-run.md`):
+        `False` (the default) means judge from the diff and the gate's
+        already-passing build/test/lint output alone -- do not re-run
+        servers or test suites. `True` means this task's own spec content
+        matched a live/visual-verification keyword and a real check is
+        expected, paired with `task.machine`'s own longer
+        `timeouts.reviewing_wall_live` budget for the same call. A harness
+        with no distinct review prompt of its own accepts and ignores it."""
 
     @abstractmethod
     def get_progress(self, task_id: str) -> tuple[int, int]:
