@@ -2,8 +2,9 @@
 
 Thanks for looking. Two contributions are especially wanted:
 
-- **A harness adapter** for another coding agent — Codex CLI, OpenCode,
-  anything with a CLI. The interface is stable, documented, and
+- **A harness adapter** for another coding agent — OpenCode, Cursor,
+  anything with a CLI. (`claude`, `ori-claude`, `claude-openrouter`, and
+  `codex` already ship.) The interface is stable, documented, and
   test-enforced: [write-a-new-adapter](user-docs/en/how-to/write-a-new-adapter.md).
 - **A project template** for a stack the shipped ones don't cover:
   [add-project-template](user-docs/en/how-to/add-project-template.md).

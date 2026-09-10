@@ -4,18 +4,19 @@
 
 > Nota: esta traducción puede no estar actualizada. El inglés es la fuente canónica de esta documentación — consulta la [versión en inglés](README.md).
 
-> **v0.1.1 — no listo para producción.** Las pruebas en
+> **v0.2.0 — pre-lanzamiento, no listo para producción.** Las pruebas en
 > el mundo real hasta ahora se han limitado al harness nativo `claude` con
 > una suscripción Pro de $20/mes, contra proyectos greenfield pequeños
 > construidos sobre la plantilla `vite-react-local` (stack solo de
-> frontend). Un segundo harness, `ori-claude` (el mismo binario `claude`
-> enrutado a través de [Ori](https://openrouter.ai/labs/ori) hacia
-> OpenRouter, con tarifa medida por token), está implementado y su
-> mecánica de adaptador validada por invocación real, pero no ha pasado por
-> una ejecución de aceptación nocturna con múltiples tareas de la forma en
-> que sí lo hizo `claude` nativo. Los repositorios más grandes o brownfield
-> y las plantillas que incluyen backend tampoco están probados a fondo.
-> Espera asperezas fuera del camino ya recorrido.
+> frontend). Otros tres harnesses — `ori-claude` y `claude-openrouter`
+> (ambos enrutando el binario `claude` hacia OpenRouter para modelos
+> no-Anthropic o sin suscripción) y `codex` (el CLI de OpenAI Codex) —
+> están implementados y su mecánica de adaptador validada por invocación
+> real, pero ninguno ha pasado por una ejecución de aceptación nocturna con
+> múltiples tareas de la forma en que sí lo hizo `claude` nativo. Los
+> repositorios más grandes o brownfield y las plantillas que incluyen
+> backend tampoco están probados a fondo. Espera asperezas fuera del camino
+> ya recorrido.
 
 **Un agente de codificación que trabaja toda la noche te dirá que terminó. Cosmo no
 se queda con su palabra.**
@@ -134,11 +135,15 @@ Luego `cosmo doctor` para verificar que el host tiene git, Docker, `openspec`,
 
 Cosmo nunca invoca directamente un CLI de agente de codificación. Cada llamada pasa
 por una única interfaz de adaptador, y ningún código de orquestación se ramifica
-según qué harness esté configurado. **Hoy hay dos adaptadores implementados**:
-`claude` (Claude Code nativo) y `ori-claude` (el mismo binario `claude` enrutado
-a través de Ori hacia OpenRouter, para ejecutar modelos no-Anthropic o sin
-suscripción) — eso es un punto de partida, no el techo. Escribir otro es una
-sola clase: [write-a-new-adapter](user-docs/es/how-to/write-a-new-adapter.md).
+según qué harness esté configurado. **Hoy hay cuatro adaptadores implementados**:
+`claude` (Claude Code nativo), `ori-claude` (el mismo binario `claude` enrutado
+a través de Ori hacia OpenRouter), `claude-openrouter` (el binario `claude`
+nativo hablando directo con OpenRouter, sin un proceso `ori` de por medio), y
+`codex` (el CLI de OpenAI Codex, una herramienta subyacente genuinamente
+distinta) — eso es un punto de partida, no el techo. Escribir otro es una
+sola clase: [write-a-new-adapter](user-docs/es/how-to/write-a-new-adapter.md);
+ver también [use-codex-harness](user-docs/es/how-to/use-codex-harness.md)
+para la configuración específica de Codex.
 
 ## Tus skills y agentes propios se sobrescriben — lee esto antes de confiar en alguno
 
@@ -176,20 +181,19 @@ sea visible, no como un compromiso:
 - **Un wrapper de MCP** alrededor de la cola y el control de ejecución, para
   que un editor u otro agente pueda controlar Cosmo sin invocar el CLI
   directamente.
-- **Un adaptador y una plantilla de harness para OpenCode (o Cursor/Codex)**
-  — una tercera implementación de `HarnessAdapter` y una herramienta
-  subyacente genuinamente distinta, no solo otra ruta hacia Claude Code
-  como lo es `ori-claude`. El diseño agnóstico de harness ya está probado
-  contra un segundo adaptador real; esto lo probaría contra una segunda
-  *herramienta* real, con su propio formato de stream y su propia historia
-  de gating por construir desde cero.
+- **Un adaptador y una plantilla de harness para OpenCode (o Cursor)** —
+  otra implementación de `HarnessAdapter` para una herramienta subyacente
+  genuinamente distinta, no solo otra ruta hacia una ya existente como lo
+  son `ori-claude` y `claude-openrouter`. El diseño agnóstico de harness ya
+  está probado contra dos herramientas reales independientes (`claude` y
+  `codex`); esto lo probaría contra una tercera, con su propio formato de
+  stream y su propia historia de gating por construir desde cero.
 - **Una pequeña webapp para monitorear ejecuciones** — una vista de solo
   lectura sobre el registro de eventos y el estado de la cola, para seguir
   una ejecución nocturna sin usar `cosmo events tail` en una terminal.
 
-¿Quieres construir alguna? [write-a-new-adapter](user-docs/es/how-to/write-a-new-adapter.md)
-es el punto de partida para un tercer adaptador; abre un issue para
-discutir las otras dos.
+¿Quieres construirlo? [write-a-new-adapter](user-docs/es/how-to/write-a-new-adapter.md)
+es el punto de partida; abre un issue para discutirlo primero.
 
 ## Licencia
 
